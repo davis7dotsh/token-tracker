@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+release_root=${TOKEN_TRACKER_RELEASE_ROOT:-"$HOME/.local/lib/token-tracker"}
+export TOKEN_TRACKER_CLI_ARG_COUNT=$#
+
+argument_index=0
+for argument do
+  export "TOKEN_TRACKER_CLI_ARG_${argument_index}=$argument"
+  argument_index=$((argument_index + 1))
+done
+
+exec "$release_root/bin/token_tracker" eval "TokenTracker.CLI.main_from_env()"

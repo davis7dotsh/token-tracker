@@ -1,0 +1,12 @@
+/_build/
+/cover/
+/deps/
+/doc/
+/.token-tracker/
+/token-tracker
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+/.elixir_ls/
+erl_crash.dump
+*.ez
