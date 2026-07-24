@@ -15,6 +15,7 @@ defmodule TokenTracker.Sessions do
   }
 
   @counter_fields Counters.fields()
+  @insert_chunk_size 500
   @snapshot_fields [
     :device_id,
     :session_key,
@@ -409,7 +410,9 @@ defmodule TokenTracker.Sessions do
         |> Map.put(:session_key, snapshot.session_key)
       end)
 
-    unless rows == [], do: Repo.insert_all(SessionUsageHourly, rows)
+    rows
+    |> Enum.chunk_every(@insert_chunk_size)
+    |> Enum.each(&Repo.insert_all(SessionUsageHourly, &1))
   end
 
   defp put_outbox(snapshot) do

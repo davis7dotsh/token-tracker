@@ -5,6 +5,7 @@ defmodule TokenTracker.Storage do
 
   alias TokenTracker.{FileCheckpoint, Repo, UsageEvent}
 
+  @insert_chunk_size 500
   @replace_fields [
     :session_key,
     :occurred_at,
@@ -53,12 +54,14 @@ defmodule TokenTracker.Storage do
       existing = existing_keys(events)
       rows = Enum.map(events, &Map.take(&1, [:event_key | @replace_fields]))
 
-      unless rows == [] do
-        Repo.insert_all(UsageEvent, rows,
+      rows
+      |> Enum.chunk_every(@insert_chunk_size)
+      |> Enum.each(fn chunk ->
+        Repo.insert_all(UsageEvent, chunk,
           on_conflict: {:replace, @replace_fields},
           conflict_target: :event_key
         )
-      end
+      end)
 
       if checkpoint do
         now = DateTime.utc_now()

@@ -78,6 +78,36 @@ defmodule TokenTracker.MultiDeviceSyncTest do
     assert Sessions.reconcile_local(config) == %{changed: 0, unchanged: 0, pending: 0}
   end
 
+  test "stores snapshots whose hourly rows exceed SQLite's bind-variable limit" do
+    config = client_config()
+    session_key = TokenTracker.Hash.stable(["large-session"])
+    Sessions.ensure_local_device(config)
+
+    events =
+      Enum.map(1..2_400, fn index ->
+        %UsageEvent{
+          event_key: TokenTracker.Hash.stable(["large-session-event", index]),
+          session_key: session_key,
+          occurred_at: ~U[2026-07-23 10:00:00.000000Z],
+          project: "project-#{index}",
+          agent: "codex",
+          provider: "openai",
+          model: "gpt-test",
+          input_tokens: index,
+          output_tokens: 0,
+          reasoning_tokens: 0,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+          session_starts: 0
+        }
+      end)
+
+    snapshot = Sessions.build_snapshot(config.device_id, events)
+
+    assert Sessions.put_snapshot(snapshot, false) == :changed
+    assert Repo.aggregate(SessionUsageHourly, :count) == 2_400
+  end
+
   test "host accepts new and duplicate revisions and harmlessly acknowledges stale ones" do
     host = host_config()
     Sessions.ensure_local_device(host)
