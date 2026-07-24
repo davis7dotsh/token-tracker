@@ -248,6 +248,7 @@ defmodule TokenTracker.DashboardTest do
 
     assert spa_conn.status == 200
     assert get_resp_header(spa_conn, "cache-control") == ["no-cache"]
+    assert get_resp_header(spa_conn, "content-type") |> hd() =~ "text/html"
 
     File.rm!(index_path)
 

@@ -23,14 +23,18 @@ defmodule TokenTracker.Scheduler do
   end
 
   def run_cycle(config, opts \\ []) do
-    Collector.collect()
+    collector = Keyword.get(opts, :collector, &Collector.collect/0)
+    reconciler = Keyword.get(opts, :reconciler, &Sessions.reconcile_local/1)
+
+    collector.()
     Sessions.put_state("last_collection_at", DateTime.utc_now() |> DateTime.to_iso8601())
 
-    Sessions.reconcile_local(config)
+    reconciler.(config)
 
     if config.role == "client" do
       Sync.Client.sync_once(config, opts)
     else
+      Sessions.put_state("last_sync_error", nil)
       %{batches: 0, accepted: 0, rejected: 0, pending: 0, error: nil}
     end
   rescue

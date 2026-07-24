@@ -168,14 +168,14 @@ defmodule TokenTracker.Config do
         {:error,
          "network.name_mode is \"long\", so network.address must be an IP address or fully qualified hostname"}
 
-      config.name_mode == "long" and config.role == "client" and
+      config.name_mode == "long" and config.role in ["host", "client"] and
           not long_address?(config.host_address) ->
         {:error,
          "network.name_mode is \"long\", so network.host_address must be an IP address or fully qualified hostname"}
 
       config.name_mode == "short" and
           (long_address?(config.address) or
-             (config.role == "client" and long_address?(config.host_address))) ->
+             (config.role in ["host", "client"] and long_address?(config.host_address))) ->
         {:error,
          "network.name_mode is \"short\", so network addresses must be simple hostnames without dots or colons"}
 
@@ -304,6 +304,7 @@ defmodule TokenTracker.Config do
   end
 
   defp parse_value("\"" <> _ = value), do: Jason.decode(value)
+  defp parse_value("null"), do: {:ok, nil}
   defp parse_value("true"), do: {:ok, true}
   defp parse_value("false"), do: {:ok, false}
 
@@ -338,7 +339,7 @@ defmodule TokenTracker.Config do
     |> Enum.join()
   end
 
-  defp string(nil), do: "\"\""
+  defp string(nil), do: "null"
   defp string(value), do: Jason.encode!(value)
 
   defp hex(value, width) do

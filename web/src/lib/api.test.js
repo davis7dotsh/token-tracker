@@ -5,4 +5,6 @@ import { money, number } from './api.ts';
 test('formats compact token totals and currency', () => {
 	assert.match(number(1_500_000), /1\.5M/);
 	assert.match(money(12.5), /12\.50/);
+	assert.match(money(0.0012), /0\.0012/);
+	assert.match(money(0), /0\.00/);
 });

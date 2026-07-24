@@ -104,8 +104,13 @@ export const number = (value: number) =>
 		notation: value >= 1_000_000 ? 'compact' : 'standard'
 	}).format(value);
 
-export const money = (value: number) =>
-	new Intl.NumberFormat(undefined, {
+export const money = (value: number) => {
+	const precision = Math.abs(value) > 0 && Math.abs(value) < 0.01 ? 4 : 2;
+
+	return new Intl.NumberFormat(undefined, {
 		style: 'currency',
-		currency: 'USD'
+		currency: 'USD',
+		minimumFractionDigits: precision,
+		maximumFractionDigits: precision
 	}).format(value);
+};

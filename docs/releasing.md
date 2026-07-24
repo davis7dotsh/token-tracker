@@ -36,7 +36,9 @@ creates the GitHub Release using its short-lived GitHub App token.
 An existing tag can be retried with:
 
 ```sh
-depot ci dispatch --workflow .depot/workflows/release.yml \
+depot ci dispatch --repo davis7dotsh/token-tracker \
+  --workflow release.yml \
+  --ref v0.4.0 \
   --input tag=v0.4.0
 ```
 

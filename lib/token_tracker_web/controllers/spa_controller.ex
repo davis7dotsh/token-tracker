@@ -12,6 +12,7 @@ defmodule TokenTrackerWeb.SpaController do
     if File.regular?(path) do
       conn
       |> put_resp_header("cache-control", "no-cache")
+      |> put_resp_content_type("text/html")
       |> send_file(200, path)
     else
       conn

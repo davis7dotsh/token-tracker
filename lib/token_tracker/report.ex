@@ -46,7 +46,11 @@ defmodule TokenTracker.Report do
     models = Enum.map(rows, &%{provider: &1.provider, model: &1.model}) |> Enum.uniq()
     pricing = Keyword.get_lazy(opts, :pricing, fn -> Pricing.load(models) end)
     today = local_today()
-    today_rows = Enum.filter(rows, &(local_date(&1.hour_utc) == today))
+
+    today_rows =
+      device
+      |> combined_rows(DateTime.add(DateTime.utc_now(), -172_800, :second))
+      |> Enum.filter(&(local_date(&1.hour_utc) == today))
 
     IO.puts("Token Tracker — Combined host summary")
     if device, do: IO.puts("Device filter: #{device}")
@@ -98,7 +102,7 @@ defmodule TokenTracker.Report do
     |> take_limit(all?)
   end
 
-  def combined_rows(device \\ nil) do
+  def combined_rows(device \\ nil, earliest \\ nil) do
     base =
       from(row in SessionUsageHourly,
         join: device_row in Device,
@@ -123,13 +127,21 @@ defmodule TokenTracker.Report do
       )
 
     query =
-      if device do
-        from([row, device_row] in base,
-          where: device_row.device_id == ^device or device_row.name == ^device
-        )
-      else
-        base
-      end
+      base
+      |> then(fn query ->
+        if device do
+          from([row, device_row] in query,
+            where: device_row.device_id == ^device or device_row.name == ^device
+          )
+        else
+          query
+        end
+      end)
+      |> then(fn query ->
+        if earliest,
+          do: from([row, _device_row] in query, where: row.hour_utc >= ^earliest),
+          else: query
+      end)
 
     Repo.all(query)
   end

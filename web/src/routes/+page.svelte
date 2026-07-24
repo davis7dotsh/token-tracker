@@ -11,6 +11,8 @@
 		type View
 	} from '$lib/api';
 	import {
+		maxFilterValueLength,
+		maxFilterValues,
 		reportDependency,
 		type ReportParamKey,
 		updateReportParam,
@@ -51,7 +53,8 @@
 		{ key: 'agent', label: 'agent', options: 'agents' },
 		{ key: 'model', label: 'model', options: 'models' }
 	] as const;
-	const maxFilterValues = 10;
+	let pendingFilters = $state<Partial<Record<FilterKey, string[]>>>({});
+	let pendingReportUrl: URL | null = null;
 	const report = $derived(data.report);
 	const chart = $derived(validChart(params.chart) as Chart);
 	const maxTokens = $derived(
@@ -70,8 +73,10 @@
 	);
 
 	const selected = (key: FilterKey) =>
-		params[key]
-			.filter((value) => value.length > 0 && value.length <= 160)
+		(pendingFilters[key] ?? params[key])
+			.filter(
+				(value) => value.length > 0 && value.length <= maxFilterValueLength
+			)
 			.slice(0, maxFilterValues);
 	const filterOptions = (
 		key: (typeof filters)[number]['options'],
@@ -135,23 +140,41 @@
 	}
 
 	function setFilter(key: FilterKey, values: string[]) {
-		reloadReport(key, values);
+		pendingFilters[key] = values;
+		void reloadReport(key, values);
 	}
 
-	function reloadReport(key: ReportParamKey, value: string | string[]) {
-		void updateReportParam(page.url, key, value, (target) =>
-			goto(
-				resolve(
-					`/?${target.searchParams.toString()}${target.hash}` as `/?${string}`
-				),
-				{
-					replaceState: true,
-					noScroll: true,
-					keepFocus: true,
-					invalidate: [reportDependency]
+	async function reloadReport(key: ReportParamKey, value: string | string[]) {
+		const current = pendingReportUrl ?? page.url;
+		const changed = await updateReportParam(
+			current,
+			key,
+			value,
+			async (target) => {
+				pendingReportUrl = target;
+
+				try {
+					await goto(
+						resolve(
+							`/?${target.searchParams.toString()}${target.hash}` as `/?${string}`
+						),
+						{
+							replaceState: true,
+							noScroll: true,
+							keepFocus: true,
+							invalidate: [reportDependency]
+						}
+					);
+				} finally {
+					if (pendingReportUrl?.href === target.href) {
+						pendingReportUrl = null;
+						pendingFilters = {};
+					}
 				}
-			)
+			}
 		);
+
+		if (!changed && pendingReportUrl === null) pendingFilters = {};
 	}
 
 	function linePoints(seriesKey: string) {

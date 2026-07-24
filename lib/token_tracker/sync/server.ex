@@ -22,6 +22,9 @@ defmodule TokenTracker.Sync.Server do
       ) do
     reply =
       cond do
+        not is_binary(device_id) ->
+          protocol_error(batch_id, "device_id must be a string")
+
         not is_list(snapshots) ->
           protocol_error(batch_id, "snapshots must be a list")
 

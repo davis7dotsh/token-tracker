@@ -134,6 +134,20 @@ defmodule TokenTracker.MultiDeviceSyncTest do
     assert rejected.reason =~ "digest"
   end
 
+  test "protocol rejects a non-string device identity without restarting the server" do
+    config = host_config()
+    server = start_supervised!({Server, config})
+    batch_id = Config.generate_id()
+
+    assert {:sync_error, 1, ^batch_id, "device_id must be a string"} =
+             GenServer.call(
+               server,
+               {:sync_sessions, 1, %{malformed: true}, "token", batch_id, []}
+             )
+
+    assert Process.alive?(server)
+  end
+
   test "malformed non-map snapshot is rejected without blocking a valid sibling" do
     config = host_config()
     {:ok, enrolled} = Sessions.enroll_device("remote")
@@ -197,6 +211,33 @@ defmodule TokenTracker.MultiDeviceSyncTest do
     assert offline.pending == 1
     assert Repo.one!(SessionOutbox).attempt_count == 2
     assert Sessions.get_state("last_sync_error") == "unreachable"
+  end
+
+  test "removing the last local event clears local aggregates without a remote tombstone" do
+    config = client_config()
+    insert_event("removed-session", "removed-event", ~U[2026-07-23 10:00:00.000000Z], 10, 1)
+    assert Sessions.reconcile_local(config).changed == 1
+    assert Repo.aggregate(SessionSnapshot, :count) == 1
+    assert Repo.aggregate(SessionUsageHourly, :count) == 1
+    assert Repo.aggregate(SessionOutbox, :count) == 1
+
+    Repo.delete_all(UsageEvent)
+
+    assert Sessions.reconcile_local(config) == %{changed: 1, unchanged: 0, pending: 0}
+    assert Repo.aggregate(SessionSnapshot, :count) == 0
+    assert Repo.aggregate(SessionUsageHourly, :count) == 0
+    assert Repo.aggregate(SessionOutbox, :count) == 0
+  end
+
+  test "a successful host cycle clears an earlier synchronization error" do
+    Sessions.put_state("last_sync_error", "temporary failure")
+
+    assert TokenTracker.Scheduler.run_cycle(host_config(),
+             collector: fn -> :ok end,
+             reconciler: fn _config -> %{changed: 0, unchanged: 0, pending: 0} end
+           ).error == nil
+
+    assert Sessions.get_state("last_sync_error") == nil
   end
 
   test "hourly aggregation preserves per-event context pricing tiers" do

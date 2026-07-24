@@ -165,7 +165,12 @@ defmodule TokenTracker.Service do
 
   defp systemd_escape(value) do
     if String.match?(value, ~r/[\s"'\\]/) do
-      ("\"" <> String.replace(value, ["\\"], "\\\\")) |> Kernel.<>("\"")
+      escaped =
+        value
+        |> String.replace("\\", "\\\\")
+        |> String.replace("\"", "\\\"")
+
+      "\"" <> escaped <> "\""
     else
       value
     end

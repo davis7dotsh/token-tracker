@@ -42,24 +42,26 @@ defmodule TokenTracker.Runtime do
   def child_specs(config), do: [{Scheduler, config}]
 
   defp configure_web(%{role: "host", web_enabled: true} = config) do
-    Application.put_env(:token_tracker, TokenTrackerWeb.Endpoint,
-      adapter: Bandit.PhoenixAdapter,
-      http: [ip: parse_ip!(config.web_bind), port: config.web_port],
-      render_errors: [formats: [json: TokenTrackerWeb.ErrorJSON]],
-      secret_key_base: String.duplicate("token-tracker-local-only-", 4),
-      server: true,
-      url: [host: config.web_bind, port: config.web_port]
-    )
+    with {:ok, ip} <- parse_ip(config.web_bind) do
+      Application.put_env(:token_tracker, TokenTrackerWeb.Endpoint,
+        adapter: Bandit.PhoenixAdapter,
+        http: [ip: ip, port: config.web_port],
+        render_errors: [formats: [json: TokenTrackerWeb.ErrorJSON]],
+        secret_key_base: String.duplicate("token-tracker-local-only-", 4),
+        server: true,
+        url: [host: config.web_bind, port: config.web_port]
+      )
 
-    :ok
+      :ok
+    end
   end
 
   defp configure_web(_config), do: :ok
 
-  defp parse_ip!(address) do
+  defp parse_ip(address) do
     case :inet.parse_ipv4_address(String.to_charlist(address)) do
-      {:ok, parsed} -> parsed
-      _ -> raise ArgumentError, "invalid web bind address #{inspect(address)}"
+      {:ok, parsed} -> {:ok, parsed}
+      _ -> {:error, "invalid web bind address #{inspect(address)}"}
     end
   end
 end

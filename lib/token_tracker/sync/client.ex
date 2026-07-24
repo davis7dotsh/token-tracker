@@ -73,7 +73,7 @@ defmodule TokenTracker.Sync.Client do
   end
 
   defp remote_call(config, message, timeout, opts) do
-    network_opts = Keyword.take(opts, [:node_name])
+    network_opts = Keyword.take(opts, [:node_name, :transient])
 
     with :ok <- Network.start(config, network_opts),
          :ok <- Network.connect(config) do

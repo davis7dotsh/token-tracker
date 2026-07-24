@@ -60,6 +60,7 @@ defmodule TokenTracker.MixProject do
       "assets.install": ["cmd --cd web pnpm install --frozen-lockfile"],
       "assets.build": ["cmd --cd web pnpm build"],
       "assets.check": [
+        "assets.install",
         "cmd --cd web pnpm format:check",
         "cmd --cd web pnpm check",
         "cmd --cd web pnpm lint",

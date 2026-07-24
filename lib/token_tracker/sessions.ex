@@ -44,7 +44,10 @@ defmodule TokenTracker.Sessions do
         result =
           case session_events do
             [] ->
-              result
+              case delete_local_snapshot(device_id, entry.session_key) do
+                :unchanged -> result
+                :changed -> Map.update!(result, :changed, &(&1 + 1))
+              end
 
             events ->
               snapshot = build_snapshot(device_id, events)
@@ -228,9 +231,9 @@ defmodule TokenTracker.Sessions do
 
   def get_device(device_id), do: Repo.get(Device, device_id)
 
-  def enroll_device(name, node_name \\ nil) do
-    device_id = TokenTracker.Config.generate_id()
-    token = TokenTracker.Config.generate_secret()
+  def enroll_device(name, node_name \\ nil, opts \\ []) do
+    device_id = Keyword.get(opts, :device_id, TokenTracker.Config.generate_id())
+    token = Keyword.get(opts, :token, TokenTracker.Config.generate_secret())
     now = now()
 
     Repo.insert_all(Device, [
@@ -323,6 +326,32 @@ defmodule TokenTracker.Sessions do
         where: snapshot.device_id == ^device_id and snapshot.session_key == ^session_key
       )
     )
+  end
+
+  defp delete_local_snapshot(device_id, session_key) do
+    Repo.transaction(fn ->
+      Repo.delete_all(
+        from(row in SessionUsageHourly,
+          where: row.device_id == ^device_id and row.session_key == ^session_key
+        )
+      )
+
+      {snapshots, _} =
+        Repo.delete_all(
+          from(row in SessionSnapshot,
+            where: row.device_id == ^device_id and row.session_key == ^session_key
+          )
+        )
+
+      {outbox, _} =
+        Repo.delete_all(from(row in SessionOutbox, where: row.session_key == ^session_key))
+
+      if snapshots + outbox > 0, do: :changed, else: :unchanged
+    end)
+    |> case do
+      {:ok, result} -> result
+      {:error, reason} -> raise "could not remove local session: #{inspect(reason)}"
+    end
   end
 
   defp replace_snapshot(snapshot) do

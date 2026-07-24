@@ -33,14 +33,18 @@ defmodule TokenTracker.Dashboard do
 
     with {:ok, query} <- validate_params(params),
          {:ok, window} <- time_window(query.period, query.time_zone, now) do
-      rows =
-        window.start_utc
-        |> query_rows(window.end_utc)
-        |> filter_rows(query.filters)
+      unfiltered_rows = query_rows(window.start_utc, window.end_utc)
+      rows = filter_rows(unfiltered_rows, query.filters)
 
       all_usage? = any_usage?(window)
-      pricing = pricing_loader.(Enum.map(rows, &%{provider: &1.provider, model: &1.model}))
-      report = build_report(rows, query, window, pricing, all_usage?)
+
+      pricing =
+        rows
+        |> Enum.map(&%{provider: &1.provider, model: &1.model})
+        |> Enum.uniq()
+        |> pricing_loader.()
+
+      report = build_report(rows, unfiltered_rows, query, window, pricing, all_usage?)
       stale_devices = stale_devices(query.filters["device"], now)
 
       {:ok,
@@ -288,7 +292,7 @@ defmodule TokenTracker.Dashboard do
     |> Repo.one()
   end
 
-  defp build_report(rows, query, window, pricing, all_usage?) do
+  defp build_report(rows, unfiltered_rows, query, window, pricing, all_usage?) do
     top_keys =
       rows
       |> Enum.group_by(&dimension(&1, query.view))
@@ -345,7 +349,7 @@ defmodule TokenTracker.Dashboard do
       bars: bars,
       totals: totals,
       combined: combined_wire(rows, pricing),
-      options: options(window),
+      options: options(unfiltered_rows),
       hasUsage: all_usage?,
       hasMatches: rows != [],
       truncated: Map.has_key?(grouped_rows, :overflow)
@@ -468,9 +472,7 @@ defmodule TokenTracker.Dashboard do
 
   defp qualities(rows), do: rows |> Enum.map(& &1.quality) |> Enum.uniq() |> Enum.sort()
 
-  defp options(window) do
-    rows = query_rows(window.start_utc, window.end_utc)
-
+  defp options(rows) do
     %{
       devices: option_values(rows, :device),
       projects: option_values(rows, :project),

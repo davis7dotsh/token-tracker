@@ -7,6 +7,8 @@ const reportDefaults = {
 } as const;
 
 export const reportDependency = 'tracker:report';
+export const maxFilterValues = 10;
+export const maxFilterValueLength = 160;
 export type ReportParamKey = 'period' | 'view' | (typeof filterKeys)[number];
 
 const validTimeZone = (value: string) => {
@@ -26,9 +28,11 @@ const filterValues = (value: string | null) => {
 		return parsed
 			.filter(
 				(item): item is string =>
-					typeof item === 'string' && item.length > 0 && item.length <= 160
+					typeof item === 'string' &&
+					item.length > 0 &&
+					item.length <= maxFilterValueLength
 			)
-			.slice(0, 10);
+			.slice(0, maxFilterValues);
 	} catch {
 		return [];
 	}

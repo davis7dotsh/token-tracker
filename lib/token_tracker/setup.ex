@@ -53,16 +53,19 @@ defmodule TokenTracker.Setup do
   end
 
   def enroll(name, config, output \\ nil) do
-    output = output || Path.join(Paths.enrollments(), "#{safe_name(name)}.json")
-    File.mkdir_p!(Path.dirname(output))
+    device_id = Config.generate_id()
+    token = Config.generate_secret()
 
-    with :ok <- validate_host_enrollment(name, config),
-         {:ok, device} <- Sessions.enroll_device(name) do
+    output =
+      output ||
+        Path.join(Paths.enrollments(), "#{safe_name(name)}-#{device_id}.json")
+
+    with :ok <- validate_host_enrollment(name, config) do
       enrollment = %{
         version: 1,
-        device_id: device.device_id,
-        device_name: device.name,
-        device_token: device.token,
+        device_id: device_id,
+        device_name: name,
+        device_token: token,
         cluster_cookie: config.cluster_cookie,
         host_address: config.host_address,
         name_mode: config.name_mode,
@@ -70,18 +73,49 @@ defmodule TokenTracker.Setup do
         distribution_port: config.distribution_port
       }
 
-      temporary = output <> ".tmp-#{System.unique_integer([:positive])}"
+      with :ok <- write_enrollment(output, enrollment) do
+        case Sessions.enroll_device(name, nil, device_id: device_id, token: token) do
+          {:ok, device} ->
+            {:ok, %{path: output, device_id: device.device_id}}
 
-      with :ok <- File.write(temporary, Jason.encode!(enrollment, pretty: true) <> "\n"),
-           :ok <- File.chmod(temporary, 0o600),
-           :ok <- File.rename(temporary, output) do
-        {:ok, %{path: output, device_id: device.device_id}}
+          {:error, _reason} = error ->
+            File.rm(output)
+            error
+        end
       end
     end
   end
 
-  defp read_enrollment("-"), do: {:ok, IO.read(:stdio, :eof)}
+  defp read_enrollment("-") do
+    case IO.read(:stdio, :eof) do
+      contents when is_binary(contents) -> {:ok, contents}
+      :eof -> {:error, "could not read enrollment from stdin: end of file"}
+      {:error, reason} -> {:error, "could not read enrollment from stdin: #{inspect(reason)}"}
+    end
+  end
+
   defp read_enrollment(path), do: File.read(path)
+
+  defp write_enrollment(output, enrollment) do
+    contents = Jason.encode!(enrollment, pretty: true) <> "\n"
+
+    with :ok <- File.mkdir_p(Path.dirname(output)),
+         {:ok, file} <- File.open(output, [:write, :exclusive]) do
+      result =
+        with :ok <- IO.binwrite(file, contents),
+             :ok <- File.close(file),
+             :ok <- File.chmod(output, 0o600) do
+          :ok
+        end
+
+      if result != :ok do
+        File.close(file)
+        File.rm(output)
+      end
+
+      result
+    end
+  end
 
   defp validate_enrollment(enrollment) do
     required = [

@@ -1,7 +1,7 @@
 defmodule TokenTracker.ConfigServiceTest do
   use ExUnit.Case
 
-  alias TokenTracker.{Config, Service, Setup}
+  alias TokenTracker.{Config, Runtime, Service, Setup}
 
   setup do
     TokenTracker.Repo.delete_all(TokenTracker.SessionOutbox)
@@ -38,6 +38,22 @@ defmodule TokenTracker.ConfigServiceTest do
     assert Config.local_node(loaded) |> to_string() =~ "token_tracker_client_"
     assert Config.host_node(loaded) == :"token_tracker_host@10.0.0.1"
     refute Config.transient_node(loaded) == Config.transient_node(loaded)
+  end
+
+  test "nil and empty config strings remain distinct across a round trip" do
+    root = temp_root()
+    path = Path.join(root, "config.toml")
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    config = %{Config.defaults() | device_name: ""}
+
+    assert :ok = Config.write(config, path)
+    assert {:ok, loaded} = Config.load(path)
+    assert loaded.device_id == nil
+    assert loaded.cluster_cookie == nil
+    assert loaded.device_name == ""
+    assert File.read!(path) =~ "device_id = null"
+    assert File.read!(path) =~ ~s(device_name = "")
   end
 
   test "known malformed config values and incompatible name modes are rejected" do
@@ -102,6 +118,10 @@ defmodule TokenTracker.ConfigServiceTest do
     assert {:error, reason} = Config.validate(invalid)
     assert reason =~ "fully qualified"
 
+    invalid_host_address = %{invalid | address: "host.example", host_address: "simple-host"}
+    assert {:error, reason} = Config.validate(invalid_host_address)
+    assert reason =~ "host_address"
+
     assert {:error, reason} =
              Config.defaults()
              |> Map.put(:web_bind, "0.0.0.0")
@@ -155,8 +175,37 @@ defmodule TokenTracker.ConfigServiceTest do
     assert enrollment["cluster_cookie"] == host.cluster_cookie
     assert is_binary(enrollment["device_token"])
 
-    refute File.read!(Config |> then(fn _ -> TokenTracker.Paths.config() end)) =~
+    refute File.read!(TokenTracker.Paths.config()) =~
              enrollment["device_token"]
+  end
+
+  test "default enrollment names are collision-free and existing outputs are preserved" do
+    root = temp_root()
+    previous = System.get_env("TOKEN_TRACKER_HOME")
+    System.put_env("TOKEN_TRACKER_HOME", root)
+
+    on_exit(fn ->
+      restore_env("TOKEN_TRACKER_HOME", previous)
+      File.rm_rf!(root)
+    end)
+
+    {:ok, host} = Setup.host(name: "host", address: "10.0.0.1")
+    :ok = TokenTracker.Storage.migrate()
+    TokenTracker.Sessions.ensure_local_device(host)
+
+    assert {:ok, first} = Setup.enroll("a+b", host)
+    assert {:ok, second} = Setup.enroll("a b", host)
+    refute first.path == second.path
+    assert File.regular?(first.path)
+    assert File.regular?(second.path)
+
+    existing = Path.join(root, "existing.json")
+    File.write!(existing, "do not replace")
+    before_count = TokenTracker.Repo.aggregate(TokenTracker.Device, :count)
+
+    assert {:error, :eexist} = Setup.enroll("third", host, existing)
+    assert File.read!(existing) == "do not replace"
+    assert TokenTracker.Repo.aggregate(TokenTracker.Device, :count) == before_count
   end
 
   test "service definitions keep the daemon supervised by the operating system" do
@@ -169,6 +218,24 @@ defmodule TokenTracker.ConfigServiceTest do
     assert systemd =~ "ExecStart=/opt/token-tracker daemon"
     assert systemd =~ "Restart=on-failure"
     assert systemd =~ "WantedBy=default.target"
+
+    quoted = Service.render_systemd("/opt/token-tracker", ~s(/tmp/tracker "quoted"))
+    assert quoted =~ ~s(Environment=TOKEN_TRACKER_HOME="/tmp/tracker \\"quoted\\"")
+  end
+
+  test "runtime activation returns an error for an invalid web bind" do
+    config =
+      Config.defaults()
+      |> Map.merge(%{
+        role: "host",
+        device_id: Config.generate_id(),
+        device_name: "host",
+        cluster_cookie: Config.generate_secret(),
+        web_bind: "not-an-ip"
+      })
+
+    assert {:error, reason} = Runtime.activate(config)
+    assert reason =~ "invalid web bind"
   end
 
   defp temp_root do

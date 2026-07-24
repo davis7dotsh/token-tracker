@@ -95,7 +95,13 @@ defmodule TokenTracker.CLI do
       use_home(opts)
       ensure_storage()
       config = Config.load!()
-      result = Scheduler.run_cycle(config, node_name: Config.transient_node(config))
+
+      result =
+        Scheduler.run_cycle(config,
+          node_name: Config.transient_node(config),
+          transient: true
+        )
+
       print_sync_result(result)
     end
   rescue
@@ -234,7 +240,11 @@ defmodule TokenTracker.CLI do
 
       if config.role == "client" do
         reachable =
-          with :ok <- Network.start(config, node_name: Config.transient_node(config)),
+          with :ok <-
+                 Network.start(config,
+                   node_name: Config.transient_node(config),
+                   transient: true
+                 ),
                :ok <- Network.connect(config),
                do: "reachable",
                else: (_ -> "unreachable")
@@ -279,6 +289,8 @@ defmodule TokenTracker.CLI do
         {:error, reason} -> fail(reason)
       end
     end
+  rescue
+    error -> fail(Exception.message(error))
   end
 
   defp service(_command, _args), do: fail("unknown service command")
@@ -296,6 +308,8 @@ defmodule TokenTracker.CLI do
       {:error, reason} ->
         fail(inspect(reason))
     end
+  rescue
+    error -> fail(Exception.message(error))
   end
 
   defp ensure_storage do
@@ -459,6 +473,7 @@ defmodule TokenTracker.CLI do
       token-tracker sync --once
       token-tracker summary [--device DEVICE_NAME_OR_ID] [--all]
       token-tracker status
+      token-tracker daemon
       token-tracker --version
 
     Common options:
