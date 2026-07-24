@@ -102,11 +102,10 @@ defmodule TokenTracker.Setup do
     with :ok <- File.mkdir_p(Path.dirname(output)),
          {:ok, file} <- File.open(output, [:write, :exclusive]) do
       result =
-        with :ok <- IO.binwrite(file, contents),
+        with :ok <- File.chmod(output, 0o600),
+             :ok <- IO.binwrite(file, contents),
              :ok <- File.close(file),
-             :ok <- File.chmod(output, 0o600) do
-          :ok
-        end
+             do: :ok
 
       if result != :ok do
         File.close(file)

@@ -230,6 +230,21 @@ defmodule TokenTracker.ConfigServiceTest do
     assert quoted =~ ~s(Environment=TOKEN_TRACKER_HOME="/tmp/tracker \\"quoted\\"")
   end
 
+  test "runtime activation rejects a non-loopback web bind" do
+    config =
+      Config.defaults()
+      |> Map.merge(%{
+        role: "host",
+        device_id: Config.generate_id(),
+        device_name: "host",
+        cluster_cookie: Config.generate_secret(),
+        web_bind: "0.0.0.0"
+      })
+
+    assert {:error, reason} = Runtime.activate(config)
+    assert reason =~ "must be loopback"
+  end
+
   test "runtime activation returns an error for an invalid web bind" do
     config =
       Config.defaults()
@@ -245,12 +260,40 @@ defmodule TokenTracker.ConfigServiceTest do
     assert reason =~ "invalid web bind"
   end
 
-  test "Phoenix does not use a predictable source-controlled signing secret" do
+  test "runtime activation derives the Phoenix signing secret from the cluster cookie" do
+    cluster_cookie = "known-test-cluster-cookie"
+    stub_runtime_child(TokenTracker.Sync.Server)
+    stub_runtime_child(TokenTracker.Scheduler)
+    stub_runtime_child(TokenTrackerWeb.Endpoint)
+
+    config =
+      Config.defaults()
+      |> Map.merge(%{
+        role: "host",
+        device_id: Config.generate_id(),
+        device_name: "host",
+        cluster_cookie: cluster_cookie,
+        web_bind: "127.0.0.1"
+      })
+
+    assert :ok = Runtime.activate(config)
+
     endpoint_config = Application.fetch_env!(:token_tracker, TokenTrackerWeb.Endpoint)
     secret = Keyword.fetch!(endpoint_config, :secret_key_base)
 
+    expected =
+      :crypto.hash(:sha512, ["token-tracker-web:", cluster_cookie])
+      |> Base.url_encode64(padding: false)
+
+    assert secret == expected
     assert byte_size(secret) >= 64
-    refute secret =~ "token-tracker-local-only"
+  end
+
+  defp stub_runtime_child(name) do
+    start_supervised!(%{
+      id: {:runtime_stub, name},
+      start: {Agent, :start_link, [fn -> nil end, [name: name]]}
+    })
   end
 
   defp temp_root do

@@ -60,7 +60,8 @@ defmodule TokenTracker.Runtime do
 
   defp parse_ip(address) do
     case :inet.parse_ipv4_address(String.to_charlist(address)) do
-      {:ok, parsed} -> {:ok, parsed}
+      {:ok, {127, _, _, _} = parsed} -> {:ok, parsed}
+      {:ok, _parsed} -> {:error, "web bind address must be loopback; got #{inspect(address)}"}
       _ -> {:error, "invalid web bind address #{inspect(address)}"}
     end
   end
