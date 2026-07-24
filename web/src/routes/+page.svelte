@@ -91,14 +91,14 @@
 	function seriesColor(key: string) {
 		const series = seriesByKey.get(key);
 		if (series?.isOther) return 'var(--muted)';
-		return palette[hash(series?.label ?? key) % palette.length];
+		const identity = series?.label ?? key;
+		if (report.view === 'agent' && identity.toLowerCase() === 'codex')
+			return '#43b7a5';
+		return palette[hash(identity) % palette.length];
 	}
 
 	function seriesFill(key: string) {
-		const color = seriesColor(key);
-		const identity = seriesByKey.get(key)?.label ?? key;
-		const angle = 35 + (hash(identity) % 4) * 20;
-		return `repeating-linear-gradient(${angle}deg, ${color} 0 7px, color-mix(in srgb, ${color} 42%, transparent) 7px 10px)`;
+		return seriesColor(key);
 	}
 
 	function seriesDash(key: string) {
