@@ -15,4 +15,21 @@ defmodule TokenTracker.Application do
       name: TokenTracker.Supervisor
     )
   end
+
+  @impl true
+  def start_phase(:portable_cli, _start_type, _phase_args) do
+    start_portable_cli()
+    :ok
+  end
+
+  defp start_portable_cli do
+    if Burrito.Util.running_standalone?() do
+      Task.start(fn ->
+        Burrito.Util.Args.argv()
+        |> TokenTracker.CLI.main()
+
+        System.halt(0)
+      end)
+    end
+  end
 end

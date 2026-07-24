@@ -1,0 +1,93 @@
+# Runs exclusively on Depot CI (https://depot.dev/docs/ci/overview).
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Format, lint, test, and package
+    runs-on: depot-ubuntu-24.04-4
+    env:
+      ImageOS: ubuntu24
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "28.4"
+          elixir-version: "1.20.2"
+          version-type: strict
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+        with:
+          package_json_file: web/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: "0.15.2"
+      - name: Restore Mix cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-test-otp28.4-elixir1.20.2-${{ hashFiles('mix.lock') }}
+      - name: Install dependencies
+        run: |
+          mix deps.get
+          mix assets.install
+      - name: Compile without warnings
+        run: mix compile --warnings-as-errors
+      - name: Elixir checks
+        run: mix check
+      - name: Frontend checks
+        run: mix assets.check
+      - name: Shell checks
+        run: |
+          sh -n scripts/token-tracker
+          sh -n scripts/install.sh
+          sh -n scripts/package-release.sh
+      - name: Build portable releases
+        env:
+          MIX_ENV: prod
+        run: |
+          mix deps.get
+          mix assets.build
+          version=$(
+            sed -n 's/^[[:space:]]*version: "\([^"]*\)",[[:space:]]*$/\1/p' mix.exs
+          )
+          echo "TOKEN_TRACKER_CI_TAG=v$version" >>"$GITHUB_ENV"
+          ./scripts/package-release.sh "v$version" dist-ci
+      - name: Smoke-test release and installer
+        run: |
+          set -eu
+          mkdir -p "serve/$TOKEN_TRACKER_CI_TAG"
+          cp "dist-ci/token-tracker_${TOKEN_TRACKER_CI_TAG}_linux_x86_64.tar.gz" \
+            dist-ci/checksums.txt "serve/$TOKEN_TRACKER_CI_TAG/"
+          python3 -m http.server 8931 --directory serve >/tmp/token-tracker-http.log 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          sleep 1
+          HOME="$PWD/fake-home" \
+            TOKEN_TRACKER_VERSION="$TOKEN_TRACKER_CI_TAG" \
+            TOKEN_TRACKER_DOWNLOAD_BASE=http://127.0.0.1:8931 \
+            TOKEN_TRACKER_INSTALL_DIR="$PWD/fake-home/.local/bin" \
+            sh scripts/install.sh
+          HOME="$PWD/fake-home" \
+            "$PWD/fake-home/.local/bin/token-tracker" --version |
+            grep -q "token-tracker ${TOKEN_TRACKER_CI_TAG#v}"

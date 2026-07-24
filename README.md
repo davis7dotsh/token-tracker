@@ -38,7 +38,20 @@ directory.
 
 ## Install and run
 
-Elixir 1.18 or newer and Erlang/OTP are required.
+The recommended installation uses a prebuilt, checksum-verified release. It
+includes Erlang/ERTS, SQLite, and the compiled dashboard, so the target machine
+does not need Elixir, Erlang, Node.js, pnpm, or SQLite:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/davis7dotsh/token-tracker/main/scripts/install.sh | sh
+token-tracker collect
+```
+
+Add `~/.local/bin` to `PATH` if the installer asks you to. Prebuilt releases
+support arm64 and x86-64 macOS and Linux.
+
+To build and install from source instead, Elixir 1.18 or newer, Erlang/OTP,
+Node.js 24 or newer, and pnpm 11.10.0 are required:
 
 ```sh
 mix deps.get
@@ -49,6 +62,7 @@ token-tracker collect
 Installation creates a Mix release under `~/.local/lib/token-tracker` and puts
 the `token-tracker` launcher in `~/.local/bin`. A release is used instead of an
 escript because SQLite's native library must exist as a normal file at runtime.
+Release and CI details are documented in [`docs/releasing.md`](docs/releasing.md).
 
 ## CLI
 

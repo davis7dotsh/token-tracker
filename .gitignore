@@ -14,4 +14,6 @@ erl_crash.dump
 /web/build/
 /web/node_modules/
 /web/test-results/
+/burrito_out/
+/dist/
 *.ez
