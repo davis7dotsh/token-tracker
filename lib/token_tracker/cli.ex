@@ -228,6 +228,10 @@ defmodule TokenTracker.CLI do
       IO.puts("  Last sync: #{Sessions.get_state("last_sync_at") || "never"}")
       IO.puts("  Last error: #{Sessions.get_state("last_sync_error") || "none"}")
 
+      if config.role == "host" and config.web_enabled do
+        IO.puts("  Dashboard: http://#{config.web_bind}:#{config.web_port}")
+      end
+
       if config.role == "client" do
         reachable =
           with :ok <- Network.start(config, node_name: Config.transient_node(config)),

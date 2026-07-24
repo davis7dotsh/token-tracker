@@ -152,6 +152,11 @@ jitter_seconds = 10
 batch_max_sessions = 50
 batch_max_bytes = 1048576
 call_timeout_ms = 15000
+
+[web]
+enabled = true
+bind = "127.0.0.1"
+port = 4000
 ```
 
 SQLite triggers maintain a durable dirty-session queue whenever usage events
@@ -181,10 +186,63 @@ reports apply the current models.dev thresholds and rates. Historical
 snapshots therefore remain correctly repriceable even when the pricing catalog
 was unavailable during collection or changes later.
 
+## Web dashboard
+
+The host serves a read-only dashboard at
+[`http://127.0.0.1:4000`](http://127.0.0.1:4000) by default. Phoenix and Bandit
+run inside the supervised host application and remain the sole owner of the
+Ecto/SQLite connection. The SvelteKit application is compiled to static files;
+there is no Node process in production and the browser never opens SQLite.
+This version accepts only loopback addresses in `web.bind` because the
+reporting API does not authenticate browser requests. Reach a remote host
+through an SSH or Tailscale tunnel that terminates on its loopback listener.
+Direct LAN/Tailscale binding is deferred until browser authentication is
+implemented.
+
+The dashboard provides 1-day, 1-week, and 1-month bars or lines, device,
+project, agent, and model views, bounded multi-filters, distinct session
+counts, current models.dev costs, pricing-completeness warnings, and host/device
+status. Browser time zones are validated server-side and reporting windows are
+DST-safe. The JSON API is intentionally read-only:
+
+```text
+GET /api/healthz
+GET /api/report
+GET /api/system
+```
+
+API responses contain aggregate dimensions and counters only. They never
+serialize session keys, raw paths, source events, prompts, responses, or
+transcripts. Unknown `/api/*` paths return JSON 404 responses rather than the
+SPA fallback.
+
+For local frontend development, use an isolated host home rather than changing
+the installed service:
+
+```sh
+# Terminal 1: create an isolated host once, then run Phoenix/API.
+export TOKEN_TRACKER_HOME=/tmp/token-tracker-web-dev
+token-tracker setup host --non-interactive --name web-dev --address 127.0.0.1
+mix run -e 'TokenTracker.CLI.main(["daemon"])'
+
+# Terminal 2: Vite/HMR, with /api proxied to Phoenix.
+cd web
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Vite runs at [`http://127.0.0.1:5173`](http://127.0.0.1:5173). A production
+asset build writes into `priv/static`:
+
+```sh
+mix assets.build
+```
+
 ## Checks
 
 ```sh
 mix format --check-formatted
 mix test
 mix check
+mix assets.check
 ```

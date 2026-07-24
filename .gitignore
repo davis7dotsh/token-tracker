@@ -9,4 +9,9 @@
 *.sqlite3-wal
 /.elixir_ls/
 erl_crash.dump
+/priv/static/
+/web/.svelte-kit/
+/web/build/
+/web/node_modules/
+/web/test-results/
 *.ez

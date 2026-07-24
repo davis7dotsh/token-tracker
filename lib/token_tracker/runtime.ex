@@ -7,16 +7,9 @@ defmodule TokenTracker.Runtime do
     :ok = Storage.migrate()
 
     with :ok <- validate(config),
+         :ok <- configure_web(config),
          :ok <- Network.start(config) do
-      children =
-        if config.role == "host" do
-          [
-            {TokenTracker.Sync.Server, config},
-            {Scheduler, config}
-          ]
-        else
-          [{Scheduler, config}]
-        end
+      children = child_specs(config)
 
       Enum.reduce_while(children, :ok, fn child, :ok ->
         case DynamicSupervisor.start_child(TokenTracker.RuntimeSupervisor, child) do
@@ -37,4 +30,36 @@ defmodule TokenTracker.Runtime do
     do: {:error, "setup is incomplete; device identity or cluster cookie is missing"}
 
   defp validate(_config), do: {:error, "standalone role does not run a network service"}
+
+  def child_specs(%{role: "host", web_enabled: true} = config) do
+    [{TokenTracker.Sync.Server, config}, {Scheduler, config}, TokenTrackerWeb.Endpoint]
+  end
+
+  def child_specs(%{role: "host"} = config) do
+    [{TokenTracker.Sync.Server, config}, {Scheduler, config}]
+  end
+
+  def child_specs(config), do: [{Scheduler, config}]
+
+  defp configure_web(%{role: "host", web_enabled: true} = config) do
+    Application.put_env(:token_tracker, TokenTrackerWeb.Endpoint,
+      adapter: Bandit.PhoenixAdapter,
+      http: [ip: parse_ip!(config.web_bind), port: config.web_port],
+      render_errors: [formats: [json: TokenTrackerWeb.ErrorJSON]],
+      secret_key_base: String.duplicate("token-tracker-local-only-", 4),
+      server: true,
+      url: [host: config.web_bind, port: config.web_port]
+    )
+
+    :ok
+  end
+
+  defp configure_web(_config), do: :ok
+
+  defp parse_ip!(address) do
+    case :inet.parse_ipv4_address(String.to_charlist(address)) do
+      {:ok, parsed} -> parsed
+      _ -> raise ArgumentError, "invalid web bind address #{inspect(address)}"
+    end
+  end
 end

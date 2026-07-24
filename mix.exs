@@ -26,14 +26,27 @@ defmodule TokenTracker.MixProject do
 
   defp deps do
     [
+      {:bandit, "~> 1.12"},
       {:ecto_sqlite3, "~> 0.24.1"},
       {:jason, "~> 1.4"},
-      {:req, "~> 0.6.3"}
+      {:phoenix, "~> 1.8"},
+      {:plug, "~> 1.18"},
+      {:req, "~> 0.6.3"},
+      {:tz, "~> 0.28.2"}
     ]
   end
 
   defp aliases do
     [
+      "assets.install": ["cmd --cd web pnpm install --frozen-lockfile"],
+      "assets.build": ["cmd --cd web pnpm build"],
+      "assets.check": [
+        "cmd --cd web pnpm format:check",
+        "cmd --cd web pnpm check",
+        "cmd --cd web pnpm lint",
+        "cmd --cd web pnpm test",
+        "assets.build"
+      ],
       check: ["format --check-formatted", "test"]
     ]
   end

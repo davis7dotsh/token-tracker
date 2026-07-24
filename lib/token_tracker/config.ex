@@ -19,7 +19,10 @@ defmodule TokenTracker.Config do
     sync_jitter_seconds: 10,
     batch_max_sessions: 50,
     batch_max_bytes: 1_048_576,
-    call_timeout_ms: 15_000
+    call_timeout_ms: 15_000,
+    web_enabled: true,
+    web_bind: "127.0.0.1",
+    web_port: 4000
   }
 
   @key_map %{
@@ -38,9 +41,12 @@ defmodule TokenTracker.Config do
     {"network", "epmd_port"} => :epmd_port,
     {"network", "distribution_port"} => :distribution_port,
     {"auth", "cluster_cookie"} => :cluster_cookie,
-    {"auth", "device_token"} => :device_token
+    {"auth", "device_token"} => :device_token,
+    {"web", "enabled"} => :web_enabled,
+    {"web", "bind"} => :web_bind,
+    {"web", "port"} => :web_port
   }
-  @sections ["", "network", "auth", "sync"]
+  @sections ["", "network", "auth", "sync", "web"]
 
   def defaults, do: @defaults
 
@@ -110,6 +116,11 @@ defmodule TokenTracker.Config do
     batch_max_sessions = #{config.batch_max_sessions}
     batch_max_bytes = #{config.batch_max_bytes}
     call_timeout_ms = #{config.call_timeout_ms}
+
+    [web]
+    enabled = #{config.web_enabled}
+    bind = #{string(config.web_bind)}
+    port = #{config.web_port}
     """
   end
 
@@ -183,6 +194,15 @@ defmodule TokenTracker.Config do
         &(not positive_integer?(&1))
       ) ->
         {:error, "sync batch limits and call timeout must be positive integers"}
+
+      not is_boolean(config.web_enabled) ->
+        {:error, "web.enabled must be true or false"}
+
+      not loopback_bind?(config.web_bind) ->
+        {:error, "web.bind must be a loopback IPv4 address in 127.0.0.0/8"}
+
+      not valid_port?(config.web_port) ->
+        {:error, "web.port must be an integer from 1 through 65535"}
 
       config.role in ["host", "client"] and not valid_identity?(config.device_id) ->
         {:error, "device_id must be a UUID for host and client roles"}
@@ -284,6 +304,8 @@ defmodule TokenTracker.Config do
   end
 
   defp parse_value("\"" <> _ = value), do: Jason.decode(value)
+  defp parse_value("true"), do: {:ok, true}
+  defp parse_value("false"), do: {:ok, false}
 
   defp parse_value(value) do
     case Integer.parse(value) do
@@ -332,6 +354,15 @@ defmodule TokenTracker.Config do
 
   defp long_address?(value), do: String.contains?(value, [".", ":"])
   defp valid_port?(value), do: is_integer(value) and value in 1..65_535
+
+  defp loopback_bind?(value) when is_binary(value) do
+    case :inet.parse_ipv4_address(String.to_charlist(value)) do
+      {:ok, {127, _second, _third, _fourth}} -> true
+      _ -> false
+    end
+  end
+
+  defp loopback_bind?(_value), do: false
   defp positive_integer?(value), do: is_integer(value) and value > 0
   defp nonempty?(value), do: is_binary(value) and String.trim(value) != ""
 

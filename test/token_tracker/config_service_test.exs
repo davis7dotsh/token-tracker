@@ -101,6 +101,18 @@ defmodule TokenTracker.ConfigServiceTest do
 
     assert {:error, reason} = Config.validate(invalid)
     assert reason =~ "fully qualified"
+
+    assert {:error, reason} =
+             Config.defaults()
+             |> Map.put(:web_bind, "0.0.0.0")
+             |> Config.validate()
+
+    assert reason =~ "loopback"
+
+    assert :ok =
+             Config.defaults()
+             |> Map.put(:web_bind, "127.1.2.3")
+             |> Config.validate()
   end
 
   test "forced host setup can preserve its permanent device identity" do
