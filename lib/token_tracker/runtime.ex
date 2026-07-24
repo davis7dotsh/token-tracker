@@ -47,7 +47,7 @@ defmodule TokenTracker.Runtime do
         adapter: Bandit.PhoenixAdapter,
         http: [ip: ip, port: config.web_port],
         render_errors: [formats: [json: TokenTrackerWeb.ErrorJSON]],
-        secret_key_base: String.duplicate("token-tracker-local-only-", 4),
+        secret_key_base: web_secret(config.cluster_cookie),
         server: true,
         url: [host: config.web_bind, port: config.web_port]
       )
@@ -63,5 +63,10 @@ defmodule TokenTracker.Runtime do
       {:ok, parsed} -> {:ok, parsed}
       _ -> {:error, "invalid web bind address #{inspect(address)}"}
     end
+  end
+
+  defp web_secret(cluster_cookie) do
+    :crypto.hash(:sha512, ["token-tracker-web:", cluster_cookie])
+    |> Base.url_encode64(padding: false)
   end
 end

@@ -245,6 +245,14 @@ defmodule TokenTracker.ConfigServiceTest do
     assert reason =~ "invalid web bind"
   end
 
+  test "Phoenix does not use a predictable source-controlled signing secret" do
+    endpoint_config = Application.fetch_env!(:token_tracker, TokenTrackerWeb.Endpoint)
+    secret = Keyword.fetch!(endpoint_config, :secret_key_base)
+
+    assert byte_size(secret) >= 64
+    refute secret =~ "token-tracker-local-only"
+  end
+
   defp temp_root do
     root =
       Path.join(System.tmp_dir!(), "token-tracker-config-#{System.unique_integer([:positive])}")
