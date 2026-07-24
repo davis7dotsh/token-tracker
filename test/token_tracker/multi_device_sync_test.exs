@@ -111,21 +111,33 @@ defmodule TokenTracker.MultiDeviceSyncTest do
 
     snapshot = snapshot(enrolled.device_id, "session-c")
     batch_id = Config.generate_id()
+    wrong_proof = Sessions.sync_proof("wrong", enrolled.device_id, batch_id, [snapshot])
 
     assert {:sync_error, 1, ^batch_id, "authentication failed: invalid_token"} =
              GenServer.call(
                server,
-               {:sync_sessions, 1, enrolled.device_id, "wrong", batch_id, [snapshot]}
+               {:sync_sessions, 1, enrolled.device_id, wrong_proof, batch_id, [snapshot]}
              )
 
     invalid =
       Map.put(snapshot(enrolled.device_id, "session-d"), :digest, String.duplicate("0", 64))
 
+    original_proof =
+      Sessions.sync_proof(enrolled.token, enrolled.device_id, batch_id, [snapshot])
+
+    assert {:sync_error, 1, ^batch_id, "authentication failed: invalid_token"} =
+             GenServer.call(
+               server,
+               {:sync_sessions, 1, enrolled.device_id, original_proof, batch_id, [invalid]}
+             )
+
+    proof =
+      Sessions.sync_proof(enrolled.token, enrolled.device_id, batch_id, [snapshot, invalid])
+
     assert {:sync_ack, 1, ^batch_id, [accepted], [rejected]} =
              GenServer.call(
                server,
-               {:sync_sessions, 1, enrolled.device_id, enrolled.token, batch_id,
-                [snapshot, invalid]}
+               {:sync_sessions, 1, enrolled.device_id, proof, batch_id, [snapshot, invalid]}
              )
 
     assert accepted.session_key == snapshot.session_key
@@ -155,10 +167,13 @@ defmodule TokenTracker.MultiDeviceSyncTest do
     valid = snapshot(enrolled.device_id, "session-valid")
     batch_id = Config.generate_id()
 
+    proof =
+      Sessions.sync_proof(enrolled.token, enrolled.device_id, batch_id, ["not-a-map", valid])
+
     assert {:sync_ack, 1, ^batch_id, [accepted], [rejected]} =
              GenServer.call(
                server,
-               {:sync_sessions, 1, enrolled.device_id, enrolled.token, batch_id,
+               {:sync_sessions, 1, enrolled.device_id, proof, batch_id,
                 [
                   "not-a-map",
                   valid
@@ -177,7 +192,7 @@ defmodule TokenTracker.MultiDeviceSyncTest do
     insert_event("session-f", "event-2", ~U[2026-07-23 11:00:00.000000Z], 20, 1)
     Sessions.reconcile_local(config)
 
-    partial = fn _config, {:sync_sessions, 1, _id, _token, batch_id, snapshots}, _timeout ->
+    partial = fn _config, {:sync_sessions, 1, _id, _proof, batch_id, snapshots}, _timeout ->
       [accepted, rejected] = snapshots
 
       {:ok,
@@ -326,6 +341,7 @@ defmodule TokenTracker.MultiDeviceSyncTest do
 
     Enum.each(batches, fn {_entries, message, _batch_id} ->
       assert :erlang.external_size(message) <= limit
+      refute inspect(message) =~ limited.device_token
     end)
 
     {count_batches, []} = Client.build_batches(%{config | batch_max_sessions: 2})
@@ -482,9 +498,9 @@ defmodule TokenTracker.MultiDeviceSyncTest do
   end
 
   defp message_size(config, snapshots) do
-    :erlang.external_size(
-      {:sync_sessions, 1, config.device_id, config.device_token,
-       "00000000-0000-4000-8000-000000000000", snapshots}
-    )
+    batch_id = "00000000-0000-4000-8000-000000000000"
+    proof = Sessions.sync_proof(config.device_token, config.device_id, batch_id, snapshots)
+
+    :erlang.external_size({:sync_sessions, 1, config.device_id, proof, batch_id, snapshots})
   end
 end

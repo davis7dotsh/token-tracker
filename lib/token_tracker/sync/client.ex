@@ -160,8 +160,16 @@ defmodule TokenTracker.Sync.Client do
       entries = Enum.map(pairs, &elem(&1, 0))
       snapshots = Enum.map(pairs, &elem(&1, 1))
 
+      proof =
+        TokenTracker.Sessions.sync_proof(
+          config.device_token,
+          config.device_id,
+          batch_id,
+          snapshots
+        )
+
       message =
-        {:sync_sessions, 1, config.device_id, config.device_token, batch_id, snapshots}
+        {:sync_sessions, 1, config.device_id, proof, batch_id, snapshots}
 
       {entries, message, batch_id}
     end
@@ -171,10 +179,18 @@ defmodule TokenTracker.Sync.Client do
         false
       else
         snapshots = Enum.map(pairs, &elem(&1, 1))
+        batch_id = "00000000-0000-4000-8000-000000000000"
+
+        proof =
+          TokenTracker.Sessions.sync_proof(
+            config.device_token,
+            config.device_id,
+            batch_id,
+            snapshots
+          )
 
         message =
-          {:sync_sessions, 1, config.device_id, config.device_token,
-           "00000000-0000-4000-8000-000000000000", snapshots}
+          {:sync_sessions, 1, config.device_id, proof, batch_id, snapshots}
 
         :erlang.external_size(message) <= config.batch_max_bytes
       end

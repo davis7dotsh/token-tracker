@@ -16,7 +16,7 @@ defmodule TokenTracker.Sync.Server do
 
   @impl true
   def handle_call(
-        {:sync_sessions, @protocol_version, device_id, token, batch_id, snapshots} = message,
+        {:sync_sessions, @protocol_version, device_id, proof, batch_id, snapshots} = message,
         _from,
         config
       ) do
@@ -35,14 +35,14 @@ defmodule TokenTracker.Sync.Server do
           protocol_error(batch_id, "batch exceeds encoded size limit")
 
         true ->
-          receive_snapshots(device_id, token, batch_id, snapshots)
+          receive_snapshots(device_id, proof, batch_id, snapshots)
       end
 
     {:reply, reply, config}
   end
 
   def handle_call(
-        {:sync_sessions, version, _device_id, _token, batch_id, _snapshots},
+        {:sync_sessions, version, _device_id, _proof, batch_id, _snapshots},
         _from,
         state
       ) do
@@ -53,8 +53,8 @@ defmodule TokenTracker.Sync.Server do
     {:reply, {:sync_error, @protocol_version, nil, "invalid message"}, state}
   end
 
-  defp receive_snapshots(device_id, token, batch_id, snapshots) do
-    case Sessions.authenticate(device_id, token) do
+  defp receive_snapshots(device_id, proof, batch_id, snapshots) do
+    case Sessions.authenticate_sync(device_id, proof, batch_id, snapshots) do
       :ok ->
         {accepted, rejected} =
           Enum.reduce(snapshots, {[], []}, fn snapshot, {accepted, rejected} ->

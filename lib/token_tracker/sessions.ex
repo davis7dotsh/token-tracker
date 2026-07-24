@@ -266,13 +266,23 @@ defmodule TokenTracker.Sessions do
     if count == 0, do: {:error, :not_found}, else: :ok
   end
 
-  def authenticate(device_id, token) when is_binary(token) do
+  def sync_proof(token, device_id, batch_id, snapshots)
+      when is_binary(token) and is_binary(device_id) and is_binary(batch_id) and
+             is_list(snapshots) do
+    token
+    |> token_hash()
+    |> sync_proof_from_hash(device_id, batch_id, snapshots)
+  end
+
+  def authenticate_sync(device_id, proof, batch_id, snapshots)
+      when is_binary(device_id) and is_binary(proof) and is_binary(batch_id) and
+             is_list(snapshots) do
     case get_device(device_id) do
       %Device{revoked_at: nil, token_hash: expected} when is_binary(expected) ->
-        candidate = token_hash(token)
+        candidate = sync_proof_from_hash(expected, device_id, batch_id, snapshots)
 
-        if byte_size(candidate) == byte_size(expected) &&
-             TokenTracker.Sessions.PlugLike.secure_compare(candidate, expected) do
+        if byte_size(candidate) == byte_size(proof) &&
+             TokenTracker.Sessions.PlugLike.secure_compare(candidate, proof) do
           :ok
         else
           {:error, :invalid_token}
@@ -286,7 +296,8 @@ defmodule TokenTracker.Sessions do
     end
   end
 
-  def authenticate(_device_id, _token), do: {:error, :invalid_token}
+  def authenticate_sync(_device_id, _proof, _batch_id, _snapshots),
+    do: {:error, :invalid_token}
 
   def touch_device(device_id) do
     now = now()
@@ -612,6 +623,17 @@ defmodule TokenTracker.Sessions do
   end
 
   defp token_hash(token), do: :crypto.hash(:sha256, token) |> Base.encode16(case: :lower)
+
+  defp sync_proof_from_hash(token_hash, device_id, batch_id, snapshots) do
+    payload =
+      :erlang.term_to_binary(
+        {:sync_sessions, 1, device_id, batch_id, snapshots},
+        [:deterministic]
+      )
+
+    :crypto.mac(:hmac, :sha256, token_hash, payload)
+    |> Base.encode16(case: :lower)
+  end
 
   defp hour(datetime) do
     %{

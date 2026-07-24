@@ -133,8 +133,8 @@ host distribution: TCP 4789
 
 All addresses and ports are configurable. The transport works over any
 routable private network; Tailscale is optional. A shared cluster cookie
-authenticates Erlang distribution and a separately revocable per-device token
-authenticates each synchronization request.
+authenticates Erlang distribution. Each client also signs every batch with a
+revocable per-device token; only the HMAC proof crosses the network.
 
 `network.name_mode` is explicitly shared through enrollment. Its default is
 `"long"`, which requires IP addresses or fully qualified hostnames. Set it to
