@@ -4,7 +4,7 @@ defmodule TokenTracker.MixProject do
   def project do
     [
       app: :token_tracker,
-      version: "0.1.0",
+      version: "0.3.0",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       releases: [token_tracker: []],
@@ -27,7 +27,8 @@ defmodule TokenTracker.MixProject do
   defp deps do
     [
       {:ecto_sqlite3, "~> 0.24.1"},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:req, "~> 0.6.3"}
     ]
   end
 

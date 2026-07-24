@@ -13,6 +13,7 @@ defmodule TokenTracker.Paths do
   end
 
   def database, do: Path.join(home(), "usage.sqlite3")
+  def pricing_cache, do: Path.join(home(), "pricing-cache.json")
 
   def codex_roots do
     user_home = System.user_home!()
@@ -21,6 +22,14 @@ defmodule TokenTracker.Paths do
       Path.join([user_home, ".codex", "sessions"]),
       Path.join([user_home, ".codex", "archived_sessions"])
     ]
+  end
+
+  def claude_roots do
+    [Path.join([System.user_home!(), ".claude", "projects"])]
+  end
+
+  def pi_roots do
+    [Path.join([System.user_home!(), ".pi", "agent", "sessions"])]
   end
 
   def ensure_home! do

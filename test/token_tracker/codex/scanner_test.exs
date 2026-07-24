@@ -60,6 +60,8 @@ defmodule TokenTracker.Codex.ScannerTest do
     assert stored.reasoning_tokens == 10
     assert stored.cache_read_tokens == 20
     assert stored.session_starts == 1
+    assert stored.agent == "codex"
+    assert stored.provider == "openai"
     refute stored.session_key == session_id
 
     second = Scanner.collect([root])
@@ -115,14 +117,35 @@ defmodule TokenTracker.Codex.ScannerTest do
 
     result = Scanner.collect([root])
 
+    pricing = %{
+      rates: %{
+        "gpt-report" => %{
+          input: 1.0,
+          output: 2.0,
+          reasoning: 2.0,
+          cache_read: 0.1,
+          cache_write: 1.0,
+          tiers: []
+        }
+      },
+      missing_models: [],
+      fetched_at: "2026-07-23T12:00:00Z",
+      source: :cache,
+      warning: nil
+    }
+
     output =
       capture_io(fn ->
-        Report.print(result)
+        Report.print(result, pricing: pricing)
       end)
 
     assert output =~ "Collection: 1 files found, 1 scanned, 0 skipped"
+    assert output =~ "Pricing: models.dev cached"
     assert output =~ "Today (#{Date.to_iso8601(Report.local_today())}, local time)"
+    assert output =~ "Estimated API cost"
     assert output =~ "All time"
+    assert output =~ "Agents"
+    assert output =~ "codex"
     assert output =~ "Top models"
     assert output =~ "gpt-report"
     assert output =~ "Top projects"
@@ -137,6 +160,8 @@ defmodule TokenTracker.Codex.ScannerTest do
 
     assert "event_key" in columns
     assert "session_key" in columns
+    assert "agent" in columns
+    assert "provider" in columns
     assert "input_tokens" in columns
     refute "path" in columns
     refute "session_id" in columns

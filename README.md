@@ -1,8 +1,9 @@
 # Token Tracker
 
-A local, single-user CLI that imports Codex token history into a private SQLite
-ledger and prints a usage summary. The first collection scans all existing
-history. Later collections skip unchanged files using durable checkpoints.
+A local, single-user CLI that imports Codex, Claude Code, and Pi token history
+into a private SQLite ledger and prints a usage summary. The first collection
+scans all existing history. Later collections skip unchanged files using
+durable checkpoints.
 
 The active application is intentionally local-only. The earlier distributed
 Elixir message-passing experiment is preserved under
@@ -15,16 +16,20 @@ Token Tracker reads:
 
 - `~/.codex/sessions/**/*.jsonl`
 - `~/.codex/archived_sessions/**/*.jsonl`
+- `~/.claude/projects/**/*.jsonl`
+- `~/.pi/agent/sessions/**/*.jsonl`
 
-It stores only timestamps, safe project names, model names, token counters,
-session counts, and hashed event/session/path identities. It does not store raw
-paths, session IDs, prompts, responses, or transcript contents.
+It stores only timestamps, agent and model-provider names, safe project names,
+model names, token counters, session counts, and hashed event/session/path
+identities. It does not store raw paths, session IDs, prompts, responses, or
+transcript contents.
 
 State lives under:
 
 ```text
 ~/.token-tracker/
   usage.sqlite3
+  pricing-cache.json
 ```
 
 Set `TOKEN_TRACKER_HOME` or pass `--home PATH` to move the entire home
@@ -53,8 +58,13 @@ token-tracker collect --home /path/to/token-tracker-home
 token-tracker --version
 ```
 
-The default summary shows today, all time, and the top ten models and projects.
-Dates are grouped using the machine's local timezone.
+The default summary shows today, all time, each agent, and the top ten models
+and projects. Dates are grouped using the machine's local timezone. Estimated
+API-equivalent costs use the current per-million-token prices from
+[`https://models.dev/api.json`](https://models.dev/api.json). The catalog is
+cached for 24 hours. A newly unrecognized model forces one refresh; if it is
+still absent, it is marked unpriced until the cache expires instead of causing
+a request on every collection.
 
 ## Checks
 

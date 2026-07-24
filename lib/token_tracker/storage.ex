@@ -9,6 +9,8 @@ defmodule TokenTracker.Storage do
     :session_key,
     :occurred_at,
     :project,
+    :agent,
+    :provider,
     :model,
     :input_tokens,
     :output_tokens,
@@ -37,6 +39,9 @@ defmodule TokenTracker.Storage do
         parser_version: ^parser_version
       } ->
         size == stat.size and mtime_ms == mtime_ms(stat)
+
+      %FileCheckpoint{} ->
+        false
 
       nil ->
         false

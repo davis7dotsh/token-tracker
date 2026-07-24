@@ -1,7 +1,7 @@
 defmodule TokenTracker.CLI do
   @moduledoc false
 
-  alias TokenTracker.{Codex.Scanner, Paths, Report, Storage}
+  alias TokenTracker.{Collector, Paths, Pricing, Report, Storage}
 
   @version Mix.Project.config()[:version]
 
@@ -55,8 +55,13 @@ defmodule TokenTracker.CLI do
     {:ok, _applications} = Application.ensure_all_started(:token_tracker)
     :ok = Storage.migrate()
 
-    Scanner.collect()
-    |> Report.print(all: Keyword.get(opts, :all, false))
+    collection = Collector.collect()
+    pricing = Report.models() |> Pricing.load()
+
+    Report.print(collection,
+      all: Keyword.get(opts, :all, false),
+      pricing: pricing
+    )
   rescue
     error ->
       fail(Exception.message(error))
@@ -69,7 +74,7 @@ defmodule TokenTracker.CLI do
       token-tracker --version
 
     Commands:
-      collect    Import new Codex history and print a local usage summary
+      collect    Import new Codex, Claude Code, and Pi history
 
     Options:
       --all      Show every project and model instead of the top 10

@@ -8,6 +8,8 @@ defmodule TokenTracker.UsageEvent do
     field(:session_key, :string)
     field(:occurred_at, :utc_datetime_usec)
     field(:project, :string)
+    field(:agent, :string)
+    field(:provider, :string)
     field(:model, :string)
     field(:input_tokens, :integer)
     field(:output_tokens, :integer)

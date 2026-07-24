@@ -41,6 +41,7 @@ defmodule TokenTracker.Codex.Parser do
           counters: counters,
           timestamp: timestamp(record, payload),
           project: text(payload["cwd"]) || context.project,
+          provider: "openai",
           model: text(payload["model"]) || context.model || "unknown",
           session: text(payload["session_id"]) || context.session,
           message: text(payload["id"])
