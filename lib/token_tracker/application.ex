@@ -5,7 +5,10 @@ defmodule TokenTracker.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [TokenTracker.Repo]
+    children = [
+      TokenTracker.Repo,
+      {DynamicSupervisor, name: TokenTracker.RuntimeSupervisor, strategy: :one_for_one}
+    ]
 
     Supervisor.start_link(children,
       strategy: :one_for_one,
