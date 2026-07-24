@@ -14,6 +14,10 @@ defmodule TokenTracker.Paths do
 
   def database, do: Path.join(home(), "usage.sqlite3")
   def pricing_cache, do: Path.join(home(), "pricing-cache.json")
+  def config, do: Path.join(home(), "config.toml")
+  def enrollments, do: Path.join(home(), "enrollments")
+  def service_log, do: Path.join(home(), "service.log")
+  def service_error_log, do: Path.join(home(), "service-error.log")
 
   def codex_roots do
     user_home = System.user_home!()

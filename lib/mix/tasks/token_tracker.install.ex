@@ -13,6 +13,9 @@ defmodule Mix.Tasks.TokenTracker.Install do
     File.mkdir_p!(Path.dirname(release_root))
     File.mkdir_p!(Path.dirname(executable))
 
+    Mix.Task.run("assets.install")
+    Mix.Task.run("assets.build")
+
     Mix.Task.run("release", [
       "token_tracker",
       "--overwrite",

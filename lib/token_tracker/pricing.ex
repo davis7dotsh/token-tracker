@@ -58,12 +58,33 @@ defmodule TokenTracker.Pricing do
 
   def estimate(counters, rates) do
     selected = rates_for_counters(counters, rates)
+    estimate_with_rates(counters, selected)
+  end
 
-    (counters.input_tokens * selected.input +
-       counters.output_tokens * selected.output +
-       counters.reasoning_tokens * selected.reasoning +
-       counters.cache_read_tokens * selected.cache_read +
-       counters.cache_write_tokens * selected.cache_write) / 1_000_000
+  def estimate(counters, rates, pricing_tier) do
+    selected =
+      case pricing_tier do
+        "standard" -> rates
+        "tokens:" <> size -> rates_for_stored_context(rates, size)
+        "context:" <> size -> context_rates(rates, size) || rates
+        _ -> rates_for_counters(counters, rates)
+      end
+
+    estimate_with_rates(counters, selected)
+  end
+
+  def tier(counters, rates) do
+    case rates_for_counters(counters, rates) do
+      %{context_size: size} -> "context:#{size}"
+      _rates -> "standard"
+    end
+  end
+
+  def context_key(counters) do
+    context_tokens =
+      counters.input_tokens + counters.cache_read_tokens + counters.cache_write_tokens
+
+    "tokens:#{context_tokens}"
   end
 
   def ttl_seconds, do: @ttl_seconds
@@ -321,6 +342,37 @@ defmodule TokenTracker.Pricing do
     rates.tiers
     |> Enum.filter(&(context_tokens > &1.context_size))
     |> Enum.max_by(& &1.context_size, fn -> rates end)
+  end
+
+  defp context_rates(rates, size) do
+    case Integer.parse(size) do
+      {parsed, ""} -> Enum.find(rates.tiers, &(&1.context_size == parsed))
+      _ -> nil
+    end
+  end
+
+  defp rates_for_stored_context(rates, size) do
+    case Integer.parse(size) do
+      {context_tokens, ""} when context_tokens >= 0 ->
+        rates_for_context_tokens(context_tokens, rates)
+
+      _ ->
+        rates
+    end
+  end
+
+  defp rates_for_context_tokens(context_tokens, rates) do
+    rates.tiers
+    |> Enum.filter(&(context_tokens > &1.context_size))
+    |> Enum.max_by(& &1.context_size, fn -> rates end)
+  end
+
+  defp estimate_with_rates(counters, selected) do
+    (counters.input_tokens * selected.input +
+       counters.output_tokens * selected.output +
+       counters.reasoning_tokens * selected.reasoning +
+       counters.cache_read_tokens * selected.cache_read +
+       counters.cache_write_tokens * selected.cache_write) / 1_000_000
   end
 
   defp fresh?(cache, now) do

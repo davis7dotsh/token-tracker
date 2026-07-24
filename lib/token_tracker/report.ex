@@ -3,7 +3,15 @@ defmodule TokenTracker.Report do
 
   import Ecto.Query
 
-  alias TokenTracker.{Counters, Pricing, Repo, UsageEvent}
+  alias TokenTracker.{
+    Counters,
+    Device,
+    Pricing,
+    Repo,
+    SessionUsageHourly,
+    Sessions,
+    UsageEvent
+  }
 
   def print(collection, opts \\ []) do
     all? = Keyword.get(opts, :all, false)
@@ -26,6 +34,41 @@ defmodule TokenTracker.Report do
     print_groups("Top models", grouped_rows(all_time_rows, :model, pricing, all?))
     IO.puts("")
     print_groups("Top projects", grouped_rows(all_time_rows, :project, pricing, all?))
+  end
+
+  def print_local(opts \\ []) do
+    print(empty_collection(), opts)
+  end
+
+  def print_combined(opts \\ []) do
+    all? = Keyword.get(opts, :all, false)
+    device = Keyword.get(opts, :device)
+    rows = combined_rows(device)
+    models = Enum.map(rows, &%{provider: &1.provider, model: &1.model}) |> Enum.uniq()
+    pricing = Keyword.get_lazy(opts, :pricing, fn -> Pricing.load(models) end)
+    today = local_today()
+
+    today_rows =
+      device
+      |> combined_rows(DateTime.add(DateTime.utc_now(), -172_800, :second))
+      |> Enum.filter(&(local_date(&1.hour_utc) == today))
+
+    IO.puts("Token Tracker — Combined host summary")
+    if device, do: IO.puts("Device filter: #{device}")
+    IO.puts("")
+    print_pricing(pricing)
+    IO.puts("")
+    print_summary("Today (#{Date.to_iso8601(today)}, local time)", summarize(today_rows, pricing))
+    IO.puts("")
+    print_summary("All time", summarize(rows, pricing))
+    IO.puts("")
+    print_groups("Devices", grouped_rows(rows, :device, pricing, true))
+    IO.puts("")
+    print_groups("Agents", grouped_rows(rows, :agent, pricing, true))
+    IO.puts("")
+    print_groups("Top models", grouped_rows(rows, :model, pricing, all?))
+    IO.puts("")
+    print_groups("Top projects", grouped_rows(rows, :project, pricing, all?))
   end
 
   def models do
@@ -58,6 +101,54 @@ defmodule TokenTracker.Report do
     end)
     |> Enum.sort_by(&Counters.total/1, :desc)
     |> take_limit(all?)
+  end
+
+  def combined_rows(device \\ nil, earliest \\ nil) do
+    base =
+      from(row in SessionUsageHourly,
+        join: device_row in Device,
+        on: device_row.device_id == row.device_id,
+        select: %{
+          device_id: row.device_id,
+          device: device_row.name,
+          session_key: row.session_key,
+          hour_utc: row.hour_utc,
+          project: row.project,
+          agent: row.agent,
+          provider: row.provider,
+          model: row.model,
+          pricing_tier: row.pricing_tier,
+          input_tokens: row.input_tokens,
+          output_tokens: row.output_tokens,
+          reasoning_tokens: row.reasoning_tokens,
+          cache_read_tokens: row.cache_read_tokens,
+          cache_write_tokens: row.cache_write_tokens,
+          session_starts: row.session_starts
+        }
+      )
+
+    query =
+      base
+      |> filter_device(device)
+      |> then(fn query ->
+        if earliest,
+          do: from([row, _device_row] in query, where: row.hour_utc >= ^earliest),
+          else: query
+      end)
+
+    Repo.all(query)
+  end
+
+  defp filter_device(query, nil), do: query
+
+  defp filter_device(query, identity) do
+    case Sessions.resolve_device_id(identity) do
+      {:ok, device_id} ->
+        from([row, _device_row] in query, where: row.device_id == ^device_id)
+
+      {:error, :not_found} ->
+        from([row, _device_row] in query, where: false)
+    end
   end
 
   def local_today do
@@ -130,7 +221,13 @@ defmodule TokenTracker.Report do
           }
 
         rates ->
-          %{summary | cost: summary.cost + Pricing.estimate(row, rates)}
+          cost =
+            case Map.get(row, :pricing_tier) do
+              tier when is_binary(tier) -> Pricing.estimate(row, rates, tier)
+              _ -> Pricing.estimate(row, rates)
+            end
+
+          %{summary | cost: summary.cost + cost}
       end
     end)
   end
@@ -166,6 +263,19 @@ defmodule TokenTracker.Report do
       fetched_at: nil,
       source: :none,
       warning: nil
+    }
+  end
+
+  defp empty_collection do
+    %{
+      total_files: 0,
+      scanned_files: 0,
+      skipped_files: 0,
+      failed_files: 0,
+      malformed_lines: 0,
+      added_events: 0,
+      updated_events: 0,
+      sources: []
     }
   end
 
