@@ -9,6 +9,7 @@ defmodule TokenTracker.Report do
     Pricing,
     Repo,
     SessionUsageHourly,
+    Sessions,
     UsageEvent
   }
 
@@ -128,15 +129,7 @@ defmodule TokenTracker.Report do
 
     query =
       base
-      |> then(fn query ->
-        if device do
-          from([row, device_row] in query,
-            where: device_row.device_id == ^device or device_row.name == ^device
-          )
-        else
-          query
-        end
-      end)
+      |> filter_device(device)
       |> then(fn query ->
         if earliest,
           do: from([row, _device_row] in query, where: row.hour_utc >= ^earliest),
@@ -144,6 +137,18 @@ defmodule TokenTracker.Report do
       end)
 
     Repo.all(query)
+  end
+
+  defp filter_device(query, nil), do: query
+
+  defp filter_device(query, identity) do
+    case Sessions.resolve_device_id(identity) do
+      {:ok, device_id} ->
+        from([row, _device_row] in query, where: row.device_id == ^device_id)
+
+      {:error, :not_found} ->
+        from([row, _device_row] in query, where: false)
+    end
   end
 
   def local_today do

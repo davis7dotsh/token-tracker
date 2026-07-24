@@ -231,6 +231,21 @@ defmodule TokenTracker.Sessions do
 
   def get_device(device_id), do: Repo.get(Device, device_id)
 
+  def resolve_device_id(identity) when is_binary(identity) do
+    case Repo.get(Device, identity) do
+      %Device{device_id: device_id} ->
+        {:ok, device_id}
+
+      nil ->
+        case Repo.one(from(device in Device, where: device.name == ^identity)) do
+          %Device{device_id: device_id} -> {:ok, device_id}
+          nil -> {:error, :not_found}
+        end
+    end
+  end
+
+  def resolve_device_id(_identity), do: {:error, :not_found}
+
   def enroll_device(name, node_name \\ nil, opts \\ []) do
     device_id = Keyword.get(opts, :device_id, TokenTracker.Config.generate_id())
     token = Keyword.get(opts, :token, TokenTracker.Config.generate_secret())
@@ -254,16 +269,14 @@ defmodule TokenTracker.Sessions do
   end
 
   def revoke_device(identity) do
-    now = now()
+    with {:ok, device_id} <- resolve_device_id(identity) do
+      now = now()
 
-    {count, _} =
-      from(
-        device in Device,
-        where: device.device_id == ^identity or device.name == ^identity
-      )
+      from(device in Device, where: device.device_id == ^device_id)
       |> Repo.update_all(set: [revoked_at: now, updated_at: now])
 
-    if count == 0, do: {:error, :not_found}, else: :ok
+      :ok
+    end
   end
 
   def sync_proof(token, device_id, batch_id, snapshots)

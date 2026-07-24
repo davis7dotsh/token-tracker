@@ -393,6 +393,24 @@ defmodule TokenTracker.MultiDeviceSyncTest do
     assert output =~ "Top projects"
   end
 
+  test "device IDs take precedence over colliding device names" do
+    {:ok, first} = Sessions.enroll_device("first")
+    {:ok, second} = Sessions.enroll_device(first.device_id)
+
+    assert Sessions.ingest(first.device_id, snapshot(first.device_id, "first-session")) ==
+             {:accepted, :inserted}
+
+    assert Sessions.ingest(second.device_id, snapshot(second.device_id, "second-session")) ==
+             {:accepted, :inserted}
+
+    rows = Report.combined_rows(first.device_id)
+    assert Enum.map(rows, & &1.device_id) |> Enum.uniq() == [first.device_id]
+
+    assert :ok = Sessions.revoke_device(first.device_id)
+    assert Repo.get!(Device, first.device_id).revoked_at
+    refute Repo.get!(Device, second.device_id).revoked_at
+  end
+
   defp client_config do
     Config.defaults()
     |> Map.merge(%{

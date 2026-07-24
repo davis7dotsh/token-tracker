@@ -349,8 +349,25 @@ defmodule TokenTracker.Config do
     |> String.pad_leading(width, "0")
   end
 
-  defp valid_address?(value) do
-    nonempty?(value) and not String.contains?(value, ["@", " ", "\t", "\n"])
+  defp valid_address?(value) when is_binary(value) do
+    value != "" and
+      byte_size(value) <= 253 and
+      not String.contains?(value, ["@", " ", "\t", "\n"]) and
+      (valid_ip?(value) or valid_hostname?(value))
+  end
+
+  defp valid_address?(_value), do: false
+
+  defp valid_ip?(value),
+    do: match?({:ok, _address}, :inet.parse_address(String.to_charlist(value)))
+
+  defp valid_hostname?(value) do
+    value
+    |> String.split(".")
+    |> Enum.all?(fn label ->
+      byte_size(label) <= 63 and
+        Regex.match?(~r/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/, label)
+    end)
   end
 
   defp long_address?(value), do: String.contains?(value, [".", ":"])

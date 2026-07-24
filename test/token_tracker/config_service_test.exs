@@ -124,6 +124,13 @@ defmodule TokenTracker.ConfigServiceTest do
 
     assert {:error, reason} =
              Config.defaults()
+             |> Map.put(:address, "foo/bar")
+             |> Config.validate()
+
+    assert reason =~ "network.address"
+
+    assert {:error, reason} =
+             Config.defaults()
              |> Map.put(:web_bind, "0.0.0.0")
              |> Config.validate()
 
