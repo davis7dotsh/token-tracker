@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { invalidate } from '$app/navigation';
+	import { navigating } from '$app/state';
 	import { useSearchParams } from 'runed/kit';
 	import { number } from '$lib/api';
 	import {
@@ -72,6 +73,15 @@
 	let retryToken = $state(0);
 
 	/**
+	 * True while a new window is being fetched.
+	 *
+	 * Assigning a parameter navigates, so `navigating` is what tracks these updates.
+	 * `$effect.pending()` would not: the awaits live inside the boundaries below, and
+	 * a count read at this level stays zero.
+	 */
+	const updating = $derived(Boolean(navigating.to));
+
+	/**
 	 * Retries a failed report.
 	 *
 	 * Resetting the boundary alone would re-await the promise that already rejected,
@@ -93,16 +103,11 @@
 
 <svelte:head><title>Usage · Token Tracker</title></svelte:head>
 
-<!-- The live region stays mounted and only its text changes. A region inserted at
-     the same moment as its message is often missed, because assistive technology
-     has not yet begun observing it. -->
-<div class="sr-only" role="status" aria-live="polite">
-	{$effect.pending() > 0 ? 'Updating report…' : ''}
-</div>
-
-{#if $effect.pending() > 0}
-	<div class="navigation-progress" aria-hidden="true"></div>
-{/if}
+<!-- No progress indicator here. Changing a control is a navigation, so the layout
+     already shows one and announces it for the duration of the request; a second
+     bar would simply overlap it. `$effect.pending()` is not a substitute: the
+     awaits live inside child boundaries, so a count read at this level stays zero.
+     The dimming below is what marks the report itself as superseded. -->
 
 <main>
 	<header class="page-header">
@@ -242,14 +247,10 @@
 	</section>
 
 	<!-- The boundary owns the report's pending and failed states. `pending` covers
-	     only the first resolution; later updates keep the previous report on screen
-	     and are signalled by `$effect.pending()` above. -->
+	     only the first resolution; later updates keep the previous report on screen,
+	     dimmed, until the new one arrives. -->
 	<svelte:boundary>
-		<ReportView
-			response={await data.report}
-			{chart}
-			pending={$effect.pending() > 0}
-		/>
+		<ReportView response={await data.report} {chart} pending={updating} />
 
 		{#snippet pending()}
 			<section class="skeleton" aria-hidden="true">
