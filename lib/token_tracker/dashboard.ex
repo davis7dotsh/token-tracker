@@ -302,10 +302,15 @@ defmodule TokenTracker.Dashboard do
     |> Map.new(&{&1.dimension, &1.sessions})
   end
 
-  defp query_total_sessions(window, query) do
+  # Counts distinct sessions across a set of rows. Restricting to a list of
+  # dimension values is what the collapsed "Other" series needs: one session can
+  # touch several of the values it collapses, and summing their individual counts
+  # would report that session once per value.
+  defp query_total_sessions(window, query, restrict \\ :all) do
     SessionUsageHourly
     |> apply_window(window)
     |> apply_filters(query.filters)
+    |> restrict_to(query.view, restrict)
     |> select(
       [row, _device],
       count(fragment("DISTINCT ? || ':' || ?", row.device_id, row.session_key))
@@ -313,6 +318,9 @@ defmodule TokenTracker.Dashboard do
     |> Repo.one()
     |> Kernel.||(0)
   end
+
+  defp restrict_to(queryable, _view, :all), do: queryable
+  defp restrict_to(queryable, view, values), do: filter_by(queryable, view, values)
 
   # Filter menus list every value available in the window, not just the values
   # that survive the current filters, so a selection can always be widened.
@@ -409,7 +417,12 @@ defmodule TokenTracker.Dashboard do
     series_key_by_dimension = series_lookup(series, overflow_keys)
 
     bucket_totals = accumulate_buckets(priced, series_key_by_dimension)
-    session_counts = query_sessions(window, query, query.view)
+
+    sessions = %{
+      by_dimension: query_sessions(window, query, query.view),
+      overflow:
+        if(overflow_keys == [], do: 0, else: query_total_sessions(window, query, overflow_keys))
+    }
 
     bars =
       Enum.map(window.buckets, fn bucket ->
@@ -435,7 +448,7 @@ defmodule TokenTracker.Dashboard do
       timeZone: query.time_zone,
       series: Enum.map(series, &Map.take(&1, [:key, :label, :tokens, :isOther, :count])),
       bars: bars,
-      totals: Enum.map(series, &total_wire(&1, totals_by_dimension, session_counts)),
+      totals: Enum.map(series, &total_wire(&1, totals_by_dimension, sessions)),
       combined: combined_wire(priced, query_total_sessions(window, query)),
       options: options,
       hasUsage: all_usage?,
@@ -539,7 +552,7 @@ defmodule TokenTracker.Dashboard do
 
   # An "Other" series spans several dimension values, so its totals are summed
   # across them and its session count is the sum of theirs.
-  defp total_wire(%{isOther: true} = series, totals_by_dimension, session_counts) do
+  defp total_wire(%{isOther: true} = series, totals_by_dimension, sessions) do
     totals =
       Enum.reduce(series.dimensions, zero_bucket(), fn key, acc ->
         totals = Map.fetch!(totals_by_dimension, key)
@@ -551,13 +564,12 @@ defmodule TokenTracker.Dashboard do
         }
       end)
 
-    sessions = Enum.reduce(series.dimensions, 0, &(&2 + Map.get(session_counts, &1, 0)))
-    wire(series, totals, sessions)
+    wire(series, totals, sessions.overflow)
   end
 
-  defp total_wire(series, totals_by_dimension, session_counts) do
+  defp total_wire(series, totals_by_dimension, sessions) do
     totals = Map.fetch!(totals_by_dimension, series.dimension)
-    wire(series, totals, Map.get(session_counts, series.dimension, 0))
+    wire(series, totals, Map.get(sessions.by_dimension, series.dimension, 0))
   end
 
   defp wire(series, totals, sessions) do
