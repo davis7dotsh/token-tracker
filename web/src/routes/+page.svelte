@@ -310,15 +310,6 @@
 			{data.staleDevices.length === 1 ? 'has' : 'have'} not reported recently.
 		</p>
 	{/if}
-	{#if data.pricing.warning || data.pricing.missingModels.length}
-		<p class="notice">
-			API-equivalent cost is incomplete.
-			{data.pricing.warning ?? ''}
-			{#if data.pricing.missingModels.length}
-				Missing pricing for {data.pricing.missingModels.join(', ')}.
-			{/if}
-		</p>
-	{/if}
 
 	{#if !report.hasUsage}
 		<section class="empty-state">

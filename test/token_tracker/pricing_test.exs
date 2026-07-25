@@ -84,6 +84,40 @@ defmodule TokenTracker.PricingTest do
     assert loaded.rates[{"openrouter", "shared-model"}].input == 3.0
   end
 
+  test "prices OpenAI unknown as gpt-5.6-sol and ignores other missing models" do
+    catalog =
+      catalog(%{
+        "gpt-5.6-sol" => %{
+          "cost" => %{
+            "input" => 5,
+            "output" => 30,
+            "cache_read" => 0.5,
+            "cache_write" => 6.25
+          }
+        }
+      })
+
+    loaded =
+      Pricing.load(
+        [
+          %{provider: "openai", model: "unknown"},
+          %{provider: "local-svelte-agent", model: "pi-svelte-agent-v4"}
+        ],
+        path: cache_path(),
+        now: @now,
+        fetcher: fn _etag -> {:ok, %{status: 200, catalog: catalog}} end
+      )
+
+    openai_unknown = loaded.rates[{"openai", "unknown"}]
+    ignored_model = loaded.rates[{"local-svelte-agent", "pi-svelte-agent-v4"}]
+
+    assert openai_unknown.input == 5.0
+    assert openai_unknown.output == 30.0
+    assert openai_unknown.cache_read == 0.5
+    assert ignored_model == zero_rates()
+    assert loaded.missing_models == []
+  end
+
   test "applies a context pricing tier to individual large-context events" do
     catalog =
       catalog(%{
@@ -166,7 +200,8 @@ defmodule TokenTracker.PricingTest do
     end
 
     first = Pricing.load(["missing-one"], path: path, now: @now, fetcher: initial_fetch)
-    assert first.missing_models == ["missing-one"]
+    assert first.missing_models == []
+    assert first.rates["missing-one"] == zero_rates()
     assert_receive :initial_fetch
 
     Pricing.load(["missing-one"],
@@ -188,7 +223,9 @@ defmodule TokenTracker.PricingTest do
       )
 
     assert third.source == :validated
-    assert third.missing_models == ["missing-one", "missing-two"]
+    assert third.missing_models == []
+    assert third.rates["missing-one"] == zero_rates()
+    assert third.rates["missing-two"] == zero_rates()
     assert_receive {:missing_refresh, "\"v1\""}
 
     Pricing.load(["missing-one", "missing-two"],
@@ -254,8 +291,8 @@ defmodule TokenTracker.PricingTest do
       )
 
     assert unavailable.source == :unavailable
-    assert unavailable.rates == %{}
-    assert unavailable.missing_models == ["gpt-priced"]
+    assert unavailable.rates == %{"gpt-priced" => zero_rates()}
+    assert unavailable.missing_models == []
     assert unavailable.warning =~ "offline"
   end
 
@@ -272,6 +309,17 @@ defmodule TokenTracker.PricingTest do
       },
       Map.new(overrides)
     )
+  end
+
+  defp zero_rates do
+    %{
+      input: 0.0,
+      output: 0.0,
+      reasoning: 0.0,
+      cache_read: 0.0,
+      cache_write: 0.0,
+      tiers: []
+    }
   end
 
   defp cache_path do

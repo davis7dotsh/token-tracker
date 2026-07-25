@@ -12,6 +12,7 @@ defmodule TokenTracker.Pricing do
   @catalog_url "https://models.dev/api.json"
   @cache_version 1
   @ttl_seconds 86_400
+  @openai_unknown_fallback "gpt-5.6-sol"
 
   def load(models, opts \\ []) do
     path = Keyword.get(opts, :path, Paths.pricing_cache())
@@ -30,6 +31,8 @@ defmodule TokenTracker.Pricing do
       |> Map.put("missing_models", resolution.missing_models)
       |> write_cache(path)
     end
+
+    resolution = apply_fallbacks(cache, resolution, models)
 
     %{
       rates: resolution.rates,
@@ -193,8 +196,7 @@ defmodule TokenTracker.Pricing do
   defp resolve_models(nil, models) do
     missing_models =
       models
-      |> Enum.map(&model_spec/1)
-      |> Enum.uniq_by(& &1.key)
+      |> model_specs()
       |> Enum.map(& &1.label)
       |> Enum.sort()
 
@@ -205,9 +207,7 @@ defmodule TokenTracker.Pricing do
     catalog = cache["catalog"] || %{}
 
     models
-    |> Enum.map(&model_spec/1)
-    |> Enum.uniq_by(& &1.key)
-    |> Enum.sort_by(& &1.label)
+    |> model_specs()
     |> Enum.reduce(%{rates: %{}, missing_models: []}, fn spec, result ->
       case resolve(catalog, spec.model, spec.provider) do
         {:ok, rates} ->
@@ -218,6 +218,59 @@ defmodule TokenTracker.Pricing do
       end
     end)
     |> Map.update!(:missing_models, &Enum.reverse/1)
+  end
+
+  defp apply_fallbacks(cache, resolution, models) do
+    catalog = (cache && cache["catalog"]) || %{}
+
+    rates =
+      models
+      |> model_specs()
+      |> Enum.reduce(resolution.rates, fn spec, rates ->
+        if Map.has_key?(rates, spec.key) do
+          rates
+        else
+          Map.put(rates, spec.key, fallback_rates(catalog, spec))
+        end
+      end)
+
+    %{resolution | rates: rates, missing_models: []}
+  end
+
+  defp fallback_rates(catalog, spec) do
+    if openai_unknown?(spec) do
+      case resolve(catalog, @openai_unknown_fallback, "openai") do
+        {:ok, rates} -> rates
+        :error -> zero_rates()
+      end
+    else
+      zero_rates()
+    end
+  end
+
+  defp openai_unknown?(spec) do
+    case split_model(spec.model, spec.provider) do
+      {"openai", "unknown"} -> true
+      _ -> false
+    end
+  end
+
+  defp zero_rates do
+    %{
+      input: 0.0,
+      output: 0.0,
+      reasoning: 0.0,
+      cache_read: 0.0,
+      cache_write: 0.0,
+      tiers: []
+    }
+  end
+
+  defp model_specs(models) do
+    models
+    |> Enum.map(&model_spec/1)
+    |> Enum.uniq_by(& &1.key)
+    |> Enum.sort_by(& &1.label)
   end
 
   defp model_spec(%{model: model} = spec) do
