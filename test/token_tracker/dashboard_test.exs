@@ -123,6 +123,34 @@ defmodule TokenTracker.DashboardTest do
     assert Enum.any?(response.report.series, &(&1.label == "Other" and &1.isOther))
   end
 
+  test "collapsed series count a session spanning several of its values once" do
+    hour = ~U[2026-11-01 10:00:00.000000Z]
+
+    # Ten large projects fill the series limit, so the two small ones collapse
+    # into Other. One session works on both collapsed projects.
+    Enum.each(1..10, fn index ->
+      insert_session("large-#{index}", hour, "large-#{index}", "codex", 1_000_000)
+    end)
+
+    insert_session("shared", hour, "small-a", "codex", 5)
+    insert_usage("shared", hour, "small-b", "codex", 5)
+
+    assert {:ok, response} =
+             Dashboard.report(
+               %{"period" => "day", "view" => "project", "tz" => "UTC"},
+               now: ~U[2026-11-01 12:30:00Z],
+               pricing_loader: fn _ -> pricing() end
+             )
+
+    other = Enum.find(response.report.totals, & &1.isOther)
+
+    # Other collapses small-a and small-b plus the two projects from setup. The
+    # shared session touches two of them but must still be counted once, so the
+    # total is the two setup sessions plus one.
+    assert other.count == 4
+    assert other.counters.sessions == 3
+  end
+
   test "staleness follows the applicable device rather than fresh host collection" do
     now = ~U[2026-11-01 12:30:00.000000Z]
     TokenTracker.Sessions.put_state("last_collection_at", DateTime.to_iso8601(now))
@@ -373,6 +401,12 @@ defmodule TokenTracker.DashboardTest do
       }
     ])
 
+    insert_usage(session_key, hour, project, agent, input_tokens)
+  end
+
+  # Adds usage to a session that already has a snapshot, so one session can span
+  # several projects or models.
+  defp insert_usage(session_key, hour, project, agent, input_tokens) do
     Repo.insert_all(SessionUsageHourly, [
       %{
         device_id: "device-1",

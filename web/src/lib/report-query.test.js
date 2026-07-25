@@ -4,6 +4,7 @@ import {
 	createLatestRequest,
 	reportSearch,
 	reportTarget,
+	syncDecision,
 	updateReportParam,
 	validChart
 } from './report-query.ts';
@@ -115,4 +116,65 @@ test('only accepts the newest report response', async () => {
 
 	resolveFirst('week');
 	assert.deepEqual(await first, { current: false });
+});
+
+test('ignores a load result echoed back by an in-app URL rewrite', () => {
+	const data = { report: {} };
+
+	// Selecting a control rewrites the URL via replaceState, which re-runs the
+	// effect without re-running load. Adopting `data` again would replace whatever
+	// is now displayed with the entry the page was first loaded with.
+	assert.equal(
+		syncDecision({
+			data,
+			href: 'https://tracker.test/?period=week',
+			synced: data,
+			currentHref: 'https://tracker.test/?period=week',
+			cached: true
+		}),
+		'ignore'
+	);
+});
+
+test('adopts a genuinely new load result', () => {
+	assert.equal(
+		syncDecision({
+			data: { report: {} },
+			href: 'https://tracker.test/?period=month',
+			synced: { report: {} },
+			currentHref: 'https://tracker.test/?period=week',
+			cached: false
+		}),
+		'adopt'
+	);
+});
+
+test('follows history back to a restored URL that reuses the same load result', () => {
+	const data = { report: {} };
+
+	// SvelteKit can restore a history entry without building a new data object. The
+	// URL still moved, so the report has to follow it: from cache when possible,
+	// otherwise by fetching. Returning 'ignore' here would leave the report
+	// describing the query the user just left.
+	assert.equal(
+		syncDecision({
+			data,
+			href: 'https://tracker.test/?period=day',
+			synced: data,
+			currentHref: 'https://tracker.test/?period=week',
+			cached: true
+		}),
+		'adopt'
+	);
+
+	assert.equal(
+		syncDecision({
+			data,
+			href: 'https://tracker.test/?period=day',
+			synced: data,
+			currentHref: 'https://tracker.test/?period=week',
+			cached: false
+		}),
+		'fetch'
+	);
 });

@@ -33,9 +33,8 @@ defmodule TokenTracker.Dashboard do
 
     with {:ok, query} <- validate_params(params),
          {:ok, window} <- time_window(query.period, query.time_zone, now) do
-      unfiltered_rows = query_rows(window.start_utc, window.end_utc)
-      rows = filter_rows(unfiltered_rows, query.filters)
-
+      rows = query_rows(window, query)
+      options = query_options(window)
       all_usage? = any_usage?(window)
 
       pricing =
@@ -44,7 +43,7 @@ defmodule TokenTracker.Dashboard do
         |> Enum.uniq()
         |> pricing_loader.()
 
-      report = build_report(rows, unfiltered_rows, query, window, pricing, all_usage?)
+      report = build_report(rows, options, query, window, pricing, all_usage?)
       stale_devices = stale_devices(query.filters["device"], now)
 
       {:ok,
@@ -197,6 +196,8 @@ defmodule TokenTracker.Dashboard do
 
     {:ok,
      %{
+       period: "day",
+       time_zone: time_zone,
        start_utc: start_utc,
        end_utc: DateTime.add(end_utc, 1, :hour),
        buckets: buckets,
@@ -217,6 +218,8 @@ defmodule TokenTracker.Dashboard do
 
       {:ok,
        %{
+         period: period,
+         time_zone: time_zone,
          start_utc: DateTime.shift_zone!(start_local, "Etc/UTC", Tz.TimeZoneDatabase),
          end_utc: DateTime.shift_zone!(end_local, "Etc/UTC", Tz.TimeZoneDatabase),
          buckets: buckets,
@@ -235,55 +238,152 @@ defmodule TokenTracker.Dashboard do
     end
   end
 
-  defp query_rows(start_utc, end_utc) do
-    base =
-      from(row in SessionUsageHourly,
-        join: device in Device,
-        on: device.device_id == row.device_id,
-        join: snapshot in SessionSnapshot,
-        on: snapshot.device_id == row.device_id and snapshot.session_key == row.session_key,
-        select: %{
-          device_id: row.device_id,
-          device: device.name,
-          session_key: row.session_key,
-          hour_utc: row.hour_utc,
-          project: row.project,
-          agent: row.agent,
-          provider: row.provider,
-          model: row.model,
-          pricing_tier: row.pricing_tier,
-          quality: snapshot.quality,
-          received_at: snapshot.received_at,
-          input_tokens: row.input_tokens,
-          output_tokens: row.output_tokens,
-          reasoning_tokens: row.reasoning_tokens,
-          cache_read_tokens: row.cache_read_tokens,
-          cache_write_tokens: row.cache_write_tokens,
-          session_starts: row.session_starts
-        }
-      )
+  # Aggregates in SQL down to one row per (bucket, dimension, pricing identity).
+  # Filters are applied by the database so the report never materializes rows it
+  # will discard, and each row already carries its local bucket key so grouping
+  # never repeats a time zone conversion.
+  defp query_rows(window, query) do
+    dimension = dimension_expr(query.view)
 
-    query =
-      if start_utc && end_utc do
-        from(row in base, where: row.hour_utc >= ^start_utc and row.hour_utc < ^end_utc)
-      else
-        base
-      end
+    groups = [
+      dynamic([row, _device], row.hour_utc),
+      dynamic([row, _device], row.provider),
+      dynamic([row, _device], row.model),
+      dynamic([row, _device], row.pricing_tier),
+      dimension
+    ]
 
-    Repo.all(query)
+    SessionUsageHourly
+    |> apply_window(window)
+    |> apply_filters(query.filters)
+    |> group_by([row, device], ^groups)
+    |> select([row, _device], %{
+      hour_utc: row.hour_utc,
+      provider: row.provider,
+      model: row.model,
+      pricing_tier: row.pricing_tier,
+      input_tokens: sum(row.input_tokens),
+      output_tokens: sum(row.output_tokens),
+      reasoning_tokens: sum(row.reasoning_tokens),
+      cache_read_tokens: sum(row.cache_read_tokens),
+      cache_write_tokens: sum(row.cache_write_tokens)
+    })
+    |> select_dimension(query.view)
+    |> Repo.all()
+    |> Enum.map(&Map.put(&1, :bucket, bucket_key(&1.hour_utc, window)))
   end
 
-  defp filter_rows(rows, filters) do
-    Enum.filter(rows, fn row ->
-      filter_match?(filters["device"], row.device) and
-        filter_match?(filters["project"], row.project) and
-        filter_match?(filters["agent"], row.agent) and
-        filter_match?(filters["model"], row.model)
+  defp select_dimension(queryable, "device"),
+    do: select_merge(queryable, [_row, device], %{dimension: device.name})
+
+  defp select_dimension(queryable, "project"),
+    do: select_merge(queryable, [row, _device], %{dimension: row.project})
+
+  defp select_dimension(queryable, "agent"),
+    do: select_merge(queryable, [row, _device], %{dimension: row.agent})
+
+  defp select_dimension(queryable, "model"),
+    do: select_merge(queryable, [row, _device], %{dimension: row.model})
+
+  # A session spans many hourly rows and often several models, so its identity is
+  # counted distinctly by the database per dimension. Summing a per-row session
+  # column instead would multiply-count the same session.
+  defp query_sessions(window, query, view) do
+    SessionUsageHourly
+    |> apply_window(window)
+    |> apply_filters(query.filters)
+    |> group_by([row, device], ^[dimension_expr(view)])
+    |> select([row, _device], %{
+      sessions: count(fragment("DISTINCT ? || ':' || ?", row.device_id, row.session_key))
+    })
+    |> select_dimension(view)
+    |> Repo.all()
+    |> Map.new(&{&1.dimension, &1.sessions})
+  end
+
+  # Counts distinct sessions across a set of rows. Restricting to a list of
+  # dimension values is what the collapsed "Other" series needs: one session can
+  # touch several of the values it collapses, and summing their individual counts
+  # would report that session once per value.
+  defp query_total_sessions(window, query, restrict \\ :all) do
+    SessionUsageHourly
+    |> apply_window(window)
+    |> apply_filters(query.filters)
+    |> restrict_to(query.view, restrict)
+    |> select(
+      [row, _device],
+      count(fragment("DISTINCT ? || ':' || ?", row.device_id, row.session_key))
+    )
+    |> Repo.one()
+    |> Kernel.||(0)
+  end
+
+  defp restrict_to(queryable, _view, :all), do: queryable
+  defp restrict_to(queryable, view, values), do: filter_by(queryable, view, values)
+
+  # Filter menus list every value available in the window, not just the values
+  # that survive the current filters, so a selection can always be widened.
+  # One grouped scan yields every distinct combination in the window, which is far
+  # smaller than the row count, so the four menus are derived from it in memory
+  # rather than from four separate table scans.
+  defp query_options(window) do
+    combinations =
+      SessionUsageHourly
+      |> apply_window(window)
+      |> group_by([row, device], [device.name, row.project, row.agent, row.model])
+      |> select([row, device], {device.name, row.project, row.agent, row.model})
+      |> Repo.all()
+
+    %{
+      devices: distinct_sorted(combinations, 0),
+      projects: distinct_sorted(combinations, 1),
+      agents: distinct_sorted(combinations, 2),
+      models: distinct_sorted(combinations, 3)
+    }
+  end
+
+  defp distinct_sorted(combinations, position) do
+    combinations
+    |> MapSet.new(&elem(&1, position))
+    |> Enum.sort()
+  end
+
+  defp apply_window(queryable, window) do
+    from(row in queryable,
+      join: device in Device,
+      on: device.device_id == row.device_id,
+      where: row.hour_utc >= ^window.start_utc and row.hour_utc < ^window.end_utc
+    )
+  end
+
+  defp apply_filters(queryable, filters) do
+    Enum.reduce(@filter_keys, queryable, fn key, acc ->
+      case Map.get(filters, key, []) do
+        [] -> acc
+        values -> filter_by(acc, key, values)
+      end
     end)
   end
 
-  defp filter_match?([], _value), do: true
-  defp filter_match?(values, value), do: value in values
+  defp filter_by(queryable, "device", values),
+    do: where(queryable, [_row, device], device.name in ^values)
+
+  defp filter_by(queryable, "project", values),
+    do: where(queryable, [row, _device], row.project in ^values)
+
+  defp filter_by(queryable, "agent", values),
+    do: where(queryable, [row, _device], row.agent in ^values)
+
+  defp filter_by(queryable, "model", values),
+    do: where(queryable, [row, _device], row.model in ^values)
+
+  # The device dimension lives on the joined devices table while the rest are
+  # columns on the usage table, so each is expressed as a dynamic the queries
+  # above can reuse for grouping, ordering, selecting, and filtering alike.
+  defp dimension_expr("device"), do: dynamic([_row, device], device.name)
+  defp dimension_expr("project"), do: dynamic([row, _device], row.project)
+  defp dimension_expr("agent"), do: dynamic([row, _device], row.agent)
+  defp dimension_expr("model"), do: dynamic([row, _device], row.model)
 
   defp any_usage?(window) do
     SessionUsageHourly
@@ -292,156 +392,206 @@ defmodule TokenTracker.Dashboard do
     |> Repo.one()
   end
 
-  defp build_report(rows, unfiltered_rows, query, window, pricing, all_usage?) do
+  # Walks the aggregated rows once, accumulating every figure the report needs
+  # keyed by series and by bucket. The previous implementation rescanned the full
+  # row set for each bucket and again for each series within it, which grew as
+  # buckets times series times rows.
+  defp build_report(rows, options, query, window, pricing, all_usage?) do
+    priced = Enum.map(rows, &Map.put(&1, :cost, row_cost(&1, pricing)))
+
+    totals_by_dimension =
+      Enum.reduce(priced, %{}, fn row, acc ->
+        Map.update(acc, row.dimension, accumulate(zero_bucket(), row), &accumulate(&1, row))
+      end)
+
     top_keys =
-      rows
-      |> Enum.group_by(&dimension(&1, query.view))
-      |> Enum.map(fn {key, grouped} -> {key, token_total(grouped)} end)
-      |> Enum.sort_by(&elem(&1, 1), :desc)
+      totals_by_dimension
+      |> Enum.sort_by(fn {_key, totals} -> Counters.total(totals.counters) end, :desc)
       |> Enum.take(@series_limit)
       |> Enum.map(&elem(&1, 0))
 
-    grouped_rows = Enum.group_by(rows, &series_key(&1, query.view, top_keys))
-    series = build_series(grouped_rows, query.view)
+    top_set = MapSet.new(top_keys)
+    overflow_keys = Map.keys(totals_by_dimension) |> Enum.reject(&MapSet.member?(top_set, &1))
+    series = build_series(totals_by_dimension, top_keys, overflow_keys)
+    series_key_by_dimension = series_lookup(series, overflow_keys)
+
+    bucket_totals = accumulate_buckets(priced, series_key_by_dimension)
+
+    sessions = %{
+      by_dimension: query_sessions(window, query, query.view),
+      overflow:
+        if(overflow_keys == [], do: 0, else: query_total_sessions(window, query, overflow_keys))
+    }
 
     bars =
       Enum.map(window.buckets, fn bucket ->
-        bucket_rows =
-          Enum.filter(
-            rows,
-            &(bucket_key(&1, query.period, query.time_zone) == window.key.(bucket))
-          )
-
-        summary = summarize(bucket_rows, pricing)
+        key = window.key.(bucket)
+        totals = Map.get(bucket_totals, key, zero_bucket())
 
         %{
-          key: window.key.(bucket),
+          key: key,
           label: window.label.(bucket),
-          datetime: window.key.(bucket),
-          tokens: Counters.total(summary.counters),
-          cost: summary.cost,
+          datetime: key,
+          tokens: Counters.total(totals.counters),
+          cost: totals.cost,
           segments:
             Enum.map(series, fn item ->
-              segment_rows =
-                Enum.filter(
-                  bucket_rows,
-                  &(series_key(&1, query.view, top_keys) == item.internal)
-                )
-
-              %{key: item.key, tokens: token_total(segment_rows)}
-            end),
-          qualities: qualities(bucket_rows)
+              %{key: item.key, tokens: Map.get(totals.segments, item.key, 0)}
+            end)
         }
-      end)
-
-    totals =
-      series
-      |> Enum.map(fn item ->
-        grouped = Map.get(grouped_rows, item.internal, [])
-        total_wire(item, grouped, pricing)
       end)
 
     %{
       period: query.period,
       view: query.view,
       timeZone: query.time_zone,
-      series: Enum.map(series, &Map.delete(&1, :internal)),
+      series: Enum.map(series, &Map.take(&1, [:key, :label, :tokens, :isOther, :count])),
       bars: bars,
-      totals: totals,
-      combined: combined_wire(rows, pricing),
-      options: options(unfiltered_rows),
+      totals: Enum.map(series, &total_wire(&1, totals_by_dimension, sessions)),
+      combined: combined_wire(priced, query_total_sessions(window, query)),
+      options: options,
       hasUsage: all_usage?,
       hasMatches: rows != [],
-      truncated: Map.has_key?(grouped_rows, :overflow)
+      truncated: overflow_keys != []
     }
   end
 
-  defp build_series(grouped_rows, view) do
-    grouped_rows
-    |> Enum.map(fn {internal, rows} ->
-      original_count =
-        if internal == :overflow do
-          rows |> Enum.map(&dimension(&1, view)) |> Enum.uniq() |> length()
-        else
-          1
-        end
+  defp zero_bucket, do: %{counters: Counters.zero(), cost: 0.0, segments: %{}}
 
-      %{
-        internal: internal,
-        label: series_label(internal),
-        tokens: token_total(rows),
-        isOther: internal == :overflow,
-        count: original_count
-      }
+  defp accumulate(totals, row) do
+    %{totals | counters: Counters.add(totals.counters, row), cost: totals.cost + row.cost}
+  end
+
+  defp accumulate_buckets(rows, series_key_by_dimension) do
+    Enum.reduce(rows, %{}, fn row, acc ->
+      series_key = Map.fetch!(series_key_by_dimension, row.dimension)
+      tokens = Counters.total(row)
+
+      Map.update(acc, row.bucket, seed_bucket(row, series_key, tokens), fn totals ->
+        totals
+        |> accumulate(row)
+        |> Map.update!(:segments, &Map.update(&1, series_key, tokens, fn sum -> sum + tokens end))
+      end)
     end)
+  end
+
+  defp seed_bucket(row, series_key, tokens) do
+    zero_bucket()
+    |> accumulate(row)
+    |> Map.put(:segments, %{series_key => tokens})
+  end
+
+  defp row_cost(row, pricing) do
+    case pricing.rates[{row.provider, row.model}] || pricing.rates[row.model] do
+      nil -> 0.0
+      rates -> Pricing.estimate(row, rates, row.pricing_tier)
+    end
+  end
+
+  defp series_lookup(series, overflow_keys) do
+    overflow_key = Enum.find_value(series, &if(&1.isOther, do: &1.key))
+
+    series
+    |> Enum.reject(& &1.isOther)
+    |> Map.new(&{&1.dimension, &1.key})
+    |> then(fn lookup ->
+      Enum.reduce(overflow_keys, lookup, &Map.put(&2, &1, overflow_key))
+    end)
+  end
+
+  defp build_series(totals_by_dimension, top_keys, overflow_keys) do
+    named =
+      Enum.map(top_keys, fn key ->
+        totals = Map.fetch!(totals_by_dimension, key)
+
+        %{
+          dimension: key,
+          label: key,
+          tokens: Counters.total(totals.counters),
+          isOther: false,
+          count: 1
+        }
+      end)
+
+    overflow =
+      if overflow_keys == [] do
+        []
+      else
+        tokens =
+          Enum.reduce(overflow_keys, 0, fn key, sum ->
+            sum + Counters.total(Map.fetch!(totals_by_dimension, key).counters)
+          end)
+
+        [
+          %{
+            dimension: :overflow,
+            dimensions: overflow_keys,
+            label: "Other",
+            tokens: tokens,
+            isOther: true,
+            count: length(overflow_keys)
+          }
+        ]
+      end
+
+    (named ++ overflow)
     |> Enum.sort_by(& &1.tokens, :desc)
     |> Enum.with_index()
-    |> Enum.map(fn {series, index} ->
-      Map.put(series, :key, "series-#{index}")
-    end)
+    |> Enum.map(fn {series, index} -> Map.put(series, :key, "series-#{index}") end)
   end
 
-  defp series_key(row, view, top_keys) do
-    key = dimension(row, view)
-    if key in top_keys, do: {:value, key}, else: :overflow
-  end
+  defp bucket_key(hour_utc, %{period: "day"}), do: DateTime.to_iso8601(floor_hour(hour_utc))
 
-  defp series_label({:value, key}), do: key
-  defp series_label(:overflow), do: "Other"
-
-  defp dimension(row, "device"), do: row.device
-  defp dimension(row, "project"), do: row.project
-  defp dimension(row, "agent"), do: row.agent
-  defp dimension(row, "model"), do: row.model
-
-  defp bucket_key(row, "day", _time_zone), do: DateTime.to_iso8601(floor_hour(row.hour_utc))
-
-  defp bucket_key(row, _period, time_zone) do
-    row.hour_utc
-    |> DateTime.shift_zone!(time_zone, Tz.TimeZoneDatabase)
+  defp bucket_key(hour_utc, window) do
+    hour_utc
+    |> DateTime.shift_zone!(window.time_zone, Tz.TimeZoneDatabase)
     |> DateTime.to_date()
     |> Date.to_iso8601()
   end
 
-  defp summarize(rows, pricing) do
-    Enum.reduce(rows, %{counters: Counters.zero(), cost: 0.0}, fn row, summary ->
-      counters = Counters.add(summary.counters, row)
+  # An "Other" series spans several dimension values, so its totals are summed
+  # across them and its session count is the sum of theirs.
+  defp total_wire(%{isOther: true} = series, totals_by_dimension, sessions) do
+    totals =
+      Enum.reduce(series.dimensions, zero_bucket(), fn key, acc ->
+        totals = Map.fetch!(totals_by_dimension, key)
 
-      cost =
-        case pricing.rates[{row.provider, row.model}] || pricing.rates[row.model] do
-          nil -> 0.0
-          rates -> Pricing.estimate(row, rates, row.pricing_tier)
-        end
+        %{
+          acc
+          | counters: Counters.add(acc.counters, totals.counters),
+            cost: acc.cost + totals.cost
+        }
+      end)
 
-      %{counters: counters, cost: summary.cost + cost}
-    end)
+    wire(series, totals, sessions.overflow)
   end
 
-  defp total_wire(series, rows, pricing) do
-    summary = summarize(rows, pricing)
+  defp total_wire(series, totals_by_dimension, sessions) do
+    totals = Map.fetch!(totals_by_dimension, series.dimension)
+    wire(series, totals, Map.get(sessions.by_dimension, series.dimension, 0))
+  end
 
+  defp wire(series, totals, sessions) do
     %{
       key: series.key,
       label: series.label,
-      counters: counters_wire(summary.counters, distinct_sessions(rows)),
-      tokens: Counters.total(summary.counters),
-      cost: summary.cost,
-      qualities: qualities(rows),
+      counters: counters_wire(totals.counters, sessions),
+      tokens: Counters.total(totals.counters),
+      cost: totals.cost,
       isOther: series.isOther,
       count: series.count
     }
   end
 
-  defp combined_wire(rows, pricing) do
-    summary = summarize(rows, pricing)
+  defp combined_wire(rows, sessions) do
+    totals = Enum.reduce(rows, zero_bucket(), &accumulate(&2, &1))
 
     %{
       key: "combined",
       label: "Combined",
-      counters: counters_wire(summary.counters, distinct_sessions(rows)),
-      tokens: Counters.total(summary.counters),
-      cost: summary.cost,
-      qualities: qualities(rows),
+      counters: counters_wire(totals.counters, sessions),
+      tokens: Counters.total(totals.counters),
+      cost: totals.cost,
       isOther: false,
       count: 1
     }
@@ -457,32 +607,6 @@ defmodule TokenTracker.Dashboard do
       sessions: sessions
     }
   end
-
-  defp distinct_sessions(rows) do
-    rows
-    |> MapSet.new(&{&1.device_id, &1.session_key})
-    |> MapSet.size()
-  end
-
-  defp token_total(rows) do
-    rows
-    |> Enum.reduce(Counters.zero(), &Counters.add/2)
-    |> Counters.total()
-  end
-
-  defp qualities(rows), do: rows |> Enum.map(& &1.quality) |> Enum.uniq() |> Enum.sort()
-
-  defp options(rows) do
-    %{
-      devices: option_values(rows, :device),
-      projects: option_values(rows, :project),
-      agents: option_values(rows, :agent),
-      models: option_values(rows, :model)
-    }
-  end
-
-  defp option_values(rows, key),
-    do: rows |> Enum.map(&Map.fetch!(&1, key)) |> Enum.uniq() |> Enum.sort()
 
   defp stale_devices(selected_names, now) do
     devices =

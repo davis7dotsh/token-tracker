@@ -49,10 +49,14 @@
 	<meta name="description" content="Local AI agent token usage" />
 </svelte:head>
 
+<!-- Mounted unconditionally so the message is announced; see the note on the same
+     pattern in the usage page. -->
+<div class="sr-only" role="status" aria-live="polite">
+	{navigating.to ? 'Loading page…' : ''}
+</div>
+
 {#if navigating.to}
-	<div class="navigation-progress" role="status" aria-live="polite">
-		<span class="sr-only">Loading page…</span>
-	</div>
+	<div class="navigation-progress" aria-hidden="true"></div>
 {/if}
 
 <div class="shell" aria-busy={Boolean(navigating.to)}>
