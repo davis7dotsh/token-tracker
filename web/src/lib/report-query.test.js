@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-	createLatestRequest,
-	reportSearch,
-	reportTarget,
-	syncDecision,
-	updateReportParam,
-	validChart
+	effectiveChart,
+	effectivePeriod,
+	effectiveView,
+	filterValues,
+	maxFilterValueLength,
+	maxFilterValues,
+	reportSearch
 } from './report-query.ts';
 
 test('sanitizes invalid deep links before requesting the API', () => {
@@ -21,160 +22,93 @@ test('sanitizes invalid deep links before requesting the API', () => {
 	assert.equal(params.get('tz'), 'America/Los_Angeles');
 	assert.equal(params.get('device'), '["one","two"]');
 	assert.equal(params.has('chart'), false);
-	assert.equal(validChart('unknown'), 'bars');
+});
 
-	const bars = new URL('https://tracker.test/?chart=bars');
-	const lines = new URL('https://tracker.test/?chart=lines');
-	assert.equal(reportSearch(bars, 'UTC'), reportSearch(lines, 'UTC'));
+test('falls back to UTC when neither the link nor the browser has a usable zone', () => {
+	const url = new URL('https://tracker.test/');
+	const params = new URLSearchParams(reportSearch(url, 'Also/Invalid'));
+
+	assert.equal(params.get('tz'), 'UTC');
 });
 
 test('caps filter values at the server limit', () => {
-	const values = [
-		...Array.from({ length: 12 }, (_, index) => `device-${index}`),
-		'x'.repeat(161)
-	];
-	const url = new URL(
-		`https://tracker.test/?device=${encodeURIComponent(JSON.stringify(values))}`
-	);
+	const devices = Array.from({ length: 12 }, (_, index) => `device-${index}`);
+	const tooLong = 'x'.repeat(maxFilterValueLength + 1);
+	const url = new URL('https://tracker.test/');
+	url.searchParams.set('device', JSON.stringify([...devices, tooLong]));
+
 	const params = new URLSearchParams(reportSearch(url, 'UTC'));
-	const device = params.get('device');
-	assert.ok(device);
 	/** @type {string[]} */
-	const parsed = JSON.parse(device);
-	assert.equal(parsed.length, 10);
-	assert.ok(parsed.every((value) => value.length <= 160));
-});
+	const selected = JSON.parse(params.get('device') ?? '[]');
 
-test('builds report URLs without changing client-only chart state', () => {
-	const current = new URL(
-		'https://tracker.test/?chart=lines&project=%5B%22one%22%5D'
+	assert.equal(selected.length, maxFilterValues);
+	assert.ok(selected.every((value) => value.length <= maxFilterValueLength));
+
+	// The same caps apply when decoding straight from a parameter.
+	assert.equal(
+		filterValues(JSON.stringify([...devices, tooLong])).length,
+		maxFilterValues
 	);
-	const week = reportTarget(current, 'period', 'week');
-	assert.equal(week.searchParams.get('period'), 'week');
-	assert.equal(week.searchParams.get('chart'), 'lines');
-	assert.equal(week.searchParams.get('project'), '["one"]');
-
-	const defaultPeriod = reportTarget(week, 'period', 'day');
-	assert.equal(defaultPeriod.searchParams.has('period'), false);
-
-	const filtered = reportTarget(current, 'device', ['operator', 'siva']);
-	assert.equal(filtered.searchParams.get('device'), '["operator","siva"]');
+	assert.deepEqual(filterValues('not json'), []);
+	assert.deepEqual(filterValues(null), []);
 });
 
-test('runs one report navigation for a changed value and none for a no-op', async () => {
-	const current = new URL('https://tracker.test/?period=day');
+test('chart style never reaches the API or the load dependency', () => {
+	// Two URLs differing only by chart style must produce the same request, so
+	// toggling bars against lines cannot cause a refetch.
+	const bars = new URL('https://tracker.test/?period=week&chart=bars');
+	const lines = new URL('https://tracker.test/?period=week&chart=lines');
+
+	assert.equal(reportSearch(bars, 'UTC'), reportSearch(lines, 'UTC'));
+
+	// SvelteKit records a `load` dependency for each parameter read through `get`,
+	// so reading `chart` at all would make every toggle re-run the load function.
+	// This stand-in records which parameters are touched, mirroring how SvelteKit
+	// tracks them.
 	/** @type {string[]} */
-	const destinations = [];
-	const navigate = async (/** @type {URL} */ target) => {
-		destinations.push(target.href);
-	};
+	const read = [];
+	const tracked = new URL('https://tracker.test/?period=week&chart=lines');
+	const spy = /** @type {URL} */ ({
+		searchParams: {
+			/** @param {string} param */
+			get(param) {
+				read.push(param);
+				return tracked.searchParams.get(param);
+			}
+		}
+	});
 
-	assert.equal(
-		await updateReportParam(current, 'period', 'week', navigate),
-		true
-	);
-	assert.deepEqual(destinations, ['https://tracker.test/?period=week']);
+	reportSearch(spy, 'UTC');
 
-	assert.equal(
-		await updateReportParam(
-			new URL('https://tracker.test/?period=week'),
-			'period',
-			'week',
-			navigate
-		),
-		false
-	);
-	assert.equal(destinations.length, 1);
+	assert.ok(read.includes('period'), 'expected period to be read');
+	assert.ok(!read.includes('chart'), 'chart must never be read');
 });
 
-test('only accepts the newest report response', async () => {
-	const latestRequest = createLatestRequest();
-	/** @type {(value: string) => void} */
-	let resolveFirst = () => {};
-	/** @type {(value: string) => void} */
-	let resolveSecond = () => {};
-	/** @type {AbortSignal | undefined} */
-	let firstSignal;
+test('controls and the request resolve a parameter the same way', () => {
+	// If these ever disagreed, a hand-edited or stale link would render one window
+	// while the buttons claimed another. Both sides call the same helpers, so this
+	// asserts the property directly rather than the duplication that once caused it.
+	for (const value of ['forever', '', 'DAY', 'week', 'month', 'day']) {
+		const url = new URL('https://tracker.test/');
+		if (value) url.searchParams.set('period', value);
+		const requested = new URLSearchParams(reportSearch(url, 'UTC')).get(
+			'period'
+		);
 
-	const first = latestRequest(
-		(signal) =>
-			new Promise((resolve) => {
-				firstSignal = signal;
-				resolveFirst = resolve;
-			})
-	);
-	const second = latestRequest(
-		() =>
-			new Promise((resolve) => {
-				resolveSecond = resolve;
-			})
-	);
+		assert.equal(effectivePeriod(value || null), requested);
+	}
 
-	assert.equal(firstSignal?.aborted, true);
-	resolveSecond('month');
-	assert.deepEqual(await second, { current: true, value: 'month' });
+	for (const value of ['secret', '', 'AGENT', 'device', 'model', 'agent']) {
+		const url = new URL('https://tracker.test/');
+		if (value) url.searchParams.set('view', value);
+		const requested = new URLSearchParams(reportSearch(url, 'UTC')).get('view');
 
-	resolveFirst('week');
-	assert.deepEqual(await first, { current: false });
-});
+		assert.equal(effectiveView(value || null), requested);
+	}
 
-test('ignores a load result echoed back by an in-app URL rewrite', () => {
-	const data = { report: {} };
-
-	// Selecting a control rewrites the URL via replaceState, which re-runs the
-	// effect without re-running load. Adopting `data` again would replace whatever
-	// is now displayed with the entry the page was first loaded with.
-	assert.equal(
-		syncDecision({
-			data,
-			href: 'https://tracker.test/?period=week',
-			synced: data,
-			currentHref: 'https://tracker.test/?period=week',
-			cached: true
-		}),
-		'ignore'
-	);
-});
-
-test('adopts a genuinely new load result', () => {
-	assert.equal(
-		syncDecision({
-			data: { report: {} },
-			href: 'https://tracker.test/?period=month',
-			synced: { report: {} },
-			currentHref: 'https://tracker.test/?period=week',
-			cached: false
-		}),
-		'adopt'
-	);
-});
-
-test('follows history back to a restored URL that reuses the same load result', () => {
-	const data = { report: {} };
-
-	// SvelteKit can restore a history entry without building a new data object. The
-	// URL still moved, so the report has to follow it: from cache when possible,
-	// otherwise by fetching. Returning 'ignore' here would leave the report
-	// describing the query the user just left.
-	assert.equal(
-		syncDecision({
-			data,
-			href: 'https://tracker.test/?period=day',
-			synced: data,
-			currentHref: 'https://tracker.test/?period=week',
-			cached: true
-		}),
-		'adopt'
-	);
-
-	assert.equal(
-		syncDecision({
-			data,
-			href: 'https://tracker.test/?period=day',
-			synced: data,
-			currentHref: 'https://tracker.test/?period=week',
-			cached: false
-		}),
-		'fetch'
-	);
+	// Chart is presentation-only, so it has no counterpart in the request.
+	assert.equal(effectiveChart('lines'), 'lines');
+	assert.equal(effectiveChart('bars'), 'bars');
+	assert.equal(effectiveChart('nonsense'), 'bars');
+	assert.equal(effectiveChart(null), 'bars');
 });
