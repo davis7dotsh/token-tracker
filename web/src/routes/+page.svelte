@@ -1,40 +1,27 @@
 <script lang="ts">
-	import { untrack } from 'svelte';
-	import { page } from '$app/state';
-	import { money, number, type Chart, type ReportResponse } from '$lib/api';
-	import BarChart from '$lib/BarChart.svelte';
-	import LineChart from '$lib/LineChart.svelte';
-	import { maxFilterValues, type ReportParamKey } from '$lib/report-query';
-	import { ReportState } from '$lib/report-state.svelte';
-	import type { FilterKey } from '$lib/search-params';
-	import { displaySeriesLabel } from '$lib/series-label';
+	import { invalidate } from '$app/navigation';
+	import { useSearchParams } from 'runed/kit';
+	import { number, type Chart, type Period, type View } from '$lib/api';
+	import {
+		filterValues,
+		maxFilterValues,
+		reportDependency
+	} from '$lib/report-query';
+	import ReportView from '$lib/ReportView.svelte';
+	import { dashboardSearchSchema, type FilterKey } from '$lib/search-params';
 
-	let { data }: { data: ReportResponse } = $props();
+	let { data } = $props();
 
-	// Seeded from the load function's first result. Reading `data` here is
-	// deliberately a one-time snapshot: later results are adopted by the effect
-	// below, which is what keeps the state authoritative after a navigation.
-	const state = untrack(() => new ReportState(page.url, data));
+	/**
+	 * The URL is the single source of truth for the report being viewed.
+	 *
+	 * Reads are reactive and writes navigate, so assigning a parameter re-runs the
+	 * page's load function and the report follows. The previous implementation kept
+	 * its own copy of the query and wrote to the URL with `replaceState`, which does
+	 * not re-run `load` — so the address bar changed while the report did not.
+	 */
+	const params = useSearchParams(dashboardSearchSchema, { noScroll: true });
 
-	// A full navigation (a link, or the back button) delivers new load data; adopt it
-	// so the URL and the rendered report cannot drift apart.
-	$effect(() => {
-		state.sync(page.url, data);
-	});
-
-	const palette = [
-		'#43b7a5',
-		'#8b63e6',
-		'#efa91f',
-		'#e1666b',
-		'#398ad7',
-		'#9aaa40',
-		'#d373ba',
-		'#84776b',
-		'#25a8bd',
-		'#b56b20',
-		'#858585'
-	];
 	const periods = [
 		{ key: 'day', label: '1D' },
 		{ key: 'week', label: '1W' },
@@ -48,99 +35,53 @@
 		{ key: 'model', label: 'model', options: 'models' }
 	] as const;
 
-	const report = $derived(state.report);
-	const seriesByKey = $derived(
-		new Map(report.series.map((series) => [series.key, series]))
+	/**
+	 * Controls read the *effective* value, not the raw parameter.
+	 *
+	 * A link can carry anything, and the schema passes unrecognised strings through
+	 * rather than rejecting them. The report already falls back to a default in that
+	 * case (`reportSearch` whitelists the same values), so the buttons have to agree
+	 * — otherwise a stale or hand-edited link renders a report with no control
+	 * showing as selected.
+	 */
+	const period = $derived(
+		periods.some((option) => option.key === params.period)
+			? (params.period as Period)
+			: 'day'
 	);
+	const view = $derived(
+		views.includes(params.view as View) ? (params.view as View) : 'agent'
+	);
+	const chart = $derived<Chart>(params.chart === 'lines' ? 'lines' : 'bars');
 
-	function hash(value: string) {
-		let result = 0;
-		for (const character of value)
-			result = (result * 31 + character.charCodeAt(0)) >>> 0;
-		return result;
+	/**
+	 * Filters are stored as a JSON array in one parameter. Decoding through
+	 * `filterValues` applies the same caps the server enforces, so a hand-edited
+	 * link cannot select more values than the UI allows.
+	 */
+	const selectedValues = (key: FilterKey) => {
+		const value = params[key];
+		return filterValues(Array.isArray(value) ? JSON.stringify(value) : value);
+	};
+
+	function toggleFilter(key: FilterKey, value: string, checked: boolean) {
+		const values = selectedValues(key).filter((item) => item !== value);
+		if (checked && values.length < maxFilterValues) values.push(value);
+		params[key] = values;
 	}
 
 	/**
-	 * Assigns each series a colour, keyed on its identity rather than its rank so a
-	 * series keeps its colour when the ordering changes and the transition reads as
-	 * movement.
+	 * Retries a failed report.
 	 *
-	 * Ten series over eleven colours makes hash collisions likely rather than rare,
-	 * and two series drawn in the same colour is indistinguishable from one. Where a
-	 * slot is already taken, the next free slot is used instead. Assignment walks
-	 * the series in report order, so it stays stable for as long as the set does.
+	 * Resetting the boundary alone would re-await the promise that already rejected,
+	 * so the load function has to run again first. Invalidating its declared
+	 * dependency produces a fresh request, and only then is it worth rebuilding the
+	 * boundary's contents.
 	 */
-	const seriesColors = $derived.by(() => {
-		// Both are rebuilt from scratch whenever the series change and are never
-		// mutated afterwards, so they need no reactivity of their own.
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const assigned = new Map<string, string>();
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const taken = new Set<string>();
-
-		const claim = (identity: string, preferred: number) => {
-			for (let step = 0; step < palette.length; step += 1) {
-				const colour = palette[(preferred + step) % palette.length];
-				if (!taken.has(colour)) {
-					taken.add(colour);
-					assigned.set(identity, colour);
-					return;
-				}
-			}
-			// More series than colours: fall back to the hashed slot and allow a repeat.
-			assigned.set(identity, palette[preferred]);
-		};
-
-		for (const series of report.series) {
-			if (series.isOther) continue;
-			const identity = series.label;
-			if (assigned.has(identity)) continue;
-
-			// Codex keeps its established teal, and claiming it here stops another
-			// series from being given the same colour.
-			const preferred =
-				report.view === 'agent' && identity.toLowerCase() === 'codex'
-					? 0
-					: hash(identity) % palette.length;
-
-			claim(identity, preferred);
-		}
-
-		return assigned;
-	});
-
-	function colorOf(key: string) {
-		const series = seriesByKey.get(key);
-		if (series?.isOther) return 'var(--muted)';
-		const identity = series?.label ?? key;
-		return (
-			seriesColors.get(identity) ?? palette[hash(identity) % palette.length]
-		);
+	async function retry(reset: () => void) {
+		await invalidate(reportDependency);
+		reset();
 	}
-
-	// Dash patterns are a secondary cue on the line chart, where colour already
-	// separates the series; a repeat here is not ambiguous on its own.
-	function dashOf(key: string) {
-		if (seriesByKey.get(key)?.isOther) return '1 4';
-		const patterns = ['', '8 3', '3 3', '10 3 2 3', '2 4'];
-		const identity = seriesByKey.get(key)?.label ?? key;
-		return patterns[hash(identity) % patterns.length];
-	}
-
-	function labelOf(key: string) {
-		return displaySeriesLabel(seriesByKey.get(key), key, report.view);
-	}
-
-	const filterOptions = (
-		key: (typeof filters)[number]['options'],
-		filterKey: FilterKey
-	) =>
-		[...state.selected(filterKey), ...report.options[key]]
-			.filter((value, index, values) => values.indexOf(value) === index)
-			.sort();
-
-	const prefetch = (key: ReportParamKey, value: string | string[]) => () =>
-		state.prefetch(key, value);
 </script>
 
 <svelte:head><title>Usage · Token Tracker</title></svelte:head>
@@ -149,17 +90,17 @@
      the same moment as its message is often missed, because assistive technology
      has not yet begun observing it. -->
 <div class="sr-only" role="status" aria-live="polite">
-	{state.loading ? 'Updating report…' : ''}
+	{$effect.pending() > 0 ? 'Updating report…' : ''}
 </div>
 
-{#if state.loading}
+{#if $effect.pending() > 0}
 	<div class="navigation-progress" aria-hidden="true"></div>
 {/if}
 
 <main>
 	<header class="page-header">
 		<div>
-			<p class="eyebrow">USAGE / {report.timeZone}</p>
+			<p class="eyebrow">USAGE / {params.tz || 'LOCAL'}</p>
 			<h1>Token activity</h1>
 			<p class="lede">
 				A local view of AI agent work across every synchronized device.
@@ -167,33 +108,35 @@
 		</div>
 		<div class="window-total">
 			<p class="eyebrow">CURRENT WINDOW</p>
-			<div class="window-tokens">{number(report.combined.tokens)} tokens</div>
+			<div class="window-tokens">
+				<svelte:boundary>
+					{number((await data.report).report.combined.tokens)} tokens
+					{#snippet pending()}<span class="placeholder">—</span>{/snippet}
+					{#snippet failed()}<span class="placeholder">—</span>{/snippet}
+				</svelte:boundary>
+			</div>
 		</div>
 	</header>
 
 	<section class="controls" aria-label="Report controls">
 		<div class="control-group" role="group" aria-label="Period">
-			{#each periods as period (period.key)}
+			{#each periods as option (option.key)}
 				<button
 					type="button"
-					class:active={state.period === period.key}
-					aria-pressed={state.period === period.key}
-					onmouseenter={prefetch('period', period.key)}
-					onfocus={prefetch('period', period.key)}
-					onclick={() => state.setPeriod(period.key)}>{period.label}</button
+					class:active={period === option.key}
+					aria-pressed={period === option.key}
+					onclick={() => (params.period = option.key)}>{option.label}</button
 				>
 			{/each}
 		</div>
 		<div class="control-group" role="group" aria-label="Group by">
-			{#each views as view (view)}
+			{#each views as option (option)}
 				<button
 					type="button"
-					class:active={state.view === view}
-					aria-pressed={state.view === view}
-					onmouseenter={prefetch('view', view)}
-					onfocus={prefetch('view', view)}
-					onclick={() => state.setView(view)}
-					>{view[0].toUpperCase() + view.slice(1)}</button
+					class:active={view === option}
+					aria-pressed={view === option}
+					onclick={() => (params.view = option)}
+					>{option[0].toUpperCase() + option.slice(1)}</button
 				>
 			{/each}
 		</div>
@@ -201,9 +144,9 @@
 			{#each ['bars', 'lines'] as style (style)}
 				<button
 					type="button"
-					class:active={state.chart === style}
-					aria-pressed={state.chart === style}
-					onclick={() => state.setChart(style as Chart)}
+					class:active={chart === style}
+					aria-pressed={chart === style}
+					onclick={() => (params.chart = style)}
 					>{style[0].toUpperCase() + style.slice(1)}</button
 				>
 			{/each}
@@ -211,7 +154,7 @@
 
 		<div class="filters">
 			{#each filters as filter (filter.key)}
-				{@const selected = state.selected(filter.key)}
+				{@const selected = selectedValues(filter.key)}
 				<details class="filter">
 					<summary
 						>{filter.label}
@@ -222,30 +165,47 @@
 							<button
 								class="filter-clear"
 								type="button"
-								onclick={() => state.clearFilter(filter.key)}>Clear all</button
+								onclick={() => (params[filter.key] = [])}>Clear all</button
 							>
 						{/if}
-						{#if filterOptions(filter.options, filter.key).length === 0}
-							<div class="filter-option">No values in this window</div>
-						{:else}
-							{#each filterOptions(filter.options, filter.key) as option (option)}
-								<label class="filter-option">
-									<input
-										type="checkbox"
-										checked={selected.includes(option)}
-										disabled={selected.length >= maxFilterValues &&
-											!selected.includes(option)}
-										onchange={(event) =>
-											state.toggleFilter(
-												filter.key,
-												option,
-												event.currentTarget.checked
-											)}
-									/>
-									<span>{option}</span>
-								</label>
-							{/each}
-						{/if}
+						<svelte:boundary>
+							{@const options = [
+								...selected,
+								...(await data.report).report.options[filter.options]
+							]
+								.filter(
+									(value, index, values) => values.indexOf(value) === index
+								)
+								.sort()}
+							{#if options.length === 0}
+								<div class="filter-option">No values in this window</div>
+							{:else}
+								{#each options as option (option)}
+									<label class="filter-option">
+										<input
+											type="checkbox"
+											checked={selected.includes(option)}
+											disabled={selected.length >= maxFilterValues &&
+												!selected.includes(option)}
+											onchange={(event) =>
+												toggleFilter(
+													filter.key,
+													option,
+													event.currentTarget.checked
+												)}
+										/>
+										<span>{option}</span>
+									</label>
+								{/each}
+							{/if}
+
+							{#snippet pending()}
+								<div class="filter-option">Loading values…</div>
+							{/snippet}
+							{#snippet failed()}
+								<div class="filter-option">Values are unavailable</div>
+							{/snippet}
+						</svelte:boundary>
 						<p class="filter-limit">
 							{selected.length}/{maxFilterValues} selected
 							{#if selected.length >= maxFilterValues}
@@ -258,115 +218,38 @@
 		</div>
 	</section>
 
-	<!-- A failed update is worth interrupting for: the figures on screen are not the
-	     ones the controls now describe. -->
-	{#if state.error}
-		<p class="notice" role="alert">
-			{state.error} The previous data is still shown.
-		</p>
-	{/if}
+	<!-- The boundary owns the report's pending and failed states. `pending` covers
+	     only the first resolution; later updates keep the previous report on screen
+	     and are signalled by `$effect.pending()` above. -->
+	<svelte:boundary>
+		<ReportView
+			response={await data.report}
+			{chart}
+			pending={$effect.pending() > 0}
+		/>
 
-	{#if state.response.stale}
-		<p class="notice">
-			Usage may be incomplete because {state.response.staleDevices.join(', ')}
-			{state.response.staleDevices.length === 1 ? 'has' : 'have'} not reported recently.
-		</p>
-	{/if}
-
-	{#if !report.hasUsage}
-		<section class="empty-state">
-			<p class="eyebrow">NO DATA / WINDOW</p>
-			<h2>No usage yet</h2>
-			<p class="lede">
-				Collect or synchronize sessions, then this report will fill in
-				automatically.
-			</p>
-		</section>
-	{:else if !report.hasMatches}
-		<section class="empty-state">
-			<p class="eyebrow">FILTER / EMPTY</p>
-			<h2>No matching usage</h2>
-			<p class="lede">Remove one or more filters to widen the report.</p>
-		</section>
-	{:else}
-		<!-- The report stays mounted and dims while a slower window loads, so the
-		     charts animate from the old figures to the new ones instead of
-		     collapsing to a placeholder and back. -->
-		<section
-			class="dashboard"
-			class:pending={state.loading}
-			aria-busy={state.loading}
-		>
-			<div class="chart-shell">
-				<div class="legend" aria-label="Chart legend">
-					{#each report.series as series (series.key)}
-						<span
-							><i class="swatch" style:background={colorOf(series.key)}
-							></i>{labelOf(series.key)}</span
-						>
-					{/each}
-				</div>
-				{#if report.truncated}
-					<p class="truncation-note">
-						Only the ten largest series are shown individually; the remaining
-						series are combined as Other.
-					</p>
-				{/if}
-
-				{#if state.chart === 'bars'}
-					<BarChart
-						bars={report.bars}
-						series={report.series}
-						{colorOf}
-						{labelOf}
-					/>
-				{:else}
-					<LineChart
-						bars={report.bars}
-						series={report.series}
-						{colorOf}
-						{dashOf}
-						{labelOf}
-					/>
-				{/if}
-			</div>
-
-			<section class="totals">
-				<h2>{report.view[0].toUpperCase() + report.view.slice(1)} totals</h2>
-				<table class="data-table">
-					<thead>
-						<tr>
-							<th>{report.view}</th>
-							<th>Sessions</th>
-							<th>Input</th>
-							<th>Output</th>
-							<th>Cache read</th>
-							<th>Tokens</th>
-							<th>API-equivalent cost</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#each report.totals as total (total.key)}
-							<tr>
-								<th scope="row">
-									<span class="total-label"
-										><i class="swatch" style:background={colorOf(total.key)}
-										></i>{labelOf(total.key)}</span
-									>
-								</th>
-								<td>{number(total.counters.sessions)}</td>
-								<td>{number(total.counters.input)}</td>
-								<td>{number(total.counters.output)}</td>
-								<td>{number(total.counters.cacheRead)}</td>
-								<td>{number(total.tokens)}</td>
-								<td>{money(total.cost)}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
+		{#snippet pending()}
+			<section class="skeleton" aria-hidden="true">
+				<div class="skeleton-legend"></div>
+				{#each Array(8), row (row)}
+					<div class="skeleton-row"></div>
+				{/each}
 			</section>
-		</section>
-	{/if}
+		{/snippet}
+
+		{#snippet failed(error, reset)}
+			<!-- Inline rather than a full error page: the controls stay usable, so the
+			     window that failed can be changed or simply retried. -->
+			<p class="notice" role="alert">
+				{error instanceof Error
+					? error.message
+					: 'The report could not be loaded.'}
+				<button class="retry" type="button" onclick={() => retry(reset)}>
+					Try again
+				</button>
+			</p>
+		{/snippet}
+	</svelte:boundary>
 </main>
 
 <style>
@@ -375,14 +258,49 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.dashboard {
-		padding: 40px 0 80px;
-		transition: opacity 180ms ease;
+	.placeholder {
+		color: var(--muted);
 	}
 
-	/* Held well above invisible: the point is to signal that figures are being
-	   replaced, while leaving the previous ones readable meanwhile. */
-	.dashboard.pending {
-		opacity: 0.62;
+	.retry {
+		margin-left: 10px;
+		border: 1px solid var(--line-strong);
+		background: var(--surface);
+		color: var(--ink);
+		padding: 4px 10px;
+		cursor: pointer;
+		font: 0.72rem var(--font-mono);
+	}
+
+	.skeleton {
+		padding: 40px 0 80px;
+		display: grid;
+		gap: 10px;
+	}
+
+	.skeleton-legend,
+	.skeleton-row {
+		height: 18px;
+		border-radius: 3px;
+		background: linear-gradient(
+			90deg,
+			color-mix(in srgb, var(--line) 60%, transparent),
+			color-mix(in srgb, var(--line) 25%, transparent)
+		);
+		animation: skeleton-pulse 1.1s ease-in-out infinite alternate;
+	}
+
+	.skeleton-legend {
+		width: min(420px, 60%);
+		margin-bottom: 24px;
+	}
+
+	@keyframes skeleton-pulse {
+		from {
+			opacity: 0.45;
+		}
+		to {
+			opacity: 0.9;
+		}
 	}
 </style>

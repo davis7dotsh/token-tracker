@@ -5,7 +5,9 @@ import { sveltekit } from '@sveltejs/kit/vite';
 export default defineConfig({
 	plugins: [
 		sveltekit({
-			compilerOptions: { runes: true },
+			// `experimental.async` enables `{await …}` in markup, which lets a
+			// `<svelte:boundary>` own the report's pending and failed states.
+			compilerOptions: { runes: true, experimental: { async: true } },
 			adapter: adapter({ fallback: 'index.html', pages: '../priv/static' })
 		})
 	],
