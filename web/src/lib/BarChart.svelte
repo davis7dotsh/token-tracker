@@ -83,13 +83,16 @@
 		color: var(--muted);
 	}
 
+	/* A hairline baseline marks the track without competing with the bars: a filled
+	   track reads as a full-width bar on days with no usage. */
 	.bar-track {
 		display: flex;
 		height: 18px;
 		min-width: 2px;
 		overflow: hidden;
 		border-radius: 3px;
-		background: color-mix(in srgb, var(--line) 55%, transparent);
+		background: linear-gradient(var(--line), var(--line)) left center / 100% 1px
+			no-repeat;
 	}
 
 	.bar-segment {
