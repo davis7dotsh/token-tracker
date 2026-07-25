@@ -91,7 +91,17 @@
 <main>
 	<header class="page-header">
 		<div>
-			<p class="eyebrow">USAGE / {params.tz || 'LOCAL'}</p>
+			<!-- The zone comes from the report rather than the URL parameter. The
+			     server resolves an absent or unusable `tz` to a fallback, so reading the
+			     parameter would label the data with a zone it was not grouped by. -->
+			<p class="eyebrow">
+				USAGE /
+				<svelte:boundary>
+					{(await data.report).report.timeZone}
+					{#snippet pending()}<span class="placeholder">…</span>{/snippet}
+					{#snippet failed()}<span class="placeholder">—</span>{/snippet}
+				</svelte:boundary>
+			</p>
 			<h1>Token activity</h1>
 			<p class="lede">
 				A local view of AI agent work across every synchronized device.
