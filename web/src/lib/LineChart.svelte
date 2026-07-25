@@ -56,8 +56,13 @@
 		return left + (index / last) * (right - left);
 	}
 
+	// New values arrive before the axis finishes tweening to its new maximum, so
+	// mid-transition a point can compute far outside the plot area — and the chart
+	// is deliberately `overflow: visible`, so it would be drawn there. Clamping
+	// keeps the transition inside the plot until the scale catches up.
 	function y(tokens: number) {
-		return bottom - (tokens / axis) * (bottom - top);
+		const raw = bottom - (tokens / axis) * (bottom - top);
+		return Math.min(bottom, Math.max(top, raw));
 	}
 
 	function points(row: number[]) {

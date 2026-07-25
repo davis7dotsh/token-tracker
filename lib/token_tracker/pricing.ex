@@ -442,15 +442,17 @@ defmodule TokenTracker.Pricing do
   # Decoding the multi-megabyte catalog dominated dashboard response time, so the
   # decoded term is memoized per path.
   #
-  # The memo is keyed on a hash of the file's bytes rather than its metadata.
+  # The memo is keyed on a digest of the file's bytes rather than its metadata.
   # Erlang exposes modification times only to the second, so a stamp of
   # {mtime, size} cannot distinguish a same-second replacement by a different
   # document of equal length, and would serve the superseded catalog until the
-  # file changed again. Reading and hashing costs a small fraction of decoding.
+  # file changed again. A cryptographic digest is used rather than a cheap hash
+  # because a collision here silently serves the wrong prices; SHA-256 costs
+  # about 1.5ms against roughly 36ms to decode, so the saving is unaffected.
   defp read_cache(path) do
     case File.read(path) do
       {:ok, contents} ->
-        stamp = :erlang.phash2(contents)
+        stamp = :crypto.hash(:sha256, contents)
 
         case :persistent_term.get({__MODULE__, :cache, path}, nil) do
           %{stamp: ^stamp, cache: cache} ->
