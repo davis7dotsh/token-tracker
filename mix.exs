@@ -4,7 +4,7 @@ defmodule TokenTracker.MixProject do
   def project do
     [
       app: :token_tracker,
-      version: "0.5.0",
+      version: "0.5.1",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       releases: releases(),
