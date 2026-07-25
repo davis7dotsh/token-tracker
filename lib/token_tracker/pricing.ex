@@ -439,7 +439,32 @@ defmodule TokenTracker.Pricing do
     end
   end
 
+  # The on-disk catalog is several megabytes, and decoding it on every dashboard
+  # request dominated the response time. The decoded term is memoized per path and
+  # invalidated whenever the file's size or modification time changes, so an
+  # external refresh is still picked up on the next read.
   defp read_cache(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{mtime: mtime, size: size}} ->
+        stamp = {mtime, size}
+
+        case :persistent_term.get({__MODULE__, :cache, path}, nil) do
+          %{stamp: ^stamp, cache: cache} ->
+            cache
+
+          _stale ->
+            cache = decode_cache(path)
+            :persistent_term.put({__MODULE__, :cache, path}, %{stamp: stamp, cache: cache})
+            cache
+        end
+
+      {:error, _reason} ->
+        forget_cache(path)
+        nil
+    end
+  end
+
+  defp decode_cache(path) do
     with {:ok, contents} <- File.read(path),
          {:ok, %{"catalog" => catalog} = cache} <- Jason.decode(contents),
          true <- is_map(catalog) do
@@ -449,6 +474,8 @@ defmodule TokenTracker.Pricing do
     end
   end
 
+  defp forget_cache(path), do: :persistent_term.erase({__MODULE__, :cache, path})
+
   defp write_cache(cache, path) do
     File.mkdir_p!(Path.dirname(path))
     temporary = "#{path}.tmp-#{System.unique_integer([:positive, :monotonic])}"
@@ -457,6 +484,14 @@ defmodule TokenTracker.Pricing do
       File.write!(temporary, Jason.encode!(cache))
       File.chmod!(temporary, 0o600)
       File.rename!(temporary, path)
+
+      case File.stat(path, time: :posix) do
+        {:ok, %File.Stat{mtime: mtime, size: size}} ->
+          :persistent_term.put({__MODULE__, :cache, path}, %{stamp: {mtime, size}, cache: cache})
+
+        {:error, _reason} ->
+          forget_cache(path)
+      end
     after
       File.rm(temporary)
     end
