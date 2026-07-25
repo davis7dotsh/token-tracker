@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
+	import { replaceState } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import {
@@ -11,22 +11,19 @@
 		type View
 	} from '$lib/api';
 	import {
+		createLatestRequest,
+		filterValues,
 		maxFilterValueLength,
 		maxFilterValues,
-		reportDependency,
+		reportSearch,
 		type ReportParamKey,
 		updateReportParam,
 		validChart
 	} from '$lib/report-query';
-	import { dashboardSearchSchema, type FilterKey } from '$lib/search-params';
+	import type { FilterKey } from '$lib/search-params';
 	import { displaySeriesLabel } from '$lib/series-label';
-	import { useSearchParams } from 'runed/kit';
 
 	let { data }: { data: ReportResponse } = $props();
-	const params = useSearchParams(dashboardSearchSchema, {
-		noScroll: true,
-		pushHistory: false
-	});
 
 	const palette = [
 		'#43b7a5',
@@ -53,10 +50,26 @@
 		{ key: 'agent', label: 'agent', options: 'agents' },
 		{ key: 'model', label: 'model', options: 'models' }
 	] as const;
-	let pendingFilters = $state<Partial<Record<FilterKey, string[]>>>({});
-	let pendingReportUrl: URL | null = null;
-	const report = $derived(data.report);
-	const chart = $derived(validChart(params.chart) as Chart);
+	let reportData = $derived(data);
+	let reportUrl: URL = $derived(page.url);
+	let pendingReportUrl = $state<URL | null>(null);
+	let reportLoading = $state(false);
+	let reportError = $state<string | null>(null);
+	const latestReportRequest = createLatestRequest();
+	const report = $derived(reportData.report);
+	const activePeriod = $derived(
+		periods.find(
+			(period) => period.key === (reportUrl.searchParams.get('period') ?? 'day')
+		)?.key ?? 'day'
+	);
+	const activeView = $derived(
+		views.find(
+			(view) => view === (reportUrl.searchParams.get('view') ?? 'agent')
+		) ?? 'agent'
+	);
+	const chart = $derived(
+		validChart(reportUrl.searchParams.get('chart')) as Chart
+	);
 	const maxTokens = $derived(
 		Math.max(...report.bars.map((bar) => bar.tokens), 1)
 	);
@@ -73,7 +86,7 @@
 	);
 
 	const selected = (key: FilterKey) =>
-		(pendingFilters[key] ?? params[key])
+		filterValues(reportUrl.searchParams.get(key))
 			.filter(
 				(value) => value.length > 0 && value.length <= maxFilterValueLength
 			)
@@ -118,15 +131,31 @@
 	}
 
 	function setPeriod(value: Period) {
-		reloadReport('period', value);
+		void reloadReport('period', value);
 	}
 
 	function setView(value: View) {
-		reloadReport('view', value);
+		void reloadReport('view', value);
 	}
 
 	function setChart(value: Chart) {
-		params.chart = value;
+		const target = new URL(reportUrl);
+		if (value === 'bars') target.searchParams.delete('chart');
+		else target.searchParams.set('chart', value);
+		reportUrl = target;
+		replaceState(reportPath(target), page.state);
+	}
+
+	function reportPath(target: URL) {
+		if (target.search) {
+			return resolve(
+				`/?${target.search.slice(1)}${target.hash}` as `/?${string}`
+			);
+		}
+		if (target.hash) {
+			return resolve(`/#${target.hash.slice(1)}` as `/#${string}`);
+		}
+		return resolve('/');
 	}
 
 	function toggleFilter(key: FilterKey, value: string, checked: boolean) {
@@ -140,41 +169,58 @@
 	}
 
 	function setFilter(key: FilterKey, values: string[]) {
-		pendingFilters[key] = values;
 		void reloadReport(key, values);
 	}
 
 	async function reloadReport(key: ReportParamKey, value: string | string[]) {
-		const current = pendingReportUrl ?? page.url;
+		const current = reportUrl;
 		const changed = await updateReportParam(
 			current,
 			key,
 			value,
 			async (target) => {
 				pendingReportUrl = target;
+				reportUrl = target;
+				reportLoading = true;
+				reportError = null;
+				replaceState(reportPath(target), page.state);
 
 				try {
-					await goto(
-						resolve(
-							`/?${target.searchParams.toString()}${target.hash}` as `/?${string}`
-						),
-						{
-							replaceState: true,
-							noScroll: true,
-							keepFocus: true,
-							invalidate: [reportDependency]
+					const result = await latestReportRequest(async (signal) => {
+						const search = reportSearch(
+							target,
+							Intl.DateTimeFormat().resolvedOptions().timeZone
+						);
+						const response = await fetch(`/api/report${search}`, { signal });
+						if (!response.ok) {
+							throw new Error(
+								`Unable to update the report (${response.status}).`
+							);
 						}
-					);
-				} finally {
-					if (pendingReportUrl?.href === target.href) {
-						pendingReportUrl = null;
-						pendingFilters = {};
-					}
+
+						const responseData: ReportResponse = await response.json();
+						return responseData;
+					});
+
+					if (!result.current) return;
+					reportData = result.value;
+					pendingReportUrl = null;
+					reportLoading = false;
+				} catch (error) {
+					if (pendingReportUrl?.href !== target.href) return;
+					reportUrl = current;
+					pendingReportUrl = null;
+					replaceState(reportPath(current), page.state);
+					reportError =
+						error instanceof Error
+							? error.message
+							: 'Unable to update the report.';
+					reportLoading = false;
 				}
 			}
 		);
 
-		if (!changed && pendingReportUrl === null) pendingFilters = {};
+		if (!changed && pendingReportUrl === null) reportError = null;
 	}
 
 	function linePoints(seriesKey: string) {
@@ -203,7 +249,13 @@
 
 <svelte:head><title>Usage · Token Tracker</title></svelte:head>
 
-<main>
+{#if reportLoading}
+	<div class="navigation-progress" role="status" aria-live="polite">
+		<span class="sr-only">Updating report…</span>
+	</div>
+{/if}
+
+<main aria-busy={reportLoading}>
 	<header class="page-header">
 		<div>
 			<p class="eyebrow">USAGE / {report.timeZone}</p>
@@ -225,8 +277,8 @@
 			{#each periods as period (period.key)}
 				<button
 					type="button"
-					class:active={report.period === period.key}
-					aria-pressed={report.period === period.key}
+					class:active={activePeriod === period.key}
+					aria-pressed={activePeriod === period.key}
 					onclick={() => setPeriod(period.key)}>{period.label}</button
 				>
 			{/each}
@@ -235,8 +287,8 @@
 			{#each views as view (view)}
 				<button
 					type="button"
-					class:active={report.view === view}
-					aria-pressed={report.view === view}
+					class:active={activeView === view}
+					aria-pressed={activeView === view}
 					onclick={() => setView(view)}
 					>{view[0].toUpperCase() + view.slice(1)}</button
 				>
@@ -304,10 +356,14 @@
 		</div>
 	</section>
 
-	{#if data.stale}
+	{#if reportError}
+		<p class="notice">{reportError} The previous data is still shown.</p>
+	{/if}
+
+	{#if reportData.stale}
 		<p class="notice">
-			Usage may be incomplete because {data.staleDevices.join(', ')}
-			{data.staleDevices.length === 1 ? 'has' : 'have'} not reported recently.
+			Usage may be incomplete because {reportData.staleDevices.join(', ')}
+			{reportData.staleDevices.length === 1 ? 'has' : 'have'} not reported recently.
 		</p>
 	{/if}
 

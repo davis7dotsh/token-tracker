@@ -20,7 +20,7 @@ const validTimeZone = (value: string) => {
 	}
 };
 
-const filterValues = (value: string | null) => {
+export const filterValues = (value: string | null) => {
 	if (!value) return [];
 	try {
 		const parsed: unknown = JSON.parse(value);
@@ -99,4 +99,34 @@ export async function updateReportParam(
 	if (target.href === current.href) return false;
 	await navigate(target);
 	return true;
+}
+
+export function createLatestRequest() {
+	let generation = 0;
+	let controller: AbortController | null = null;
+
+	return async <Value>(request: (signal: AbortSignal) => Promise<Value>) => {
+		const requestGeneration = ++generation;
+		controller?.abort();
+		const requestController = new AbortController();
+		controller = requestController;
+
+		try {
+			const value = await request(requestController.signal);
+			if (requestGeneration !== generation) {
+				return { current: false as const };
+			}
+
+			return { current: true as const, value };
+		} catch (error) {
+			if (
+				requestController.signal.aborted ||
+				requestGeneration !== generation
+			) {
+				return { current: false as const };
+			}
+
+			throw error;
+		}
+	};
 }

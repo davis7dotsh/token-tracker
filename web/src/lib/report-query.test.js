@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+	createLatestRequest,
 	reportSearch,
 	reportTarget,
 	updateReportParam,
@@ -83,4 +84,35 @@ test('runs one report navigation for a changed value and none for a no-op', asyn
 		false
 	);
 	assert.equal(destinations.length, 1);
+});
+
+test('only accepts the newest report response', async () => {
+	const latestRequest = createLatestRequest();
+	/** @type {(value: string) => void} */
+	let resolveFirst = () => {};
+	/** @type {(value: string) => void} */
+	let resolveSecond = () => {};
+	/** @type {AbortSignal | undefined} */
+	let firstSignal;
+
+	const first = latestRequest(
+		(signal) =>
+			new Promise((resolve) => {
+				firstSignal = signal;
+				resolveFirst = resolve;
+			})
+	);
+	const second = latestRequest(
+		() =>
+			new Promise((resolve) => {
+				resolveSecond = resolve;
+			})
+	);
+
+	assert.equal(firstSignal?.aborted, true);
+	resolveSecond('month');
+	assert.deepEqual(await second, { current: true, value: 'month' });
+
+	resolveFirst('week');
+	assert.deepEqual(await first, { current: false });
 });
