@@ -1,29 +1,26 @@
 <script lang="ts">
-	import { replaceState } from '$app/navigation';
-	import { resolve } from '$app/paths';
+	import { untrack } from 'svelte';
 	import { page } from '$app/state';
-	import {
-		money,
-		number,
-		type Chart,
-		type Period,
-		type ReportResponse,
-		type View
-	} from '$lib/api';
-	import {
-		createLatestRequest,
-		filterValues,
-		maxFilterValueLength,
-		maxFilterValues,
-		reportSearch,
-		type ReportParamKey,
-		updateReportParam,
-		validChart
-	} from '$lib/report-query';
+	import { money, number, type Chart, type ReportResponse } from '$lib/api';
+	import BarChart from '$lib/BarChart.svelte';
+	import LineChart from '$lib/LineChart.svelte';
+	import { maxFilterValues, type ReportParamKey } from '$lib/report-query';
+	import { ReportState } from '$lib/report-state.svelte';
 	import type { FilterKey } from '$lib/search-params';
 	import { displaySeriesLabel } from '$lib/series-label';
 
 	let { data }: { data: ReportResponse } = $props();
+
+	// Seeded from the load function's first result. Reading `data` here is
+	// deliberately a one-time snapshot: later results are adopted by the effect
+	// below, which is what keeps the state authoritative after a navigation.
+	const state = untrack(() => new ReportState(page.url, data));
+
+	// A full navigation (a link, or the back button) delivers new load data; adopt it
+	// so the URL and the rendered report cannot drift apart.
+	$effect(() => {
+		state.sync(page.url, data);
+	});
 
 	const palette = [
 		'#43b7a5',
@@ -38,66 +35,23 @@
 		'#b56b20',
 		'#858585'
 	];
-	const periods: Array<{ key: Period; label: string }> = [
+	const periods = [
 		{ key: 'day', label: '1D' },
 		{ key: 'week', label: '1W' },
 		{ key: 'month', label: '1M' }
-	];
-	const views: View[] = ['agent', 'device', 'project', 'model'];
+	] as const;
+	const views = ['agent', 'device', 'project', 'model'] as const;
 	const filters = [
 		{ key: 'device', label: 'device', options: 'devices' },
 		{ key: 'project', label: 'project', options: 'projects' },
 		{ key: 'agent', label: 'agent', options: 'agents' },
 		{ key: 'model', label: 'model', options: 'models' }
 	] as const;
-	let reportData = $derived(data);
-	let reportUrl: URL = $derived(page.url);
-	let pendingReportUrl = $state<URL | null>(null);
-	let reportLoading = $state(false);
-	let reportError = $state<string | null>(null);
-	const latestReportRequest = createLatestRequest();
-	const report = $derived(reportData.report);
-	const activePeriod = $derived(
-		periods.find(
-			(period) => period.key === (reportUrl.searchParams.get('period') ?? 'day')
-		)?.key ?? 'day'
-	);
-	const activeView = $derived(
-		views.find(
-			(view) => view === (reportUrl.searchParams.get('view') ?? 'agent')
-		) ?? 'agent'
-	);
-	const chart = $derived(
-		validChart(reportUrl.searchParams.get('chart')) as Chart
-	);
-	const maxTokens = $derived(
-		Math.max(...report.bars.map((bar) => bar.tokens), 1)
-	);
-	const lineMaximum = $derived(
-		Math.max(
-			...report.bars.flatMap((bar) =>
-				bar.segments.map((segment) => segment.tokens)
-			),
-			1
-		)
-	);
+
+	const report = $derived(state.report);
 	const seriesByKey = $derived(
 		new Map(report.series.map((series) => [series.key, series]))
 	);
-
-	const selected = (key: FilterKey) =>
-		filterValues(reportUrl.searchParams.get(key))
-			.filter(
-				(value) => value.length > 0 && value.length <= maxFilterValueLength
-			)
-			.slice(0, maxFilterValues);
-	const filterOptions = (
-		key: (typeof filters)[number]['options'],
-		filterKey: FilterKey
-	) =>
-		[...selected(filterKey), ...report.options[key]]
-			.filter((value, index, values) => values.indexOf(value) === index)
-			.sort();
 
 	function hash(value: string) {
 		let result = 0;
@@ -106,7 +60,9 @@
 		return result;
 	}
 
-	function seriesColor(key: string) {
+	// Colour follows the series identity rather than its rank, so a series keeps its
+	// colour when the ordering changes and the transition reads as movement.
+	function colorOf(key: string) {
 		const series = seriesByKey.get(key);
 		if (series?.isOther) return 'var(--muted)';
 		const identity = series?.label ?? key;
@@ -115,147 +71,38 @@
 		return palette[hash(identity) % palette.length];
 	}
 
-	function seriesFill(key: string) {
-		return seriesColor(key);
-	}
-
-	function seriesDash(key: string) {
+	function dashOf(key: string) {
 		if (seriesByKey.get(key)?.isOther) return '1 4';
 		const patterns = ['', '8 3', '3 3', '10 3 2 3', '2 4'];
 		const identity = seriesByKey.get(key)?.label ?? key;
 		return patterns[hash(identity) % patterns.length];
 	}
 
-	function displayLabel(key: string) {
+	function labelOf(key: string) {
 		return displaySeriesLabel(seriesByKey.get(key), key, report.view);
 	}
 
-	function setPeriod(value: Period) {
-		void reloadReport('period', value);
-	}
+	const filterOptions = (
+		key: (typeof filters)[number]['options'],
+		filterKey: FilterKey
+	) =>
+		[...state.selected(filterKey), ...report.options[key]]
+			.filter((value, index, values) => values.indexOf(value) === index)
+			.sort();
 
-	function setView(value: View) {
-		void reloadReport('view', value);
-	}
-
-	function setChart(value: Chart) {
-		const target = new URL(reportUrl);
-		if (value === 'bars') target.searchParams.delete('chart');
-		else target.searchParams.set('chart', value);
-		reportUrl = target;
-		replaceState(reportPath(target), page.state);
-	}
-
-	function reportPath(target: URL) {
-		if (target.search) {
-			return resolve(
-				`/?${target.search.slice(1)}${target.hash}` as `/?${string}`
-			);
-		}
-		if (target.hash) {
-			return resolve(`/#${target.hash.slice(1)}` as `/#${string}`);
-		}
-		return resolve('/');
-	}
-
-	function toggleFilter(key: FilterKey, value: string, checked: boolean) {
-		const values = selected(key).filter((item) => item !== value);
-		if (checked && values.length < maxFilterValues) values.push(value);
-		setFilter(key, values);
-	}
-
-	function clearFilter(key: FilterKey) {
-		setFilter(key, []);
-	}
-
-	function setFilter(key: FilterKey, values: string[]) {
-		void reloadReport(key, values);
-	}
-
-	async function reloadReport(key: ReportParamKey, value: string | string[]) {
-		const current = reportUrl;
-		const changed = await updateReportParam(
-			current,
-			key,
-			value,
-			async (target) => {
-				pendingReportUrl = target;
-				reportUrl = target;
-				reportLoading = true;
-				reportError = null;
-				replaceState(reportPath(target), page.state);
-
-				try {
-					const result = await latestReportRequest(async (signal) => {
-						const search = reportSearch(
-							target,
-							Intl.DateTimeFormat().resolvedOptions().timeZone
-						);
-						const response = await fetch(`/api/report${search}`, { signal });
-						if (!response.ok) {
-							throw new Error(
-								`Unable to update the report (${response.status}).`
-							);
-						}
-
-						const responseData: ReportResponse = await response.json();
-						return responseData;
-					});
-
-					if (!result.current) return;
-					reportData = result.value;
-					pendingReportUrl = null;
-					reportLoading = false;
-				} catch (error) {
-					if (pendingReportUrl?.href !== target.href) return;
-					reportUrl = current;
-					pendingReportUrl = null;
-					replaceState(reportPath(current), page.state);
-					reportError =
-						error instanceof Error
-							? error.message
-							: 'Unable to update the report.';
-					reportLoading = false;
-				}
-			}
-		);
-
-		if (!changed && pendingReportUrl === null) reportError = null;
-	}
-
-	function linePoints(seriesKey: string) {
-		const last = Math.max(report.bars.length - 1, 1);
-		return report.bars
-			.map((bar, index) => {
-				const value =
-					bar.segments.find((segment) => segment.key === seriesKey)?.tokens ??
-					0;
-				const x = 40 + (index / last) * 920;
-				const y = 320 - (value / lineMaximum) * 280;
-				return `${x},${y}`;
-			})
-			.join(' ');
-	}
-
-	function linePoint(seriesKey: string, index: number, tokens: number) {
-		const last = Math.max(report.bars.length - 1, 1);
-		return {
-			x: 40 + (index / last) * 920,
-			y: 320 - (tokens / lineMaximum) * 280,
-			label: displayLabel(seriesKey)
-		};
-	}
+	const prefetch = (key: ReportParamKey, value: string | string[]) => () =>
+		state.prefetch(key, value);
 </script>
 
 <svelte:head><title>Usage · Token Tracker</title></svelte:head>
 
-{#if reportLoading}
+{#if state.loading}
 	<div class="navigation-progress" role="status" aria-live="polite">
 		<span class="sr-only">Updating report…</span>
 	</div>
 {/if}
 
-<main aria-busy={reportLoading}>
+<main>
 	<header class="page-header">
 		<div>
 			<p class="eyebrow">USAGE / {report.timeZone}</p>
@@ -264,11 +111,9 @@
 				A local view of AI agent work across every synchronized device.
 			</p>
 		</div>
-		<div>
+		<div class="window-total">
 			<p class="eyebrow">CURRENT WINDOW</p>
-			<div style="font: 1.2rem var(--font-mono)">
-				{number(report.combined.tokens)} tokens
-			</div>
+			<div class="window-tokens">{number(report.combined.tokens)} tokens</div>
 		</div>
 	</header>
 
@@ -277,9 +122,11 @@
 			{#each periods as period (period.key)}
 				<button
 					type="button"
-					class:active={activePeriod === period.key}
-					aria-pressed={activePeriod === period.key}
-					onclick={() => setPeriod(period.key)}>{period.label}</button
+					class:active={state.period === period.key}
+					aria-pressed={state.period === period.key}
+					onmouseenter={prefetch('period', period.key)}
+					onfocus={prefetch('period', period.key)}
+					onclick={() => state.setPeriod(period.key)}>{period.label}</button
 				>
 			{/each}
 		</div>
@@ -287,9 +134,11 @@
 			{#each views as view (view)}
 				<button
 					type="button"
-					class:active={activeView === view}
-					aria-pressed={activeView === view}
-					onclick={() => setView(view)}
+					class:active={state.view === view}
+					aria-pressed={state.view === view}
+					onmouseenter={prefetch('view', view)}
+					onfocus={prefetch('view', view)}
+					onclick={() => state.setView(view)}
 					>{view[0].toUpperCase() + view.slice(1)}</button
 				>
 			{/each}
@@ -298,9 +147,9 @@
 			{#each ['bars', 'lines'] as style (style)}
 				<button
 					type="button"
-					class:active={chart === style}
-					aria-pressed={chart === style}
-					onclick={() => setChart(style as Chart)}
+					class:active={state.chart === style}
+					aria-pressed={state.chart === style}
+					onclick={() => state.setChart(style as Chart)}
 					>{style[0].toUpperCase() + style.slice(1)}</button
 				>
 			{/each}
@@ -308,19 +157,18 @@
 
 		<div class="filters">
 			{#each filters as filter (filter.key)}
+				{@const selected = state.selected(filter.key)}
 				<details class="filter">
 					<summary
 						>{filter.label}
-						{selected(filter.key).length
-							? `· ${selected(filter.key).length}`
-							: '+'}</summary
+						{selected.length ? `· ${selected.length}` : '+'}</summary
 					>
 					<div class="filter-panel">
-						{#if selected(filter.key).length}
+						{#if selected.length}
 							<button
 								class="filter-clear"
 								type="button"
-								onclick={() => clearFilter(filter.key)}>Clear all</button
+								onclick={() => state.clearFilter(filter.key)}>Clear all</button
 							>
 						{/if}
 						{#if filterOptions(filter.options, filter.key).length === 0}
@@ -330,11 +178,11 @@
 								<label class="filter-option">
 									<input
 										type="checkbox"
-										checked={selected(filter.key).includes(option)}
-										disabled={selected(filter.key).length >= maxFilterValues &&
-											!selected(filter.key).includes(option)}
+										checked={selected.includes(option)}
+										disabled={selected.length >= maxFilterValues &&
+											!selected.includes(option)}
 										onchange={(event) =>
-											toggleFilter(
+											state.toggleFilter(
 												filter.key,
 												option,
 												event.currentTarget.checked
@@ -345,8 +193,8 @@
 							{/each}
 						{/if}
 						<p class="filter-limit">
-							{selected(filter.key).length}/{maxFilterValues} selected
-							{#if selected(filter.key).length >= maxFilterValues}
+							{selected.length}/{maxFilterValues} selected
+							{#if selected.length >= maxFilterValues}
 								· Clear a value to choose another.
 							{/if}
 						</p>
@@ -356,14 +204,14 @@
 		</div>
 	</section>
 
-	{#if reportError}
-		<p class="notice">{reportError} The previous data is still shown.</p>
+	{#if state.error}
+		<p class="notice">{state.error} The previous data is still shown.</p>
 	{/if}
 
-	{#if reportData.stale}
+	{#if state.response.stale}
 		<p class="notice">
-			Usage may be incomplete because {reportData.staleDevices.join(', ')}
-			{reportData.staleDevices.length === 1 ? 'has' : 'have'} not reported recently.
+			Usage may be incomplete because {state.response.staleDevices.join(', ')}
+			{state.response.staleDevices.length === 1 ? 'has' : 'have'} not reported recently.
 		</p>
 	{/if}
 
@@ -383,13 +231,20 @@
 			<p class="lede">Remove one or more filters to widen the report.</p>
 		</section>
 	{:else}
-		<section class="dashboard">
+		<!-- The report stays mounted and dims while a slower window loads, so the
+		     charts animate from the old figures to the new ones instead of
+		     collapsing to a placeholder and back. -->
+		<section
+			class="dashboard"
+			class:pending={state.loading}
+			aria-busy={state.loading}
+		>
 			<div class="chart-shell">
 				<div class="legend" aria-label="Chart legend">
 					{#each report.series as series (series.key)}
 						<span
-							><i class="swatch" style:background={seriesFill(series.key)}
-							></i>{displayLabel(series.key)}</span
+							><i class="swatch" style:background={colorOf(series.key)}
+							></i>{labelOf(series.key)}</span
 						>
 					{/each}
 				</div>
@@ -400,102 +255,22 @@
 					</p>
 				{/if}
 
-				{#if chart === 'bars'}
-					<div class="bars" aria-hidden="true">
-						{#each report.bars as bar (bar.key)}
-							<div class="bar-row">
-								<span>{bar.label}</span>
-								<div class="bar-track">
-									{#each bar.segments as segment (segment.key)}
-										<div
-											class="bar-segment"
-											style:background={seriesFill(segment.key)}
-											style:width={`${(segment.tokens / maxTokens) * 100}%`}
-											title={`${displayLabel(segment.key)}: ${number(segment.tokens)} tokens`}
-										></div>
-									{/each}
-								</div>
-								<span class="bar-value">{number(bar.tokens)}</span>
-								<span class="bar-value bar-cost">{money(bar.cost)}</span>
-							</div>
-						{/each}
-					</div>
+				{#if state.chart === 'bars'}
+					<BarChart
+						bars={report.bars}
+						series={report.series}
+						{colorOf}
+						{labelOf}
+					/>
 				{:else}
-					<svg
-						class="line-chart"
-						viewBox="0 0 1000 340"
-						role="img"
-						aria-label="Token usage line chart"
-					>
-						{#each [0, 0.5, 1] as fraction (fraction)}
-							<line
-								class="grid"
-								x1="40"
-								y1={320 - fraction * 280}
-								x2="960"
-								y2={320 - fraction * 280}
-							></line>
-							<text
-								class="axis-label"
-								x="34"
-								y={324 - fraction * 280}
-								text-anchor="end">{number(lineMaximum * fraction)}</text
-							>
-						{/each}
-						{#each report.series as series (series.key)}
-							<polyline
-								style:--series-color={seriesColor(series.key)}
-								stroke-dasharray={seriesDash(series.key)}
-								points={linePoints(series.key)}
-							></polyline>
-							{#each report.bars as bar, barIndex (bar.key)}
-								{@const tokens =
-									bar.segments.find((segment) => segment.key === series.key)
-										?.tokens ?? 0}
-								{@const point = linePoint(series.key, barIndex, tokens)}
-								<g>
-									<circle
-										cx={point.x}
-										cy={point.y}
-										r="3.5"
-										fill={seriesColor(series.key)}
-									></circle>
-									<title
-										>{point.label}, {bar.label}: {number(tokens)} tokens</title
-									>
-								</g>
-							{/each}
-						{/each}
-					</svg>
-					<div class="line-labels">
-						<span>{report.bars[0]?.label}</span>
-						<span>{report.bars.at(-1)?.label}</span>
-					</div>
+					<LineChart
+						bars={report.bars}
+						series={report.series}
+						{colorOf}
+						{dashOf}
+						{labelOf}
+					/>
 				{/if}
-
-				<table class="sr-only">
-					<caption>Token usage by period and series</caption>
-					<thead>
-						<tr
-							><th>Period</th>{#each report.series as series (series.key)}<th
-									>{displayLabel(series.key)}</th
-								>{/each}</tr
-						>
-					</thead>
-					<tbody>
-						{#each report.bars as bar (bar.key)}
-							<tr>
-								<th scope="row">{bar.label}</th>
-								{#each report.series as series (series.key)}
-									<td
-										>{bar.segments.find((segment) => segment.key === series.key)
-											?.tokens ?? 0}</td
-									>
-								{/each}
-							</tr>
-						{/each}
-					</tbody>
-				</table>
 			</div>
 
 			<section class="totals">
@@ -517,8 +292,8 @@
 							<tr>
 								<th scope="row">
 									<span class="total-label"
-										><i class="swatch" style:background={seriesFill(total.key)}
-										></i>{displayLabel(total.key)}</span
+										><i class="swatch" style:background={colorOf(total.key)}
+										></i>{labelOf(total.key)}</span
 									>
 								</th>
 								<td>{number(total.counters.sessions)}</td>
@@ -535,3 +310,21 @@
 		</section>
 	{/if}
 </main>
+
+<style>
+	.window-tokens {
+		font: 1.2rem var(--font-mono);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.dashboard {
+		padding: 40px 0 80px;
+		transition: opacity 180ms ease;
+	}
+
+	/* Held well above invisible: the point is to signal that figures are being
+	   replaced, while leaving the previous ones readable meanwhile. */
+	.dashboard.pending {
+		opacity: 0.62;
+	}
+</style>

@@ -290,10 +290,6 @@ h1 {
 	font: 0.74rem/1.45 var(--font-mono);
 }
 
-.dashboard {
-	padding: 40px 0 80px;
-}
-
 .chart-shell {
 	border-bottom: 1px solid var(--line);
 	padding-bottom: 40px;
@@ -329,73 +325,6 @@ h1 {
 	height: 9px;
 	background: var(--series-color);
 	display: inline-block;
-}
-
-.bars {
-	display: grid;
-	gap: 10px;
-}
-
-.bar-row {
-	display: grid;
-	grid-template-columns: 72px minmax(120px, 1fr) 96px 96px;
-	align-items: center;
-	gap: 14px;
-	min-height: 32px;
-	font: 0.72rem var(--font-mono);
-}
-
-.bar-track {
-	display: flex;
-	height: 18px;
-	min-width: 2px;
-	overflow: hidden;
-	border-radius: 3px;
-}
-
-.bar-segment {
-	height: 100%;
-	background: var(--series-color);
-	min-width: 0;
-}
-
-.bar-value {
-	text-align: right;
-}
-
-.line-chart {
-	width: 100%;
-	height: 360px;
-	overflow: visible;
-}
-
-.line-chart .grid {
-	stroke: var(--line);
-	stroke-width: 1;
-}
-
-.line-chart polyline {
-	fill: none;
-	stroke: var(--series-color);
-	stroke-width: 3;
-	vector-effect: non-scaling-stroke;
-}
-
-.line-chart circle {
-	stroke: var(--chart-outline);
-	stroke-width: 2;
-}
-
-.line-chart .axis-label {
-	fill: var(--muted);
-	font: 18px var(--font-mono);
-}
-
-.line-labels {
-	display: flex;
-	justify-content: space-between;
-	color: var(--muted);
-	font: 0.68rem var(--font-mono);
 }
 
 .totals {
@@ -532,12 +461,6 @@ h1 {
 	.filter-panel {
 		left: 0;
 		right: auto;
-	}
-	.bar-row {
-		grid-template-columns: 58px 1fr 80px;
-	}
-	.bar-row .bar-cost {
-		display: none;
 	}
 	.system-grid {
 		grid-template-columns: 1fr 1fr;
