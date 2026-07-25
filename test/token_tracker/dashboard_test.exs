@@ -234,7 +234,18 @@ defmodule TokenTracker.DashboardTest do
         "token-tracker-index-#{System.unique_integer([:positive])}.html"
       )
 
-    File.write!(index_path, "<!doctype html><title>Token Tracker test</title>")
+    inline_script = "\n\twindow.tokenTrackerBooted = true;\n"
+
+    File.write!(
+      index_path,
+      """
+      <!doctype html>
+      <title>Token Tracker test</title>
+      <script src="/theme.js"></script>
+      <script>#{inline_script}</script>
+      """
+    )
+
     Application.put_env(:token_tracker, :static_index_path, index_path)
 
     on_exit(fn ->
@@ -249,6 +260,18 @@ defmodule TokenTracker.DashboardTest do
     assert spa_conn.status == 200
     assert get_resp_header(spa_conn, "cache-control") == ["no-cache"]
     assert get_resp_header(spa_conn, "content-type") |> hd() =~ "text/html"
+
+    content_security_policy =
+      get_resp_header(spa_conn, "content-security-policy")
+      |> List.first()
+
+    inline_script_hash =
+      inline_script
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode64()
+
+    assert content_security_policy =~ "script-src 'self' 'sha256-#{inline_script_hash}'"
+    assert content_security_policy =~ "font-src 'self' data:"
 
     File.rm!(index_path)
 
