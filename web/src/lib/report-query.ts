@@ -3,13 +3,17 @@ const views = new Set(['device', 'project', 'agent', 'model']);
 const filterKeys = ['device', 'project', 'agent', 'model'] as const;
 const reportDefaults = {
 	period: 'day',
-	view: 'agent'
+	view: 'agent',
+	chart: 'bars'
 } as const;
 
 export const reportDependency = 'tracker:report';
 export const maxFilterValues = 10;
 export const maxFilterValueLength = 160;
+/** Parameters that select which report is fetched. */
 export type ReportParamKey = 'period' | 'view' | (typeof filterKeys)[number];
+/** Every parameter carried in the URL, including presentation-only ones. */
+export type UrlParamKey = ReportParamKey | 'chart';
 
 const validTimeZone = (value: string) => {
 	try {
@@ -69,7 +73,7 @@ export function validChart(value: string | null) {
 
 export function reportTarget(
 	current: URL,
-	key: ReportParamKey,
+	key: UrlParamKey,
 	value: string | string[]
 ) {
 	const target = new URL(current);

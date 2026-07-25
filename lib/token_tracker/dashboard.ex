@@ -266,8 +266,7 @@ defmodule TokenTracker.Dashboard do
       output_tokens: sum(row.output_tokens),
       reasoning_tokens: sum(row.reasoning_tokens),
       cache_read_tokens: sum(row.cache_read_tokens),
-      cache_write_tokens: sum(row.cache_write_tokens),
-      session_starts: sum(row.session_starts)
+      cache_write_tokens: sum(row.cache_write_tokens)
     })
     |> select_dimension(query.view)
     |> Repo.all()

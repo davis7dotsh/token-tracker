@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { money, number, type Bar, type Series } from '$lib/api';
+	import SeriesTable from '$lib/SeriesTable.svelte';
 
 	let {
 		bars,
@@ -21,7 +22,9 @@
 	const width = (tokens: number) => `${(tokens / maxTokens) * 100}%`;
 </script>
 
-<div class="bars">
+<!-- The table below is the accessible equivalent, so the visual bars are hidden
+     from assistive technology rather than announcing every figure twice. -->
+<div class="bars" aria-hidden="true">
 	{#each bars as bar (bar.key)}
 		<div class="bar-row">
 			<span class="bar-label">{bar.label}</span>
@@ -41,28 +44,7 @@
 	{/each}
 </div>
 
-<table class="sr-only">
-	<caption>Token usage by period and series</caption>
-	<thead>
-		<tr>
-			<th>Period</th>
-			{#each series as item (item.key)}<th>{labelOf(item.key)}</th>{/each}
-		</tr>
-	</thead>
-	<tbody>
-		{#each bars as bar (bar.key)}
-			<tr>
-				<th scope="row">{bar.label}</th>
-				{#each series as item (item.key)}
-					<td>
-						{bar.segments.find((segment) => segment.key === item.key)?.tokens ??
-							0}
-					</td>
-				{/each}
-			</tr>
-		{/each}
-	</tbody>
-</table>
+<SeriesTable {bars} {series} {labelOf} />
 
 <style>
 	.bars {

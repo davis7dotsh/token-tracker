@@ -27,10 +27,17 @@ export class ReportState {
 	 */
 	#href = $state.raw('http://localhost/');
 	#data: ReportResponse = $state.raw() as ReportResponse;
+	/** The last load result adopted by `sync`, compared by identity. */
+	#synced: ReportResponse | null = null;
+	/** The query whose report is currently rendered, for rolling back a failure. */
+	#shown = '';
 	// Deliberately a plain Map: it is a request cache read only inside methods, so
 	// making it reactive would invalidate the report on every unrelated insert.
 	// eslint-disable-next-line svelte/prefer-svelte-reactivity
 	#cache = new Map<string, ReportResponse>();
+	/** Queries with a prefetch already in flight, so hover does not refire them. */
+	// eslint-disable-next-line svelte/prefer-svelte-reactivity
+	#prefetching = new Set<string>();
 	#inFlight: AbortController | null = null;
 	#generation = 0;
 	#settled = $state(true);
@@ -41,15 +48,34 @@ export class ReportState {
 
 	constructor(url: URL, data: ReportResponse) {
 		this.#href = url.href;
-		this.#data = data;
+		this.#synced = data;
+		this.#show(data, url.href);
 		this.#cache.set(this.#key(url), data);
 	}
 
-	/** Keeps the entry loaded by SvelteKit authoritative across a full navigation. */
+	/**
+	 * Adopts a result delivered by SvelteKit's load function.
+	 *
+	 * Only a genuinely new result is adopted. The caller runs inside an effect that
+	 * also observes the URL, so it can re-run after this class rewrites the query
+	 * via `replaceState`; re-applying the same `data` then would overwrite a newer
+	 * report — including one just restored from cache — with the entry the page was
+	 * originally loaded with. Comparing identity makes those repeat calls harmless.
+	 *
+	 * A real navigation supersedes anything in flight, so a pending request is
+	 * abandoned rather than allowed to land on top of the new entry.
+	 */
 	sync(url: URL, data: ReportResponse) {
-		if (this.#inFlight) return;
+		if (data === this.#synced) return;
+
+		this.#synced = data;
+		this.#inFlight?.abort();
+		this.#inFlight = null;
+		this.#generation += 1;
 		this.#href = url.href;
-		this.#data = data;
+		this.#show(data, url.href);
+		this.loading = false;
+		this.error = null;
 		this.#cache.set(this.#key(url), data);
 	}
 
@@ -107,11 +133,13 @@ export class ReportState {
 		this.#apply('view', value);
 	}
 
-	/** Chart style is presentation only, so it never triggers a request. */
+	/**
+	 * Chart style is presentation only, so it never triggers a request. It still
+	 * goes through `reportTarget` so the rule for eliding a default value lives in
+	 * one place.
+	 */
 	setChart(value: Chart) {
-		const target = this.#url;
-		if (value === 'bars') target.searchParams.delete('chart');
-		else target.searchParams.set('chart', value);
+		const target = reportTarget(this.#url, 'chart', value);
 		this.#href = target.href;
 		replaceState(this.#path(target), {});
 	}
@@ -126,11 +154,18 @@ export class ReportState {
 		this.#apply(key, []);
 	}
 
-	/** Warms the cache so a hovered control resolves instantly when clicked. */
+	/**
+	 * Warms the cache so a hovered control resolves instantly when clicked.
+	 *
+	 * Hovering fires repeatedly as the pointer moves, so a query already cached or
+	 * already being fetched is skipped rather than requested again.
+	 */
 	prefetch(key: ReportParamKey, value: string | string[]) {
 		const target = reportTarget(this.#url, key, value);
 		const search = this.#key(target);
-		if (this.#cache.has(search)) return;
+		if (this.#cache.has(search) || this.#prefetching.has(search)) return;
+
+		this.#prefetching.add(search);
 
 		void fetch(`/api/report${search}`)
 			.then((response) => (response.ok ? response.json() : null))
@@ -139,13 +174,13 @@ export class ReportState {
 			})
 			.catch(() => {
 				// A failed prefetch is not worth surfacing; the click will retry.
-			});
+			})
+			.finally(() => this.#prefetching.delete(search));
 	}
 
 	#apply(key: ReportParamKey, value: string | string[]) {
-		const previous = this.#href;
 		const target = reportTarget(this.#url, key, value);
-		if (target.href === previous) return;
+		if (target.href === this.#href) return;
 
 		this.#href = target.href;
 		this.error = null;
@@ -158,16 +193,22 @@ export class ReportState {
 			this.#inFlight?.abort();
 			this.#inFlight = null;
 			this.#generation += 1;
-			this.#data = cached;
-			this.#settled = true;
+			this.#show(cached, target.href);
 			this.loading = false;
 			return;
 		}
 
-		void this.#load(search, previous);
+		void this.#load(search);
 	}
 
-	async #load(search: string, previous: string) {
+	/** Records which query the displayed report belongs to alongside the report. */
+	#show(data: ReportResponse, href: string) {
+		this.#data = data;
+		this.#shown = href;
+		this.#settled = true;
+	}
+
+	async #load(search: string) {
 		const generation = ++this.#generation;
 		this.#inFlight?.abort();
 		const controller = new AbortController();
@@ -194,15 +235,16 @@ export class ReportState {
 			if (generation !== this.#generation) return;
 
 			this.#cache.set(search, data);
-			this.#data = data;
-			this.#settled = true;
+			this.#show(data, this.#href);
 			this.error = null;
 		} catch (error) {
 			if (controller.signal.aborted || generation !== this.#generation) return;
 
-			// Roll the controls back to the query whose data is still on screen, so
-			// what the URL and the buttons claim keeps matching what is rendered.
-			this.#href = previous;
+			// Roll the controls back to the query whose report is still on screen —
+			// which is not necessarily the previous URL, since that query's own request
+			// may have been abandoned before it ever rendered. Restoring `#shown` keeps
+			// the URL and the buttons describing what is actually rendered.
+			this.#href = this.#shown;
 			this.#settled = true;
 			replaceState(this.#path(this.#url), {});
 			this.error =

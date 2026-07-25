@@ -439,21 +439,25 @@ defmodule TokenTracker.Pricing do
     end
   end
 
-  # The on-disk catalog is several megabytes, and decoding it on every dashboard
-  # request dominated the response time. The decoded term is memoized per path and
-  # invalidated whenever the file's size or modification time changes, so an
-  # external refresh is still picked up on the next read.
+  # Decoding the multi-megabyte catalog dominated dashboard response time, so the
+  # decoded term is memoized per path.
+  #
+  # The memo is keyed on a hash of the file's bytes rather than its metadata.
+  # Erlang exposes modification times only to the second, so a stamp of
+  # {mtime, size} cannot distinguish a same-second replacement by a different
+  # document of equal length, and would serve the superseded catalog until the
+  # file changed again. Reading and hashing costs a small fraction of decoding.
   defp read_cache(path) do
-    case File.stat(path, time: :posix) do
-      {:ok, %File.Stat{mtime: mtime, size: size}} ->
-        stamp = {mtime, size}
+    case File.read(path) do
+      {:ok, contents} ->
+        stamp = :erlang.phash2(contents)
 
         case :persistent_term.get({__MODULE__, :cache, path}, nil) do
           %{stamp: ^stamp, cache: cache} ->
             cache
 
           _stale ->
-            cache = decode_cache(path)
+            cache = decode_cache(contents)
             :persistent_term.put({__MODULE__, :cache, path}, %{stamp: stamp, cache: cache})
             cache
         end
@@ -464,9 +468,8 @@ defmodule TokenTracker.Pricing do
     end
   end
 
-  defp decode_cache(path) do
-    with {:ok, contents} <- File.read(path),
-         {:ok, %{"catalog" => catalog} = cache} <- Jason.decode(contents),
+  defp decode_cache(contents) do
+    with {:ok, %{"catalog" => catalog} = cache} <- Jason.decode(contents),
          true <- is_map(catalog) do
       cache
     else
@@ -485,13 +488,12 @@ defmodule TokenTracker.Pricing do
       File.chmod!(temporary, 0o600)
       File.rename!(temporary, path)
 
-      case File.stat(path, time: :posix) do
-        {:ok, %File.Stat{mtime: mtime, size: size}} ->
-          :persistent_term.put({__MODULE__, :cache, path}, %{stamp: {mtime, size}, cache: cache})
-
-        {:error, _reason} ->
-          forget_cache(path)
-      end
+      # The memoized entry is dropped rather than replaced with this writer's
+      # term. Another writer may rename a different catalog over the same path
+      # between this rename and any stat of it, which would publish this cache
+      # under that file's stamp. Forgetting is always correct; the next read
+      # repopulates from whatever is actually on disk.
+      forget_cache(path)
     after
       File.rm(temporary)
     end

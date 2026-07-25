@@ -3,6 +3,7 @@
 	import { cubicOut } from 'svelte/easing';
 	import { prefersReducedMotion } from 'svelte/motion';
 	import { number, type Bar, type Series } from '$lib/api';
+	import SeriesTable from '$lib/SeriesTable.svelte';
 
 	let {
 		bars,
@@ -122,6 +123,8 @@
 	<span>{bars[0]?.label}</span>
 	<span>{bars.at(-1)?.label}</span>
 </div>
+
+<SeriesTable {bars} {series} {labelOf} />
 
 <style>
 	.line-chart {
