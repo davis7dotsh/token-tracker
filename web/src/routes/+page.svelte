@@ -1,8 +1,11 @@
 <script lang="ts">
 	import { invalidate } from '$app/navigation';
 	import { useSearchParams } from 'runed/kit';
-	import { number, type Chart, type Period, type View } from '$lib/api';
+	import { number } from '$lib/api';
 	import {
+		effectiveChart,
+		effectivePeriod,
+		effectiveView,
 		filterValues,
 		maxFilterValues,
 		reportDependency
@@ -35,24 +38,12 @@
 		{ key: 'model', label: 'model', options: 'models' }
 	] as const;
 
-	/**
-	 * Controls read the *effective* value, not the raw parameter.
-	 *
-	 * A link can carry anything, and the schema passes unrecognised strings through
-	 * rather than rejecting them. The report already falls back to a default in that
-	 * case (`reportSearch` whitelists the same values), so the buttons have to agree
-	 * — otherwise a stale or hand-edited link renders a report with no control
-	 * showing as selected.
-	 */
-	const period = $derived(
-		periods.some((option) => option.key === params.period)
-			? (params.period as Period)
-			: 'day'
-	);
-	const view = $derived(
-		views.includes(params.view as View) ? (params.view as View) : 'agent'
-	);
-	const chart = $derived<Chart>(params.chart === 'lines' ? 'lines' : 'bars');
+	// Controls show the value the report is actually built from, resolved by the
+	// same helpers the request uses, so a hand-edited link cannot leave the buttons
+	// describing a different window than the one on screen.
+	const period = $derived(effectivePeriod(params.period));
+	const view = $derived(effectiveView(params.view));
+	const chart = $derived(effectiveChart(params.chart));
 
 	/**
 	 * Filters are stored as a JSON array in one parameter. Decoding through

@@ -1,3 +1,5 @@
+import type { Chart, Period, View } from './api';
+
 const periods = new Set(['day', 'week', 'month']);
 const views = new Set(['device', 'project', 'agent', 'model']);
 const filterKeys = ['device', 'project', 'agent', 'model'] as const;
@@ -5,6 +7,23 @@ const filterKeys = ['device', 'project', 'agent', 'model'] as const;
 export const reportDependency = 'tracker:report';
 export const maxFilterValues = 10;
 export const maxFilterValueLength = 160;
+
+/**
+ * Resolves a parameter to the value the report will actually be built from.
+ *
+ * The controls and the request have to agree on this. A URL can carry anything,
+ * and an unrecognised value is replaced with a default rather than rejected, so
+ * if the two disagreed a hand-edited link would render one window while the
+ * buttons claimed another. Both sides call these.
+ */
+export const effectivePeriod = (value: string | null): Period =>
+	value && periods.has(value) ? (value as Period) : 'day';
+
+export const effectiveView = (value: string | null): View =>
+	value && views.has(value) ? (value as View) : 'agent';
+
+export const effectiveChart = (value: string | null): Chart =>
+	value === 'lines' ? 'lines' : 'bars';
 
 const validTimeZone = (value: string) => {
 	try {
@@ -58,15 +77,13 @@ export const filterValues = (value: string | null) => {
 export function reportSearch(url: URL, browserTimeZone: string) {
 	const source = url.searchParams;
 	const params = new URLSearchParams();
-	const period = source.get('period') ?? 'day';
-	const view = source.get('view') ?? 'agent';
 	const requestedTimeZone = source.get('tz') ?? '';
 	const fallbackTimeZone = validTimeZone(browserTimeZone)
 		? browserTimeZone
 		: 'UTC';
 
-	params.set('period', periods.has(period) ? period : 'day');
-	params.set('view', views.has(view) ? view : 'agent');
+	params.set('period', effectivePeriod(source.get('period')));
+	params.set('view', effectiveView(source.get('view')));
 	params.set(
 		'tz',
 		validTimeZone(requestedTimeZone) ? requestedTimeZone : fallbackTimeZone

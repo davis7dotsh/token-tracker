@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+	effectiveChart,
+	effectivePeriod,
+	effectiveView,
 	filterValues,
 	maxFilterValueLength,
 	maxFilterValues,
@@ -79,4 +82,33 @@ test('chart style never reaches the API or the load dependency', () => {
 
 	assert.ok(read.includes('period'), 'expected period to be read');
 	assert.ok(!read.includes('chart'), 'chart must never be read');
+});
+
+test('controls and the request resolve a parameter the same way', () => {
+	// If these ever disagreed, a hand-edited or stale link would render one window
+	// while the buttons claimed another. Both sides call the same helpers, so this
+	// asserts the property directly rather than the duplication that once caused it.
+	for (const value of ['forever', '', 'DAY', 'week', 'month', 'day']) {
+		const url = new URL('https://tracker.test/');
+		if (value) url.searchParams.set('period', value);
+		const requested = new URLSearchParams(reportSearch(url, 'UTC')).get(
+			'period'
+		);
+
+		assert.equal(effectivePeriod(value || null), requested);
+	}
+
+	for (const value of ['secret', '', 'AGENT', 'device', 'model', 'agent']) {
+		const url = new URL('https://tracker.test/');
+		if (value) url.searchParams.set('view', value);
+		const requested = new URLSearchParams(reportSearch(url, 'UTC')).get('view');
+
+		assert.equal(effectiveView(value || null), requested);
+	}
+
+	// Chart is presentation-only, so it has no counterpart in the request.
+	assert.equal(effectiveChart('lines'), 'lines');
+	assert.equal(effectiveChart('bars'), 'bars');
+	assert.equal(effectiveChart('nonsense'), 'bars');
+	assert.equal(effectiveChart(null), 'bars');
 });
