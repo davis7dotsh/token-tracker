@@ -62,6 +62,16 @@
 	}
 
 	/**
+	 * Bumped on retry to rebuild every boundary that awaits the report.
+	 *
+	 * A boundary that has rendered `failed` keeps rendering it until its own `reset`
+	 * runs, and only the report boundary has one to hand. Keying the awaiting
+	 * regions on this counter recreates all of them together, so a successful retry
+	 * does not leave the header total and the filter panels stuck on their failure.
+	 */
+	let retryToken = $state(0);
+
+	/**
 	 * Retries a failed report.
 	 *
 	 * Resetting the boundary alone would re-await the promise that already rejected,
@@ -70,8 +80,14 @@
 	 * boundary's contents.
 	 */
 	async function retry(reset: () => void) {
-		await invalidate(reportDependency);
-		reset();
+		// Reset even if the retry itself fails, so the boundary re-awaits and reports
+		// the new failure rather than staying on the previous one with a dead button.
+		try {
+			await invalidate(reportDependency);
+		} finally {
+			retryToken += 1;
+			reset();
+		}
 	}
 </script>
 
@@ -96,11 +112,13 @@
 			     parameter would label the data with a zone it was not grouped by. -->
 			<p class="eyebrow">
 				USAGE /
-				<svelte:boundary>
-					{(await data.report).report.timeZone}
-					{#snippet pending()}<span class="placeholder">…</span>{/snippet}
-					{#snippet failed()}<span class="placeholder">—</span>{/snippet}
-				</svelte:boundary>
+				{#key retryToken}
+					<svelte:boundary>
+						{(await data.report).report.timeZone}
+						{#snippet pending()}<span class="placeholder">…</span>{/snippet}
+						{#snippet failed()}<span class="placeholder">—</span>{/snippet}
+					</svelte:boundary>
+				{/key}
 			</p>
 			<h1>Token activity</h1>
 			<p class="lede">
@@ -110,11 +128,13 @@
 		<div class="window-total">
 			<p class="eyebrow">CURRENT WINDOW</p>
 			<div class="window-tokens">
-				<svelte:boundary>
-					{number((await data.report).report.combined.tokens)} tokens
-					{#snippet pending()}<span class="placeholder">—</span>{/snippet}
-					{#snippet failed()}<span class="placeholder">—</span>{/snippet}
-				</svelte:boundary>
+				{#key retryToken}
+					<svelte:boundary>
+						{number((await data.report).report.combined.tokens)} tokens
+						{#snippet pending()}<span class="placeholder">—</span>{/snippet}
+						{#snippet failed()}<span class="placeholder">—</span>{/snippet}
+					</svelte:boundary>
+				{/key}
 			</div>
 		</div>
 	</header>
@@ -169,44 +189,46 @@
 								onclick={() => (params[filter.key] = [])}>Clear all</button
 							>
 						{/if}
-						<svelte:boundary>
-							{@const options = [
-								...selected,
-								...(await data.report).report.options[filter.options]
-							]
-								.filter(
-									(value, index, values) => values.indexOf(value) === index
-								)
-								.sort()}
-							{#if options.length === 0}
-								<div class="filter-option">No values in this window</div>
-							{:else}
-								{#each options as option (option)}
-									<label class="filter-option">
-										<input
-											type="checkbox"
-											checked={selected.includes(option)}
-											disabled={selected.length >= maxFilterValues &&
-												!selected.includes(option)}
-											onchange={(event) =>
-												toggleFilter(
-													filter.key,
-													option,
-													event.currentTarget.checked
-												)}
-										/>
-										<span>{option}</span>
-									</label>
-								{/each}
-							{/if}
+						{#key retryToken}
+							<svelte:boundary>
+								{@const options = [
+									...selected,
+									...(await data.report).report.options[filter.options]
+								]
+									.filter(
+										(value, index, values) => values.indexOf(value) === index
+									)
+									.sort()}
+								{#if options.length === 0}
+									<div class="filter-option">No values in this window</div>
+								{:else}
+									{#each options as option (option)}
+										<label class="filter-option">
+											<input
+												type="checkbox"
+												checked={selected.includes(option)}
+												disabled={selected.length >= maxFilterValues &&
+													!selected.includes(option)}
+												onchange={(event) =>
+													toggleFilter(
+														filter.key,
+														option,
+														event.currentTarget.checked
+													)}
+											/>
+											<span>{option}</span>
+										</label>
+									{/each}
+								{/if}
 
-							{#snippet pending()}
-								<div class="filter-option">Loading values…</div>
-							{/snippet}
-							{#snippet failed()}
-								<div class="filter-option">Values are unavailable</div>
-							{/snippet}
-						</svelte:boundary>
+								{#snippet pending()}
+									<div class="filter-option">Loading values…</div>
+								{/snippet}
+								{#snippet failed()}
+									<div class="filter-option">Values are unavailable</div>
+								{/snippet}
+							</svelte:boundary>
+						{/key}
 						<p class="filter-limit">
 							{selected.length}/{maxFilterValues} selected
 							{#if selected.length >= maxFilterValues}
