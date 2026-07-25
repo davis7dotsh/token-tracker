@@ -6,6 +6,7 @@ import {
 	maxFilterValues,
 	reportSearch,
 	reportTarget,
+	syncDecision,
 	validChart,
 	type ReportParamKey
 } from './report-query';
@@ -56,27 +57,54 @@ export class ReportState {
 	/**
 	 * Adopts a result delivered by SvelteKit's load function.
 	 *
-	 * Only a genuinely new result is adopted. The caller runs inside an effect that
-	 * also observes the URL, so it can re-run after this class rewrites the query
-	 * via `replaceState`; re-applying the same `data` then would overwrite a newer
-	 * report — including one just restored from cache — with the entry the page was
-	 * originally loaded with. Comparing identity makes those repeat calls harmless.
+	 * The caller runs inside an effect that observes both the URL and the load data,
+	 * so it re-runs for two quite different reasons and this method has to tell them
+	 * apart:
 	 *
-	 * A real navigation supersedes anything in flight, so a pending request is
-	 * abandoned rather than allowed to land on top of the new entry.
+	 * - This class rewrote the query via `replaceState`. The load function did not
+	 *   re-run, so the same `data` arrives against a URL this class already knows.
+	 *   Adopting it would overwrite a newer report — including one just restored
+	 *   from cache — with the entry the page was originally loaded with.
+	 * - A real navigation, such as a link or the Back button. Here the URL differs
+	 *   from what this class last recorded, and it must be adopted even when
+	 *   SvelteKit hands back an unchanged `data` object (which it may do when
+	 *   restoring a cached history entry), or the report would keep describing the
+	 *   query the user just left.
+	 *
+	 * So the guard compares the URL as well as the data, and a navigation abandons
+	 * anything in flight rather than letting it land on top of the new entry.
 	 */
 	sync(url: URL, data: ReportResponse) {
-		if (data === this.#synced) return;
+		const search = this.#key(url);
+		const decision = syncDecision({
+			data,
+			href: url.href,
+			synced: this.#synced,
+			currentHref: this.#href,
+			cached: this.#cache.has(search)
+		});
+
+		if (decision === 'ignore') return;
+
+		// A fresh load result is authoritative for its own query. When the result is
+		// unchanged the URL must have moved, so the report comes from the cache.
+		const report = data === this.#synced ? this.#cache.get(search) : data;
 
 		this.#synced = data;
 		this.#inFlight?.abort();
 		this.#inFlight = null;
 		this.#generation += 1;
 		this.#href = url.href;
-		this.#show(data, url.href);
-		this.loading = false;
 		this.error = null;
-		this.#cache.set(this.#key(url), data);
+
+		if (decision === 'fetch' || !report) {
+			void this.#load(search);
+			return;
+		}
+
+		this.#show(report, url.href);
+		this.loading = false;
+		this.#cache.set(search, report);
 	}
 
 	/**
