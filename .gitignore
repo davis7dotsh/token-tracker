@@ -1,0 +1,11 @@
+/bin/
+/artifacts/
+*.test
+node_modules/
+.svelte-kit/
+build/
+dist/
+.env
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

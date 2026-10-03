@@ -1,0 +1,60 @@
+{
+  "name": "@davis7/token-tracker",
+  "version": "0.4.0",
+  "private": true,
+  "bin": {
+    "token-tracker": "./cli.cjs"
+  },
+  "files": [
+    "cli.cjs",
+    "dist/token-tracker-*",
+    "build",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "type": "module",
+  "imports": {
+    "#lib/*": "./src/lib/*"
+  },
+  "scripts": {
+    "dev": "bun --bun vp dev --host 0.0.0.0",
+    "build": "bun --bun vp build",
+    "preview": "bun --bun vp preview --host 0.0.0.0",
+    "start": "bun build/index.js",
+    "check": "svelte-kit sync && vp check && bun run check:svelte",
+    "test": "bun test tests",
+    "cli": "bun src/cli/run.ts",
+    "build:cli": "bun scripts/build-cli.ts",
+    "update:pricing": "bun scripts/update-pricing.ts",
+    "lint": "vp lint --deny-warnings",
+    "lint:fix": "vp lint --fix --deny-warnings",
+    "format": "vp fmt",
+    "format:check": "vp fmt --check",
+    "check:svelte": "svelte-check --tsgo --tsconfig ./tsconfig.json --fail-on-warnings"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "4.0.0",
+    "@effect/sql-sqlite-bun": "4.0.0",
+    "@js-temporal/polyfill": "^0.5.1",
+    "d3": "7.9.0",
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-node": "6.0.0",
+    "@sveltejs/kit": "3.0.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@types/bun": "latest",
+    "@types/d3": "7.4.3",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "playwright": "^1.63.0",
+    "svelte": "5.57.1",
+    "svelte-check": "4.7.6",
+    "typescript": "^6.0.0",
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0",
+    "vite-plus": "1.0.0"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0"
+  },
+  "packageManager": "bun@1.4.2"
+}

@@ -1,0 +1,6 @@
+{"type":"session","id":"pi-session","timestamp":"2026-10-01T11:00:00Z","cwd":"/work/pi"}
+{"type":"model_change","id":"change-one","modelId":"gpt-6-astra","provider":"columbia-codex"}
+{"type":"message","id":"pi-message-one","timestamp":"2026-10-01T11:00:01Z","message":{"role":"assistant","model":"gpt-6-astra","usage":{"input":100,"output":20,"cacheRead":50,"cacheWrite":10,"reasoning":8,"totalTokens":180,"cost":{"total":0}},"content":"a-private-pi-reply-that-must-not-escape"}}
+{"type":"message","id":"pi-message-one","timestamp":"2026-10-01T11:00:01Z","message":{"role":"assistant","model":"gpt-6-astra","usage":{"input":100,"output":20,"cacheRead":50,"cacheWrite":10,"reasoning":8,"totalTokens":180,"cost":{"total":0}}}}
+{"type":"model_change","id":"change-two","modelId":"never-priced-model","provider":"private"}
+{"type":"message","id":"pi-message-two","timestamp":"2026-10-01T11:00:02Z","message":{"role":"assistant","usage":{"input":10,"output":2,"cacheRead":5,"cacheWrite":0}}}
