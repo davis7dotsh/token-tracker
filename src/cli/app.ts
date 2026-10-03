@@ -59,10 +59,19 @@ const makeCheckCommand = <Name extends string>(name: Name) =>
       const custom = Option.isSome(options.days) || Option.isSome(options.since) || Option.isSome(options.until);
       const days = Option.getOrElse(options.days, () => 30);
       if (days <= 0 || days > 36_500)
-        return yield* Effect.fail(new CliFailure({ message: '--days must be between 1 and 36500.' }));
+        return yield* Effect.fail(
+          new CliFailure({
+            message: '--days must be between 1 and 36500.',
+          }),
+        );
       const end = Option.getOrElse(options.until, () => now);
       const start = Option.getOrElse(options.since, () => new Date(end.getTime() - days * 86_400_000));
-      if (start >= end) return yield* Effect.fail(new CliFailure({ message: '--since must be before --until.' }));
+      if (start >= end)
+        return yield* Effect.fail(
+          new CliFailure({
+            message: '--since must be before --until.',
+          }),
+        );
       const selected = custom
         ? {
             ...data,
@@ -86,9 +95,20 @@ const makeCheckCommand = <Name extends string>(name: Name) =>
             now,
             hostname(),
           ),
-        catch: () => new CliFailure({ message: 'Invalid report timeframe or timezone.' }),
+        catch: () =>
+          new CliFailure({
+            message: 'Invalid report timeframe or timezone.',
+          }),
       });
-      const report = custom ? { ...result, period: { start: start.toISOString(), end: end.toISOString() } } : result;
+      const report = custom
+        ? {
+            ...result,
+            period: {
+              start: start.toISOString(),
+              end: end.toISOString(),
+            },
+          }
+        : result;
       const stdio = yield* Stdio.Stdio;
       // Await the platform sink so large JSON reports are fully flushed through
       // pipes before the CLI runtime finishes.
@@ -112,7 +132,11 @@ const connect = Command.make(
   },
   Effect.fn('cli.connect')(function* (options) {
     if (options.interval < 1 || options.interval > 1440)
-      return yield* Effect.fail(new CliFailure({ message: '--interval must be 1–1440 minutes.' }));
+      return yield* Effect.fail(
+        new CliFailure({
+          message: '--interval must be 1–1440 minutes.',
+        }),
+      );
     const url = yield* Effect.try({
       try: () => {
         const value = new URL(options.url);
@@ -120,7 +144,10 @@ const connect = Command.make(
           throw new Error('Unsupported URL');
         return value.href.replace(/\/$/, '');
       },
-      catch: () => new CliFailure({ message: 'Use an HTTP or HTTPS dashboard URL without embedded credentials.' }),
+      catch: () =>
+        new CliFailure({
+          message: 'Use an HTTP or HTTPS dashboard URL without embedded credentials.',
+        }),
     });
     const secret = Option.getOrElse(options.secret, () => process.env.TOKEN_TRACKER_PAIRING_SECRET ?? '');
     if (!secret)
@@ -130,10 +157,16 @@ const connect = Command.make(
         }),
       );
     const local = yield* getLocalDevice();
-    const device = { ...local, name: Option.getOrElse(options.name, () => local.name) };
+    const device = {
+      ...local,
+      name: Option.getOrElse(options.name, () => local.name),
+    };
     const registration = yield* Effect.gen(function* () {
       const client = yield* UsageClient;
-      return yield* client.RegisterDevice({ pairingSecret: secret, device });
+      return yield* client.RegisterDevice({
+        pairingSecret: secret,
+        device,
+      });
     }).pipe(Effect.timeout('30 seconds'), Effect.provide(rpcClientLayer(new URL('rpc', `${url}/`).href)));
     const connection: Connection = {
       url,
@@ -146,7 +179,10 @@ const connect = Command.make(
     yield* writePrivateJson('connection.json', connection);
     if (options.schedule) {
       const scheduler = yield* installSchedule(options.interval);
-      yield* writePrivateJson('connection.json', { ...connection, scheduler });
+      yield* writePrivateJson('connection.json', {
+        ...connection,
+        scheduler,
+      });
       yield* Console.log(`Automatic sync enabled every ${options.interval} minutes (${scheduler}).`);
     }
     yield* Console.log(`Connected ${device.name} to ${url}. Uploading all available history…`);
@@ -163,7 +199,11 @@ const sync = Command.make(
   },
   Effect.fn('cli.sync')(function* (options) {
     if (options.interval < 1 || options.interval > 1440)
-      return yield* Effect.fail(new CliFailure({ message: '--interval must be 1–1440 minutes.' }));
+      return yield* Effect.fail(
+        new CliFailure({
+          message: '--interval must be 1–1440 minutes.',
+        }),
+      );
     if (options.watch) yield* watchSync(options.interval, options.quiet);
     else yield* syncOnce(options.quiet);
   }),
@@ -209,8 +249,12 @@ const disconnect = Command.make(
     const connection = yield* readConnection();
     if (connection) yield* removeSchedule(connection.scheduler);
     const fs = yield* FileSystem.FileSystem;
-    yield* fs.remove(join(configDirectory(), 'connection.json'), { force: true });
-    yield* fs.remove(join(configDirectory(), 'checkpoint.json'), { force: true });
+    yield* fs.remove(join(configDirectory(), 'connection.json'), {
+      force: true,
+    });
+    yield* fs.remove(join(configDirectory(), 'checkpoint.json'), {
+      force: true,
+    });
     yield* Console.log('Disconnected. Future usage checks stay local. Uploaded history remains on the dashboard.');
   }),
 );
@@ -232,7 +276,9 @@ const serve = Command.make(
     const fs = yield* FileSystem.FileSystem;
     if (!(yield* fs.exists(entry)))
       return yield* Effect.fail(
-        new CliFailure({ message: 'Dashboard build not found. Run bun run build or pass --entry <build/index.js>.' }),
+        new CliFailure({
+          message: 'Dashboard build not found. Run bun run build or pass --entry <build/index.js>.',
+        }),
       );
     const binary = Bun.main.includes('$bunfs') ? (process.env.BUN_EXEC_PATH ?? Bun.which('bun')) : process.execPath;
     if (!binary)
@@ -247,7 +293,11 @@ const serve = Command.make(
         const child = yield* Effect.acquireRelease(
           Effect.sync(() =>
             Bun.spawn([binary, entry], {
-              env: { ...process.env, HOST: options.host, PORT: String(options.port) },
+              env: {
+                ...process.env,
+                HOST: options.host,
+                PORT: String(options.port),
+              },
               stdout: 'inherit',
               stderr: 'inherit',
             }),
@@ -256,7 +306,11 @@ const serve = Command.make(
         );
         const code = yield* Effect.promise(() => child.exited);
         if (code)
-          return yield* Effect.fail(new CliFailure({ message: `Dashboard server exited with status ${code}.` }));
+          return yield* Effect.fail(
+            new CliFailure({
+              message: `Dashboard server exited with status ${code}.`,
+            }),
+          );
       }),
     );
   }),

@@ -172,6 +172,8 @@ bun run build
 bun run build:cli
 ```
 
+Zed uses the project settings in `.zed/settings.json` to format supported source files on save through the local `vp fmt` command. It reads the same `fmt` settings in `vite.config.ts` as the command-line checks.
+
 `check` synchronizes SvelteKit types, runs `vp check` for formatting/linting/TypeScript diagnostics, then runs `svelte-check --tsgo` for component types, Svelte compiler diagnostics, and CSS. `bun run check:svelte` runs just the Svelte check; `bun run lint:fix` applies safe lint fixes. Lint correctness diagnostics and Svelte warnings fail checks.
 
 The toolchain is pinned to Vite+ 1.0.0 and the latest stable native TypeScript compiler verified during setup, 7.0.2, installed as `@typescript/native` via an npm alias. This is the released Go compiler previously published as `@typescript/native-preview`; its executable is now named `tsc`. TypeScript 6 remains installed for SvelteKit and Svelte Check's JavaScript tooling APIs. Vite+ bundles its own Go-based `oxlint-tsgolint` 7.0.2003 for type-aware linting. Formatting/lint settings live in `vite.config.ts`, with Svelte formatting enabled and generated builds, the pricing snapshot, and third-party license text excluded from formatting.

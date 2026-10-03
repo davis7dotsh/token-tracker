@@ -1,0 +1,96 @@
+{
+  "tab_size": 2,
+  "preferred_line_length": 120,
+  "languages": {
+    "TypeScript": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "TSX": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "JavaScript": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "JSON": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "JSONC": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "Svelte": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "CSS": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "HTML": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    },
+    "Markdown": {
+      "formatter": {
+        "external": {
+          "command": "./node_modules/.bin/vp",
+          "arguments": ["fmt", "--stdin-filepath", "{buffer_path}"]
+        }
+      },
+      "format_on_save": "on",
+      "tab_size": 2
+    }
+  }
+}
