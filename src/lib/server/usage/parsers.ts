@@ -80,34 +80,62 @@ const candidate = (event: MutableEvent, tier = '', cacheWrite1h = 0, sidechain =
   source: 0,
 });
 
-// JSON is treated as unknown. Only the metadata fields we recognize are copied
-// into events; an unfinished final append is expected in a live harness log.
-const readRecords = (contents: string, visit: (record: Metadata, line: number) => boolean) => {
-  const lines = contents.split('\n');
-  let malformed = 0;
-  for (const [index, line] of lines.entries()) {
-    if (!line.trim()) continue;
-    if (line.length > 32 * 1024 * 1024) {
-      malformed++;
-      continue;
+// Keep at most one bounded record in memory. Raw prompts/tool output are
+// discarded as each record is visited, rather than retaining an entire log.
+const recordParser = (
+  parsed: ParsedFile,
+  visit: (record: Metadata, line: number) => boolean,
+  finalize = () => parsed,
+) => {
+  const maximumLength = 32 * 1024 * 1024;
+  let fragments: string[] = [];
+  let length = 0;
+  let lineNumber = 0;
+  const flush = (complete: boolean) => {
+    lineNumber++;
+    if (length > maximumLength) parsed.malformed++;
+    else {
+      const line = fragments.length === 1 ? fragments[0] : fragments.join('');
+      if (line.trim()) {
+        let record: unknown;
+        try {
+          record = JSON.parse(line);
+        } catch {
+          if (complete) parsed.malformed++;
+          fragments = [];
+          length = 0;
+          return;
+        }
+        if ((!isObject(record) || !visit(record, lineNumber)) && complete) parsed.malformed++;
+      }
     }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      if (index < lines.length - 1) malformed++;
-      continue;
-    }
-    if (!isObject(parsed) || !visit(parsed, index + 1)) {
-      if (index < lines.length - 1) malformed++;
-    }
-  }
-  return malformed;
+    fragments = [];
+    length = 0;
+  };
+  return {
+    push(chunk: string) {
+      let offset = 0;
+      while (offset < chunk.length) {
+        const end = chunk.indexOf('\n', offset);
+        const fragment = chunk.slice(offset, end === -1 ? undefined : end);
+        length += fragment.length;
+        if (length <= maximumLength) fragments.push(fragment);
+        else fragments = [];
+        if (end === -1) break;
+        flush(true);
+        offset = end + 1;
+      }
+    },
+    finish() {
+      if (length) flush(false);
+      return finalize();
+    },
+  };
 };
 
-export const parseClaude = (contents: string, file: string): ParsedFile => {
+export const claudeParser = (file: string) => {
   const parsed: ParsedFile = { events: [], malformed: 0, sessionId: '', parentId: '', forkedAt: '' };
-  parsed.malformed = readRecords(contents, (record, line) => {
+  return recordParser(parsed, (record, line) => {
     const message = object(record.message);
     if (record.type !== 'assistant' || !isObject(message.usage) || message.model === '<synthetic>') return true;
     const stamp = timestamp(record.timestamp);
@@ -145,7 +173,6 @@ export const parseClaude = (contents: string, file: string): ParsedFile => {
     );
     return true;
   });
-  return parsed;
 };
 
 const codexModel = (record: Metadata) =>
@@ -192,7 +219,7 @@ const codexEvent = (stamp: string, session: string, context: CodexContext, token
   return event;
 };
 
-export const parseCodex = (contents: string, file: string): ParsedFile => {
+export const codexParser = (file: string) => {
   const parsed: ParsedFile = { events: [], malformed: 0, sessionId: fileSession(file), parentId: '', forkedAt: '' };
   let context: CodexContext = { model: 'unknown', cwd: '', tier: '' };
   const contexts = new Map<string, CodexContext>();
@@ -212,7 +239,7 @@ export const parseCodex = (contents: string, file: string): ParsedFile => {
   const compactionMarkers = new Map<string, number>();
   let firstMetadata = true;
   let historyStart: number | undefined;
-  parsed.malformed = readRecords(contents, (record, line) => {
+  const visit = (record: Metadata, line: number) => {
     const payload = object(record.payload);
     const type = text(record.type);
     if (type === 'session_meta') {
@@ -301,61 +328,76 @@ export const parseCodex = (contents: string, file: string): ParsedFile => {
       threadTokens: isObject(payload.thread_token_usage) ? payload.thread_token_usage : undefined,
     });
     return true;
-  });
-  // Modern thread-identified request records are authoritative. Older Codex
-  // versions write request records for compaction only; treating one of those
-  // as a format upgrade would discard every subsequent normal request.
-  const normal = precise.filter((pending) => pending.threadId && !compactionMarkers.has(pending.responseId));
-  const firstRecord = normal.reduce(
-    (first, pending) => (pending.entry.event.timestamp < first ? pending.entry.event.timestamp : first),
-    '\uffff',
-  );
-  parsed.events = cumulative.filter((entry) => entry.event.timestamp < firstRecord);
-  parsed.compactionIds = new Set(
-    precise.filter((pending) => compactionMarkers.has(pending.responseId)).map((pending) => pending.responseId),
-  );
-  for (const pending of precise) {
-    const markerLine = compactionMarkers.get(pending.responseId);
-    if (!pending.threadId && markerLine === undefined) continue;
-    if (markerLine !== undefined) {
-      // A local compaction's advancing snapshot can already include its
-      // request. Match only the latest response between record and marker;
-      // an unrelated request with equal usage must not consume this one.
-      const covered = snapshots.find(
-        (snapshot) =>
-          snapshot.line > pending.line &&
-          snapshot.line < markerLine &&
-          snapshot.entry.event.timestamp < firstRecord &&
-          !precise.some((later) => later.line > pending.line && later.line < snapshot.line) &&
-          (sameTokens(snapshot.tokens, pending.tokens) ||
-            (pending.threadTokens !== undefined &&
-              snapshot.total !== undefined &&
-              sameTokens(pending.threadTokens, snapshot.total))),
-      );
-      if (covered) {
-        // Retain the native identity even when the accounting came from the
-        // cumulative snapshot, so copied records can deduplicate on a server.
-        covered.entry.event.id = pending.entry.event.id;
-        continue;
+  };
+  const finalize = () => {
+    // Modern thread-identified request records are authoritative. Older Codex
+    // versions write request records for compaction only; treating one of those
+    // as a format upgrade would discard every subsequent normal request.
+    const normal = precise.filter((pending) => pending.threadId && !compactionMarkers.has(pending.responseId));
+    const firstRecord = normal.reduce(
+      (first, pending) => (pending.entry.event.timestamp < first ? pending.entry.event.timestamp : first),
+      '\uffff',
+    );
+    parsed.events = cumulative.filter((entry) => entry.event.timestamp < firstRecord);
+    parsed.compactionIds = new Set(
+      precise.filter((pending) => compactionMarkers.has(pending.responseId)).map((pending) => pending.responseId),
+    );
+    for (const [index, pending] of precise.entries()) {
+      const markerLine = compactionMarkers.get(pending.responseId);
+      if (!pending.threadId && markerLine === undefined) continue;
+      if (markerLine !== undefined) {
+        // A local compaction's advancing snapshot can already include its
+        // request. Match only the latest response between record and marker;
+        // an unrelated request with equal usage must not consume this one.
+        let low = 0;
+        let high = snapshots.length;
+        while (low < high) {
+          const middle = (low + high) >>> 1;
+          if (snapshots[middle].line <= pending.line) low = middle + 1;
+          else high = middle;
+        }
+        const boundary = Math.min(markerLine, precise[index + 1]?.line ?? Infinity);
+        let covered: (typeof snapshots)[number] | undefined;
+        for (let snapshotIndex = low; snapshotIndex < snapshots.length; snapshotIndex++) {
+          const snapshot = snapshots[snapshotIndex];
+          if (snapshot.line >= boundary) break;
+          if (
+            snapshot.entry.event.timestamp < firstRecord &&
+            (sameTokens(snapshot.tokens, pending.tokens) ||
+              (pending.threadTokens !== undefined &&
+                snapshot.total !== undefined &&
+                sameTokens(pending.threadTokens, snapshot.total)))
+          ) {
+            covered = snapshot;
+            break;
+          }
+        }
+        if (covered) {
+          // Retain the native identity even when the accounting came from the
+          // cumulative snapshot, so copied records can deduplicate on a server.
+          covered.entry.event.id = pending.entry.event.id;
+          continue;
+        }
       }
+      const turn = contexts.get(pending.turnId);
+      if (turn) {
+        pending.entry.event.model = turn.model;
+        pending.entry.event.project = projectName(turn.cwd);
+        pending.entry.tier ||= turn.tier;
+      }
+      if (pending.explicitModel) pending.entry.event.model = modelName(pending.explicitModel);
+      parsed.events.push(pending.entry);
     }
-    const turn = contexts.get(pending.turnId);
-    if (turn) {
-      pending.entry.event.model = turn.model;
-      pending.entry.event.project = projectName(turn.cwd);
-      pending.entry.tier ||= turn.tier;
-    }
-    if (pending.explicitModel) pending.entry.event.model = modelName(pending.explicitModel);
-    parsed.events.push(pending.entry);
-  }
-  return parsed;
+    return parsed;
+  };
+  return recordParser(parsed, visit, finalize);
 };
 
-export const parsePi = (contents: string, file: string): ParsedFile => {
+export const piParser = (file: string) => {
   const parsed: ParsedFile = { events: [], malformed: 0, sessionId: fileSession(file), parentId: '', forkedAt: '' };
   let cwd = '';
   let model = 'unknown';
-  parsed.malformed = readRecords(contents, (record, line) => {
+  return recordParser(parsed, (record, line) => {
     if (record.type === 'session') {
       parsed.sessionId = text(record.id) || parsed.sessionId;
       cwd = text(record.cwd);
@@ -384,13 +426,30 @@ export const parsePi = (contents: string, file: string): ParsedFile => {
     parsed.events.push(candidate(event));
     return true;
   });
-  return parsed;
 };
+
+const parseContents = (contents: string, parser: ReturnType<typeof recordParser>) => {
+  parser.push(contents);
+  return parser.finish();
+};
+export const parseClaude = (contents: string, file: string) => parseContents(contents, claudeParser(file));
+export const parseCodex = (contents: string, file: string) => parseContents(contents, codexParser(file));
+export const parsePi = (contents: string, file: string) => parseContents(contents, piParser(file));
 
 export const filterCodexReplays = (files: ParsedFile[]) => {
   const parents = new Map(
     files.filter((file) => file.events[0]?.event.harness === 'codex').map((file) => [file.sessionId, file]),
   );
+  const replayKey = (event: UsageEvent) =>
+    JSON.stringify([
+      event.timestamp,
+      event.inputTokens,
+      event.outputTokens,
+      event.cacheReadTokens,
+      event.cacheWriteTokens,
+      event.reasoningTokens,
+    ]);
+  const parentReplays = new Map<ParsedFile, Set<string>>();
   for (const child of files) {
     if (!child.parentId || child.parentId === child.sessionId) continue;
     const parent = parents.get(child.parentId);
@@ -403,16 +462,16 @@ export const filterCodexReplays = (files: ParsedFile[]) => {
       )
         return false;
       if (!parent || parent === child || !replay.event.id.startsWith('codex:total:')) return true;
-      return !parent.events.some(
-        (original) =>
-          original.event.timestamp === replay.event.timestamp &&
-          ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'reasoningTokens'].every(
-            (field) =>
-              Object.entries(original.event).find(([key]) => key === field)?.[1] ===
-              Object.entries(replay.event).find(([key]) => key === field)?.[1],
-          ),
-      );
+      let replays = parentReplays.get(parent);
+      if (!replays) {
+        replays = new Set(parent.events.map((original) => replayKey(original.event)));
+        parentReplays.set(parent, replays);
+      }
+      return !replays.has(replayKey(replay.event));
     });
+    // A fork can itself become another fork's parent. If it was indexed before
+    // its inherited records were filtered, later children need the new view.
+    parentReplays.delete(child);
   }
 };
 

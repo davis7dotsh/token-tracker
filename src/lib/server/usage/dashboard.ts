@@ -1,69 +1,10 @@
 import { Temporal } from '@js-temporal/polyfill';
 import type { DashboardResponse, UsageEvent, UsageQuery, UsageResult } from '../../shared/domain';
+import type { PricingPolicy } from '../../shared/pricing';
+import { provider } from '../../shared/provider';
 import { tokenTotal } from './parsers';
-
-const namespaces: Record<string, string> = {
-  openai: 'openai',
-  anthropic: 'anthropic',
-  xai: 'xai',
-  'x-ai': 'xai',
-  google: 'google',
-  gemini: 'google',
-  google_genai: 'google',
-  vertex_ai: 'google',
-  'vertex-ai': 'google',
-  deepseek: 'deepseek',
-  qwen: 'alibaba',
-  alibaba: 'alibaba',
-  dashscope: 'alibaba',
-  mistral: 'mistral',
-  mistralai: 'mistral',
-  meta: 'meta',
-  'meta-llama': 'meta',
-  moonshot: 'moonshot',
-  moonshotai: 'moonshot',
-  zai: 'zai',
-  'z-ai': 'zai',
-  zhipu: 'zai',
-  cohere: 'cohere',
-  amazon: 'amazon',
-  aws: 'amazon',
-  bedrock: 'amazon',
-  bedrock_converse: 'amazon',
-  bedrock_mantle: 'amazon',
-  azure: 'azure',
-  azure_ai: 'azure',
-  openrouter: 'openrouter',
-  together: 'together',
-  together_ai: 'together',
-  groq: 'groq',
-  perplexity: 'perplexity',
-  nvidia: 'nvidia',
-  huggingface: 'huggingface',
-  fireworks: 'fireworks',
-  fireworks_ai: 'fireworks',
-};
-const families = [
-  ['openai', ['gpt-', 'chatgpt-', 'o1-', 'o3-', 'o4-', 'codex-mini-']],
-  ['anthropic', ['claude-']],
-  ['google', ['gemini-', 'gemma-']],
-  ['xai', ['grok-']],
-  ['deepseek', ['deepseek-']],
-  ['alibaba', ['qwen']],
-  ['mistral', ['mistral-', 'mixtral-', 'codestral-', 'magistral-', 'ministral-', 'devstral-']],
-  ['meta', ['llama-', 'llama2-', 'llama3-', 'llama4-']],
-  ['moonshot', ['kimi-', 'moonshot-']],
-  ['zai', ['glm-']],
-  ['cohere', ['command-r', 'command-a']],
-  ['amazon', ['amazon.nova-']],
-] as const;
-
-export const provider = (model: string) => {
-  const normalized = model.trim().toLowerCase();
-  if (normalized.includes('/')) return namespaces[normalized.split('/')[0]] ?? 'unknown';
-  for (const [name, prefixes] of families) if (prefixes.some((prefix) => normalized.startsWith(prefix))) return name;
-  return ['o1', 'o3', 'o4'].includes(normalized) ? 'openai' : 'unknown';
-};
+import { bundledPolicy, tokenCostParts } from './pricing';
+export { provider } from '../../shared/provider';
 export const validateTimezone = (zone: string) => {
   try {
     Temporal.Now.zonedDateTimeISO(zone);
@@ -88,8 +29,11 @@ const accumulator = () => {
     cacheHitRate: 0,
   };
   const sessions = new Set<string>();
-  const add = (event: UsageEvent) => {
-    const tokens = tokenTotal(event);
+  const add = (
+    event: UsageEvent,
+    key = `${event.deviceId ?? 'local'}:${event.harness}:${event.sessionId}`,
+    tokens = tokenTotal(event),
+  ) => {
     totals.tokens += tokens;
     totals.inputTokens += event.inputTokens;
     totals.outputTokens += event.outputTokens;
@@ -98,8 +42,8 @@ const accumulator = () => {
     totals.reasoningTokens += event.reasoningTokens;
     totals.costUSD += event.costUsd;
     if (!event.costKnown) totals.unpricedTokens += tokens;
-    totals.requests++;
-    sessions.add(`${event.deviceId ?? 'local'}:${event.harness}:${event.sessionId}`);
+    totals.requests += event.requests ?? 1;
+    sessions.add(key);
   };
   const finish = () => ({
     ...totals,
@@ -112,65 +56,160 @@ const accumulator = () => {
   return { add, finish };
 };
 type Groups = Map<string, ReturnType<typeof accumulator>>;
-const addGroup = (groups: Groups, name: string, event: UsageEvent) => {
+const addGroup = (groups: Groups, name: string, event: UsageEvent, session: string, tokens: number) => {
   let group = groups.get(name);
   if (!group) {
     group = accumulator();
     groups.set(name, group);
   }
-  group.add(event);
+  group.add(event, session, tokens);
 };
 const breakdown = (groups: Groups | undefined) =>
   [...(groups ?? new Map()).entries()]
     .map(([name, group]) => ({ name, ...group.finish() }))
     .sort((left, right) => right.tokens - left.tokens || left.name.localeCompare(right.name));
+const seriesTotals = () => ({ tokens: 0, costUSD: 0, unpricedTokens: 0 });
+type SeriesGroups = Map<string, ReturnType<typeof seriesTotals>>;
+const addSeries = (groups: SeriesGroups, name: string, event: UsageEvent, tokens: number) => {
+  let group = groups.get(name);
+  if (!group) {
+    group = seriesTotals();
+    groups.set(name, group);
+  }
+  group.tokens += tokens;
+  group.costUSD += event.costUsd;
+  if (!event.costKnown) group.unpricedTokens += tokens;
+};
+const series = (groups: SeriesGroups | undefined) =>
+  [...(groups ?? new Map()).entries()]
+    .map(([name, totals]) => ({ name, ...totals }))
+    .sort((left, right) => right.tokens - left.tokens || left.name.localeCompare(right.name));
+const bucketGroups = () => ({
+  harnesses: new Map<string, ReturnType<typeof accumulator>>(),
+  providers: new Map<string, ReturnType<typeof seriesTotals>>(),
+  models: new Map<string, ReturnType<typeof seriesTotals>>(),
+});
+const addBucket = <Key>(
+  groups: Map<Key, ReturnType<typeof bucketGroups>>,
+  bucket: Key,
+  event: UsageEvent,
+  eventProvider: string,
+  session: string,
+  tokens: number,
+) => {
+  let group = groups.get(bucket);
+  if (!group) {
+    group = bucketGroups();
+    groups.set(bucket, group);
+  }
+  addGroup(group.harnesses, event.harness, event, session, tokens);
+  addSeries(group.providers, eventProvider, event, tokens);
+  addSeries(group.models, event.model, event, tokens);
+};
 const selected = (names: readonly string[] | undefined, value: string) => names === undefined || names.includes(value);
-const matches = (query: UsageQuery, event: UsageEvent) =>
+export const matchesUsage = (query: UsageQuery, event: UsageEvent, eventProvider = provider(event.model)) =>
   selected(query.harnesses, event.harness) &&
   selected(query.models, event.model) &&
-  selected(query.providers, provider(event.model)) &&
+  selected(query.providers, eventProvider) &&
   (query.projects === undefined ||
     query.projects.includes(event.repository ?? event.project) ||
     query.projects.includes(event.project)) &&
   selected(query.devices, event.deviceId ?? 'local');
 const dateString = (value: Temporal.ZonedDateTime) => value.toPlainDate().toString();
 const timestamp = (value: Temporal.ZonedDateTime) => value.toInstant().toString({ fractionalSecondDigits: 3 });
-const inTimezone = (event: UsageEvent, zone: string) => Temporal.Instant.from(event.timestamp).toZonedDateTimeISO(zone);
+const eventTimestamps = new WeakMap<UsageEvent, number>();
+export const eventMillis = (event: UsageEvent) => {
+  const cached = eventTimestamps.get(event);
+  if (cached !== undefined) return cached;
+  const millis = Date.parse(event.timestamp);
+  eventTimestamps.set(event, millis);
+  return millis;
+};
+export const usageTimeframe = (query: UsageQuery = {}, now = new Date()) => {
+  const requestedZone = query.timezone ?? 'UTC';
+  const zone = validateTimezone(requestedZone) ? requestedZone : 'UTC';
+  const range = query.range ?? '30d';
+  const current = Temporal.Instant.from(now.toISOString()).toZonedDateTimeISO(zone);
+  const today = current.startOfDay();
+  const end = today.add({ days: 1 }).startOfDay();
+  const days = range === '7d' ? 7 : range === '90d' ? 90 : 30;
+  let start = today;
+  let previousStart = today.subtract({ days: 1 });
+  if (range === '6m') {
+    start = end.subtract({ months: 6 });
+    previousStart = start.subtract({ months: 6 });
+  } else if (range !== 'today' && range !== 'all') {
+    start = current.subtract({ days });
+    previousStart = start.subtract({ days });
+  }
+  return { requestedZone, zone, range, today, end, start, previousStart };
+};
 
 export const buildDashboard = (
   data: UsageResult,
   query: UsageQuery = {},
   now = new Date(),
   machine = 'This machine',
+  pricingPolicy: PricingPolicy = bundledPolicy,
 ) => {
-  const requestedZone = query.timezone ?? 'UTC';
-  const zone = validateTimezone(requestedZone) ? requestedZone : 'UTC';
-  const range = query.range ?? '30d';
-  const current = Temporal.Instant.from(now.toISOString()).toZonedDateTimeISO(zone);
-  const today = current.startOfDay();
-  const end = today.add({ days: 1 });
-  const days = range === '7d' ? 7 : range === '90d' ? 90 : 30;
-  let start = today;
-  let previousStart = today.subtract({ days: 1 });
+  const timeframe = usageTimeframe(query, now);
+  const { requestedZone, zone, range, today, end, previousStart } = timeframe;
+  let { start } = timeframe;
   if (range === 'all') {
-    for (const event of data.events)
-      if (Date.parse(event.timestamp) < start.epochMilliseconds) start = inTimezone(event, zone).startOfDay();
-  } else if (range === '6m') {
-    start = end.subtract({ months: 6 });
-    previousStart = start.subtract({ months: 6 });
-  } else if (range !== 'today') {
-    start = current.subtract({ days });
-    previousStart = start.subtract({ days });
+    let earliest = start.epochMilliseconds;
+    for (const event of data.events) {
+      const millis = eventMillis(event);
+      if (millis < earliest) earliest = millis;
+    }
+    start = Temporal.Instant.fromEpochMilliseconds(earliest).toZonedDateTimeISO(zone).startOfDay();
   }
+  // Convert calendar boundaries once, rather than running the Temporal polyfill
+  // for every request record. Binary search preserves DST and non-hour offsets.
+  const calendarDays: { date: string; start: number; end: number }[] = [];
+  for (
+    let date = start.startOfDay();
+    date.epochMilliseconds < end.epochMilliseconds;
+    date = date.add({ days: 1 }).startOfDay()
+  ) {
+    calendarDays.push({
+      date: dateString(date),
+      start: date.epochMilliseconds,
+      end: date.add({ days: 1 }).startOfDay().epochMilliseconds,
+    });
+  }
+  const dayFor = (millis: number) => {
+    let low = 0;
+    let high = calendarDays.length - 1;
+    while (low <= high) {
+      const index = (low + high) >>> 1;
+      const day = calendarDays[index];
+      if (millis < day.start) high = index - 1;
+      else if (millis >= day.end) low = index + 1;
+      else return day.date;
+    }
+    return '';
+  };
+  const nowMillis = now.getTime();
+  const startMillis = start.epochMilliseconds;
+  const previousMillis = previousStart.epochMilliseconds;
+  const endMillis = end.epochMilliseconds;
+  const todayMillis = today.epochMilliseconds;
   const total = accumulator();
+  const tokenCosts = {
+    input: { costUSD: 0, unavailableTokens: 0 },
+    output: { costUSD: 0, unavailableTokens: 0 },
+    cacheRead: { costUSD: 0, unavailableTokens: 0 },
+    cacheWrite: { costUSD: 0, unavailableTokens: 0 },
+    unattributedCostUSD: 0,
+  };
   const previous = accumulator();
   const harnessGroups: Groups = new Map();
   const modelGroups: Groups = new Map();
   const providerGroups: Groups = new Map();
   const projectGroups: Groups = new Map();
   const deviceGroups: Groups = new Map();
-  const dailyGroups = new Map<string, Groups>();
-  const hourlyGroups = new Map<number, Groups>();
+  const dailyGroups = new Map<string, ReturnType<typeof bucketGroups>>();
+  const hourlyGroups = new Map<number, ReturnType<typeof bucketGroups>>();
   const sessions = new Map<
     string,
     {
@@ -187,8 +226,13 @@ export const buildDashboard = (
   const availableProviders = new Set<string>();
   const availableProjects = new Set<string>();
   const availableDevices = new Set<string>();
+  const modelProviders = new Map<string, string>();
   for (const event of data.events) {
-    const eventProvider = provider(event.model);
+    let eventProvider = modelProviders.get(event.model);
+    if (eventProvider === undefined) {
+      eventProvider = provider(event.model);
+      modelProviders.set(event.model, eventProvider);
+    }
     const project = event.repository ?? event.project;
     const device = event.deviceId ?? 'local';
     availableHarnesses.add(event.harness);
@@ -196,28 +240,37 @@ export const buildDashboard = (
     availableProviders.add(eventProvider);
     availableProjects.add(project);
     availableDevices.add(device);
-    const millis = Date.parse(event.timestamp);
-    if (!Number.isFinite(millis) || millis > now.getTime() || !matches(query, event)) continue;
-    if (range !== 'all' && millis >= previousStart.epochMilliseconds && millis < start.epochMilliseconds)
-      previous.add(event);
-    if (millis < start.epochMilliseconds || millis >= end.epochMilliseconds) continue;
-    total.add(event);
-    addGroup(harnessGroups, event.harness, event);
-    addGroup(modelGroups, event.model, event);
-    addGroup(providerGroups, eventProvider, event);
-    addGroup(projectGroups, project, event);
-    addGroup(deviceGroups, device, event);
-    const date = dateString(inTimezone(event, zone));
-    if (!dailyGroups.has(date)) dailyGroups.set(date, new Map());
-    const dayGroup = dailyGroups.get(date);
-    if (dayGroup) addGroup(dayGroup, event.harness, event);
-    if (range === 'today') {
-      const hour = Math.floor((millis - today.epochMilliseconds) / 3_600_000);
-      if (!hourlyGroups.has(hour)) hourlyGroups.set(hour, new Map());
-      const hourGroup = hourlyGroups.get(hour);
-      if (hourGroup) addGroup(hourGroup, event.harness, event);
-    }
+    const millis = eventMillis(event);
+    if (!Number.isFinite(millis) || millis > nowMillis || !matchesUsage(query, event, eventProvider)) continue;
     const key = `${device}:${event.harness}:${event.sessionId}`;
+    const tokens = tokenTotal(event);
+    if (range !== 'all' && millis >= previousMillis && millis < startMillis) previous.add(event);
+    if (millis < startMillis || millis >= endMillis) continue;
+    total.add(event, key, tokens);
+    const costParts = tokenCostParts(event, pricingPolicy);
+    if (costParts) {
+      tokenCosts.input.costUSD += costParts.input;
+      tokenCosts.output.costUSD += costParts.output;
+      tokenCosts.cacheRead.costUSD += costParts.cacheRead;
+      tokenCosts.cacheWrite.costUSD += costParts.cacheWrite;
+    } else {
+      tokenCosts.input.unavailableTokens += event.inputTokens;
+      tokenCosts.output.unavailableTokens += event.outputTokens;
+      tokenCosts.cacheRead.unavailableTokens += event.cacheReadTokens;
+      tokenCosts.cacheWrite.unavailableTokens += event.cacheWriteTokens;
+      if (event.costKnown) tokenCosts.unattributedCostUSD += event.costUsd;
+    }
+    addGroup(harnessGroups, event.harness, event, key, tokens);
+    addGroup(modelGroups, event.model, event, key, tokens);
+    addGroup(providerGroups, eventProvider, event, key, tokens);
+    addGroup(projectGroups, project, event, key, tokens);
+    addGroup(deviceGroups, device, event, key, tokens);
+    const date = dayFor(millis);
+    addBucket(dailyGroups, date, event, eventProvider, key, tokens);
+    if (range === 'today') {
+      const hour = Math.floor((millis - todayMillis) / 3_600_000);
+      addBucket(hourlyGroups, hour, event, eventProvider, key, tokens);
+    }
     let session = sessions.get(key);
     if (!session) {
       session = {
@@ -230,20 +283,23 @@ export const buildDashboard = (
       };
       sessions.set(key, session);
     }
-    session.aggregate.add(event);
+    session.aggregate.add(event, key, tokens);
     session.models.add(event.model);
     session.providers.add(eventProvider);
     if (event.timestamp < session.startedAt) session.startedAt = event.timestamp;
     if (event.timestamp > session.lastActiveAt) session.lastActiveAt = event.timestamp;
   }
   const daily: DashboardResponse['daily'][number][] = [];
-  for (let date = start.startOfDay(); date.epochMilliseconds < end.epochMilliseconds; date = date.add({ days: 1 })) {
-    const harnesses = breakdown(dailyGroups.get(dateString(date)));
+  for (const date of calendarDays) {
+    const groups = dailyGroups.get(date.date);
+    const harnesses = breakdown(groups?.harnesses);
     daily.push({
-      date: dateString(date),
+      date: date.date,
       tokens: harnesses.reduce((sum, group) => sum + group.tokens, 0),
       costUSD: harnesses.reduce((sum, group) => sum + group.costUSD, 0),
       harnesses,
+      providers: series(groups?.providers),
+      models: series(groups?.models),
     });
   }
   const hourly: DashboardResponse['hourly'][number][] = [];
@@ -254,13 +310,16 @@ export const buildDashboard = (
       hour = hour.add({ hours: 1 }), index++
     ) {
       const nextHour = hour.add({ hours: 1 });
-      const harnesses = breakdown(hourlyGroups.get(index));
+      const groups = hourlyGroups.get(index);
+      const harnesses = breakdown(groups?.harnesses);
       hourly.push({
         start: timestamp(hour),
         end: timestamp(nextHour.epochMilliseconds > end.epochMilliseconds ? end : nextHour),
         tokens: harnesses.reduce((sum, group) => sum + group.tokens, 0),
         costUSD: harnesses.reduce((sum, group) => sum + group.costUSD, 0),
         harnesses,
+        providers: series(groups?.providers),
+        models: series(groups?.models),
       });
     }
   }
@@ -279,6 +338,7 @@ export const buildDashboard = (
     range,
     period: { start: dateString(start), end: dateString(today) },
     totals: total.finish(),
+    tokenCosts,
     previous: range === 'all' ? null : previous.finish(),
     daily,
     hourly,
@@ -309,7 +369,7 @@ export const buildDashboard = (
         : [...data.warnings, `Timezone ${requestedZone} is unavailable; displaying UTC.`],
     pricing: {
       method:
-        'Estimated API-equivalent cost using ccusage accounting and bundled LiteLLM prices. Subscription charges may differ; unknown prices are excluded.',
+        'API-equivalent cost from complete native Grok accounting, cached model prices, and saved pricing rules. Subscription charges may differ; unavailable costs are excluded.',
       updatedAt: data.pricingUpdatedAt,
     },
   } satisfies DashboardResponse;

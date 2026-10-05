@@ -1,8 +1,19 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { replaceState } from '$app/navigation';
+  import { Schema } from 'effect';
+  import { useSearchParams } from 'runed/kit';
+  import { page } from '$app/state';
+  import {
+    breakdownGroups,
+    dashboardUrlSchema,
+    encodeFilter,
+    filterKeys,
+    normalizedDashboardParams,
+    usageQueryFromParams,
+  } from '#lib/client/dashboard-url.ts';
   import { makeDashboardClient } from '#lib/client/rpc.ts';
-  import type { Breakdown, DashboardResponse, Device, UsageQuery } from '#lib/shared/domain.ts';
+  import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
+  import { UsageQuery, type Breakdown, type DashboardResponse, type Device } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
   import MultiSelect from '#lib/components/MultiSelect.svelte';
   import PricingDialog from '#lib/components/PricingDialog.svelte';
@@ -15,17 +26,6 @@
     { value: '7d', label: '1 week' },
     { value: 'today', label: '1 day' },
   ] as const;
-  const names: Record<string, string> = {
-    claude: 'Claude Code',
-    codex: 'Codex',
-    pi: 'Pi',
-    openai: 'OpenAI',
-    anthropic: 'Anthropic',
-    google: 'Google',
-    xai: 'xAI',
-    unknown: 'Unknown',
-  };
-  const colors: Record<string, string> = { claude: '#4DABF7', codex: '#8695a8', pi: '#b6c4d4' };
   const integer = new Intl.NumberFormat('en-US');
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
   const currency = new Intl.NumberFormat('en-US', {
@@ -34,23 +34,62 @@
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
-  let query = $state<UsageQuery>({ range: '30d', timezone: 'UTC' });
+  const date = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const params = useSearchParams(dashboardUrlSchema, { noScroll: true });
+  let timezone = $state('UTC');
+  const queryKey = $derived(JSON.stringify(usageQueryFromParams(params, timezone)));
+  const decodeQuery = Schema.decodeUnknownSync(UsageQuery);
+  const query = $derived(decodeQuery(JSON.parse(queryKey)));
   let data = $state.raw<DashboardResponse>();
   let devices = $state.raw<readonly Device[]>([]);
   let loading = $state(true);
   let error = $state('');
-  let chartMode = $state<'bar' | 'line'>('bar');
-  let metric = $state<'tokens' | 'costUSD'>('tokens');
-  let grouping = $state<'harnesses' | 'models' | 'providers' | 'devices' | 'projects'>('harnesses');
-  let showAll = $state(false);
-  let sessionSearch = $state('');
-  let sessionPage = $state(0);
-  let sort = $state<'tokens' | 'lastActiveAt'>('lastActiveAt');
+  const chartMode = $derived(params.chart);
+  const metric = $derived(params.metric === 'cost' ? 'costUSD' : 'tokens');
+  const grouping = $derived(params.breakdown);
+  const showAll = $derived(params.expanded);
+  const sessionSearch = $derived(params.search);
+  const sessionPage = $derived(params.page - 1);
+  const sort = $derived(params.sort);
   let sourcesDialog: HTMLDialogElement;
   let pricingDialog: { show: () => void };
   let client = $state.raw<ReturnType<typeof makeDashboardClient>>();
   let request: AbortController | undefined;
   let requestVersion = 0;
+  let observedQueryKey = '';
+  let dataQueryKey = $state('');
+  const deviceColors = $derived(
+    distinctSeriesColors([...devices.map((device) => device.id), ...(data?.filters.devices ?? [])]),
+  );
+  const projectColors = $derived(distinctSeriesColors(data?.filters.projects ?? []));
+
+  function categoryColor(name: string, group: VisualGrouping) {
+    return (
+      (group === 'devices' ? deviceColors.get(name) : group === 'projects' ? projectColors.get(name) : undefined) ??
+      seriesColor(name, group)
+    );
+  }
+
+  $effect(() => {
+    const url = page.shallow?.url ?? page.url;
+    untrack(() => {
+      const values = normalizedDashboardParams(params);
+      const invalid = Object.entries(values).some(([key, value]) => {
+        const present = url.searchParams.getAll(key);
+        return present.length > 1 || (present.length === 1 && present[0] !== String(value));
+      });
+      if (invalid) params.update(values, { pushHistory: false });
+    });
+  });
+
+  $effect(() => {
+    const key = queryKey;
+    const ready = client !== undefined;
+    if (ready && key !== observedQueryKey) {
+      observedQueryKey = key;
+      untrack(() => void refresh());
+    }
+  });
 
   const rangeIndex = $derived(
     Math.max(
@@ -58,46 +97,116 @@
       ranges.findIndex((range) => range.value === query.range),
     ),
   );
-  const filterKeys = ['harnesses', 'providers', 'models', 'devices', 'projects'] as const;
   const chips = $derived(
     filterKeys.flatMap((key) => {
       const selected = query[key];
       if (selected === undefined) return [];
-      if (selected.length === 0) return [{ key, value: '__none__', label: `No ${key}` }];
+      if (selected.length === 0) return [{ key, value: '__none__', label: `No ${key}`, color: '' }];
       return selected.map((value) => ({
         key,
         value,
         label:
-          key === 'devices' ? deviceName(value) : key === 'projects' ? projectName(value) : (names[value] ?? value),
+          key === 'devices'
+            ? deviceName(value)
+            : key === 'projects'
+              ? projectName(value)
+              : (categoryNames[value] ?? value),
+        color: categoryColor(value, key),
       }));
     }),
   );
-  const breakdown = $derived(data?.[grouping] ?? []);
+  const breakdown = $derived(
+    [...(data?.[grouping] ?? [])].sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name)),
+  );
   const visibleBreakdown = $derived(showAll ? breakdown : breakdown.slice(0, 5));
+  const breakdownTotal = $derived(data?.totals[metric] ?? 0);
+  const breakdownOverview = $derived.by(() => {
+    const leading = breakdown
+      .slice(0, 5)
+      .map((row) => ({ name: row.name, value: row[metric], color: categoryColor(row.name, grouping) }));
+    const remaining = breakdown.slice(5).reduce((sum, row) => sum + row[metric], 0);
+    return remaining > 0 ? [...leading, { name: 'Other', value: remaining, color: 'var(--series-neutral)' }] : leading;
+  });
+  const sessionIndex = $derived(
+    (data?.sessions ?? []).map((session) => ({
+      session,
+      search:
+        `${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''}`.toLowerCase(),
+    })),
+  );
+  const sortedSessions = $derived(
+    [...sessionIndex].sort((a, b) =>
+      sort === 'tokens'
+        ? b.session.tokens - a.session.tokens
+        : b.session.lastActiveAt.localeCompare(a.session.lastActiveAt),
+    ),
+  );
   const filteredSessions = $derived.by(() => {
     const search = sessionSearch.toLowerCase();
-    return [...(data?.sessions ?? [])]
-      .filter((session) =>
-        `${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''}`
-          .toLowerCase()
-          .includes(search),
-      )
-      .sort((a, b) => (sort === 'tokens' ? b.tokens - a.tokens : b.lastActiveAt.localeCompare(a.lastActiveAt)));
+    return sortedSessions.filter((entry) => entry.search.includes(search)).map((entry) => entry.session);
   });
   const pages = $derived(Math.max(1, Math.ceil(filteredSessions.length / 8)));
   const currentPage = $derived(Math.min(sessionPage, pages - 1));
   const sessions = $derived(filteredSessions.slice(currentPage * 8, currentPage * 8 + 8));
+  $effect(() => {
+    if (data && !loading && dataQueryKey === queryKey && params.page > pages) {
+      untrack(() => params.update({ page: pages }, { pushHistory: false }));
+    }
+  });
   const period = $derived(
     data ? `${formatDate(data.period.start)} – ${formatDate(data.period.end)}` : 'Reading usage…',
   );
   const totals = $derived(data?.totals);
   const unpriced = $derived(totals?.unpricedTokens ?? 0);
   const unpricedModels = $derived(data?.models.filter((row) => row.unpricedTokens > 0).length ?? 0);
+  const deviceNames = $derived(new Map(devices.map((device) => [device.id, device.name])));
+  const composition = $derived([
+    { key: 'input', label: 'Input', value: totals?.inputTokens ?? 0, cost: data?.tokenCosts?.input },
+    { key: 'output', label: 'Output', value: totals?.outputTokens ?? 0, cost: data?.tokenCosts?.output },
+    { key: 'cache-read', label: 'Cache read', value: totals?.cacheReadTokens ?? 0, cost: data?.tokenCosts?.cacheRead },
+    {
+      key: 'cache-write',
+      label: 'Cache write',
+      value: totals?.cacheWriteTokens ?? 0,
+      cost: data?.tokenCosts?.cacheWrite,
+    },
+  ]);
+
+  function breakdownName(name: string) {
+    return grouping === 'devices'
+      ? deviceName(name)
+      : grouping === 'projects'
+        ? projectName(name)
+        : (categoryNames[name] ?? name);
+  }
+  function share(value: number, total: number) {
+    return total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0;
+  }
+  function compositionTitle(part: (typeof composition)[number]) {
+    const tokens = `${part.label}: ${integer.format(part.value)} tokens (${share(part.value, totals?.tokens ?? 0).toFixed(1)}%)${
+      part.key === 'output' && totals?.reasoningTokens
+        ? `, including ${integer.format(totals.reasoningTokens)} reasoning tokens`
+        : ''
+    }`;
+    const cost =
+      !part.cost || (part.value > 0 && part.cost.unavailableTokens >= part.value)
+        ? 'Cost breakdown unavailable'
+        : `${currency.format(part.cost.costUSD)} estimated cost`;
+    const excluded = part.cost?.unavailableTokens
+      ? `; ${integer.format(part.cost.unavailableTokens)} tokens excluded from this cost breakdown`
+      : '';
+    const unattributed = data?.tokenCosts?.unattributedCostUSD
+      ? `; ${currency.format(data.tokenCosts.unattributedCostUSD)} in reported usage costs cannot be split by token category`
+      : '';
+    return `${tokens}; ${cost}${excluded}${unattributed}`;
+  }
+  function compositionCost(part: (typeof composition)[number]) {
+    if (!part.cost) return '—';
+    return part.value > 0 && part.cost.unavailableTokens >= part.value ? '—' : currency.format(part.cost.costUSD);
+  }
 
   function deviceName(id: string) {
-    return (
-      devices.find((device) => device.id === id)?.name ?? (id === 'local' ? (data?.machine ?? 'This machine') : id)
-    );
+    return deviceNames.get(id) ?? (id === 'local' ? (data?.machine ?? 'This machine') : id);
   }
   function projectName(value: string) {
     return (
@@ -111,9 +220,7 @@
     );
   }
   function formatDate(value: string) {
-    return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }).format(
-      new Date(`${value.slice(0, 10)}T12:00:00Z`),
-    );
+    return date.format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
   }
   function formatCost(row: Pick<Breakdown, 'tokens' | 'unpricedTokens' | 'costUSD'>) {
     return row.tokens > 0 && row.unpricedTokens >= row.tokens
@@ -130,22 +237,13 @@
           ? `${Math.floor(minutes / 60)}h ago`
           : `${Math.floor(minutes / 1440)}d ago`;
   }
-  function updateUrl() {
-    const url = new URL(window.location.href);
-    url.searchParams.set('range', query.range ?? '30d');
-    for (const key of filterKeys) {
-      url.searchParams.delete(key);
-      const selected = query[key];
-      if (selected !== undefined) url.searchParams.set(key, selected.length === 0 ? 'none' : selected.join(','));
-    }
-    void replaceState(url, {});
-  }
   async function refresh() {
     if (!client) return;
     request?.abort();
     const controller = new AbortController();
     request = controller;
     const version = ++requestVersion;
+    const requestedKey = queryKey;
     loading = true;
     error = '';
     void client
@@ -157,44 +255,44 @@
         /* Keep the previous device metadata when offline. */
       });
     try {
-      const next = await client.getUsage({ ...query }, controller.signal);
-      if (controller.signal.aborted || version !== requestVersion) return;
+      const requestedQuery = query;
+      const next = await client.getUsage({ ...requestedQuery }, controller.signal);
+      if (controller.signal.aborted || version !== requestVersion || requestedKey !== queryKey) return;
       data = next;
-      if (next.filters.selectedModels && JSON.stringify(next.filters.selectedModels) !== JSON.stringify(query.models)) {
-        query = { ...query, models: [...next.filters.selectedModels] };
-        updateUrl();
+      if (
+        next.filters.selectedModels &&
+        JSON.stringify(next.filters.selectedModels) !== JSON.stringify(requestedQuery.models)
+      ) {
+        params.update({ models: encodeFilter(next.filters.selectedModels) }, { pushHistory: false });
+        observedQueryKey = JSON.stringify(usageQueryFromParams(params, timezone));
       }
+      dataQueryKey = JSON.stringify(usageQueryFromParams(params, timezone));
     } catch (failure) {
-      if (controller.signal.aborted || version !== requestVersion) return;
+      if (controller.signal.aborted || version !== requestVersion || requestedKey !== queryKey) return;
       error = failure instanceof Error ? failure.message : 'Could not load usage. Try again.';
     } finally {
       if (version === requestVersion) loading = false;
     }
   }
   function changeQuery(next: UsageQuery) {
-    query = next;
-    sessionPage = 0;
-    updateUrl();
-    void refresh();
+    params.update({
+      range: ranges.find((entry) => entry.value === next.range)?.value ?? '30d',
+      harnesses: encodeFilter(next.harnesses),
+      providers: encodeFilter(next.providers),
+      models: encodeFilter(next.models),
+      devices: encodeFilter(next.devices),
+      projects: encodeFilter(next.projects),
+      page: 1,
+    });
   }
   function removeChip(key: (typeof filterKeys)[number], value: string) {
     const remaining = (query[key] ?? []).filter((entry) => entry !== value);
-    changeQuery({ ...query, [key]: value === '__none__' || remaining.length === 0 ? undefined : remaining });
+    changeQuery({ ...query, [key]: query[key]?.length === 0 || remaining.length === 0 ? undefined : remaining });
   }
   function mountDashboard() {
     untrack(() => {
-      const url = new URL(window.location.href);
-      const requested = url.searchParams.get('range');
-      const range = ranges.find((entry) => entry.value === requested)?.value ?? '30d';
-      const filters = Object.fromEntries(
-        filterKeys.flatMap((key) => {
-          const value = url.searchParams.get(key);
-          return value === null ? [] : [[key, value === 'none' ? [] : value.split(',')]];
-        }),
-      );
-      query = { ...filters, range, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+      timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       client = makeDashboardClient();
-      void refresh();
     });
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
@@ -202,6 +300,7 @@
     return () => {
       clearInterval(timer);
       request?.abort();
+      params.cleanup();
       void client?.dispose();
       client = undefined;
     };
@@ -283,7 +382,7 @@
     </div>
   </header>
 
-  <main>
+  <main data-loading={loading}>
     <div class="page-heading">
       <h1>Usage</h1>
       <div class="page-actions">
@@ -317,26 +416,31 @@
           label="Harnesses"
           options={data?.filters.harnesses ?? []}
           value={query.harnesses}
-          {names}
+          names={categoryNames}
+          grouping="harnesses"
           onchange={(harnesses) => changeQuery({ ...query, harnesses })}
         />
         <MultiSelect
           label="Providers"
           options={data?.filters.providers ?? []}
           value={query.providers}
-          {names}
+          names={categoryNames}
+          grouping="providers"
           onchange={(providers) => changeQuery({ ...query, providers })}
         />
         <MultiSelect
           label="Models"
           options={data?.filters.models ?? []}
           value={query.models}
+          grouping="models"
           onchange={(models) => changeQuery({ ...query, models })}
         />
         <MultiSelect
           label="Devices"
           options={data?.filters.devices ?? []}
           value={query.devices}
+          grouping="devices"
+          colors={deviceColors}
           names={Object.fromEntries((data?.filters.devices ?? []).map((id) => [id, deviceName(id)]))}
           onchange={(selected) => changeQuery({ ...query, devices: selected })}
         />
@@ -344,19 +448,29 @@
           label="Projects"
           options={data?.filters.projects ?? []}
           value={query.projects}
+          grouping="projects"
+          colors={projectColors}
           names={Object.fromEntries((data?.filters.projects ?? []).map((id) => [id, projectName(id)]))}
           onchange={(projects) => changeQuery({ ...query, projects })}
         />
       </div>
       <span class="period-label"
-        >{period}<span class={['refresh-state', loading && 'visible']} aria-live="polite">Updating…</span></span
+        ><span class="usage-period">{period}</span><span
+          class={['refresh-state', loading && 'visible']}
+          role="status"
+          aria-atomic="true">{loading ? (data ? 'Updating…' : 'Loading usage…') : ''}</span
+        ></span
       >
     </div>
     <div class="filter-chip-region">
       <div class="filter-chips">
         {#each chips as chip (`${chip.key}:${chip.value}`)}<button
             class="filter-chip"
-            onclick={() => removeChip(chip.key, chip.value)}>{chip.label}<Icon name="close" size={12} /></button
+            aria-label={`Remove ${chip.label} filter`}
+            onclick={() => removeChip(chip.key, chip.value)}
+            >{#if chip.color}<i class="category-swatch" style:background={chip.color} aria-hidden="true"></i>{/if}<span
+              class="filter-chip-label">{chip.label}</span
+            ><Icon name="close" size={12} /></button
           >{/each}
       </div>
       {#if chips.length}<button
@@ -375,15 +489,15 @@
 
     <section class="metrics" aria-label="Usage summary" aria-busy={loading}>
       <div class="metric">
-        <span class="metric-label">Total tokens</span><strong class={['metric-value', !data && 'skeleton']}
+        <span class="metric-label">Total tokens</span><strong class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? compact.format(totals.tokens) : '—'}</strong
         ><span class="metric-detail"
           >{totals ? `${integer.format(totals.tokens)} tokens` : 'Input, output & cache'}</span
         >
       </div>
       <div class="metric">
-        <span class="metric-label">Estimated API cost</span><strong class={['metric-value', !data && 'skeleton']}
-          >{totals ? formatCost(totals) : '—'}</strong
+        <span class="metric-label">Estimated API cost</span><strong
+          class={['metric-value', !data && loading && 'skeleton']}>{totals ? formatCost(totals) : '—'}</strong
         ><span class="metric-detail metric-pricing-detail"
           ><span>At model API rates</span><button
             class={['pricing-control', unpriced > 0 && 'needs-pricing']}
@@ -397,21 +511,21 @@
         >
       </div>
       <div class="metric">
-        <span class="metric-label">Sessions</span><strong class={['metric-value', !data && 'skeleton']}
+        <span class="metric-label">Sessions</span><strong class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? integer.format(totals.sessions) : '—'}</strong
         ><span class="metric-detail"
           >{totals ? `${integer.format(totals.requests)} requests` : 'Across your harnesses'}</span
         >
       </div>
       <div class="metric">
-        <span class="metric-label">Cache hit rate</span><strong class={['metric-value', !data && 'skeleton']}
+        <span class="metric-label">Cache hit rate</span><strong class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? `${(totals.cacheHitRate * 100).toFixed(1)}%` : '—'}</strong
         ><span class="metric-detail">Cached input / total input</span>
       </div>
     </section>
 
     <div class="analytics-grid">
-      <section class="activity-panel" aria-labelledby="activity-title">
+      <section class="activity-panel" aria-labelledby="activity-title" aria-busy={loading}>
         <div class="section-heading">
           <h2 id="activity-title">{metric === 'tokens' ? 'Token activity' : 'Cost activity'}</h2>
           <div class="chart-controls">
@@ -420,96 +534,140 @@
                 class={chartMode === 'bar' ? 'active' : ''}
                 aria-label="Bar chart"
                 aria-pressed={chartMode === 'bar'}
-                onclick={() => (chartMode = 'bar')}><Icon name="bars" size={16} /></button
+                onclick={() => params.update({ chart: 'bar' })}><Icon name="bars" size={16} /></button
               ><button
                 class={chartMode === 'line' ? 'active' : ''}
                 aria-label="Line chart"
                 aria-pressed={chartMode === 'line'}
-                onclick={() => (chartMode = 'line')}><Icon name="line" size={16} /></button
+                onclick={() => params.update({ chart: 'line' })}><Icon name="line" size={16} /></button
               >
             </div>
             <div class="segmented" aria-label="Chart measurement">
               <button
                 class={metric === 'tokens' ? 'active' : ''}
                 aria-pressed={metric === 'tokens'}
-                onclick={() => (metric = 'tokens')}>Tokens</button
+                onclick={() => params.update({ metric: 'tokens' })}>Tokens</button
               ><button
                 class={metric === 'costUSD' ? 'active' : ''}
                 aria-pressed={metric === 'costUSD'}
-                onclick={() => (metric = 'costUSD')}>Cost</button
+                onclick={() => params.update({ metric: 'cost' })}>Cost</button
               >
             </div>
           </div>
         </div>
-        {#if data}<UsageChart {data} mode={chartMode} {metric} />{:else}<div class="chart-loading" aria-live="polite">
+        {#if data}<UsageChart
+            {data}
+            mode={chartMode}
+            {metric}
+            grouping={params.chartBy}
+            onGroupingChange={(chartBy) => params.update({ chartBy })}
+          />{:else}<div class="chart-loading">
             {#if error}<Icon name="warning" size={24} /><span>Usage is unavailable</span><button
                 class="text-button"
                 onclick={() => void refresh()}>Try again</button
               >{:else}<span class="spinner"></span><span>Reading local usage</span>{/if}
           </div>{/if}
-        <div class="token-composition">
-          <span><i class="composition-input"></i>Input <b>{totals ? compact.format(totals.inputTokens) : '—'}</b></span
-          ><span
-            ><i class="composition-output"></i>Output <b>{totals ? compact.format(totals.outputTokens) : '—'}</b></span
-          ><span
-            ><i class="composition-cache"></i>Cache
-            <b>{totals ? compact.format(totals.cacheReadTokens + totals.cacheWriteTokens) : '—'}</b></span
-          >
+        <div class="token-composition" aria-label="Token composition">
+          <div class="composition-track" role="img" aria-label={composition.map(compositionTitle).join('; ')}>
+            {#each composition as part (part.key)}<span
+                class={`composition-segment composition-${part.key}`}
+                style:width={`${share(part.value, totals?.tokens ?? 0)}%`}
+                aria-hidden="true"
+              ></span>{/each}
+          </div>
+          <div class="composition-values">
+            {#each composition as part (part.key)}<div class="composition-value" title={compositionTitle(part)}>
+                <span class="composition-name"
+                  ><i class={`composition-${part.key}`} aria-hidden="true"></i>{part.label}<span
+                    class="composition-percent">{totals ? `${share(part.value, totals.tokens).toFixed(1)}%` : '—'}</span
+                  ></span
+                ><span class="composition-totals"
+                  ><b>{totals ? compact.format(part.value) : '—'}</b><span class="composition-cost"
+                    ><span class="composition-cost-amount">{compositionCost(part)}</span
+                    >{#if part.cost?.unavailableTokens}<span aria-hidden="true">*</span>{/if}</span
+                  ></span
+                >
+              </div>{/each}
+          </div>
         </div>
       </section>
-      <section class="breakdown-panel" aria-labelledby="breakdown-title">
+      <section class="breakdown-panel" aria-labelledby="breakdown-title" aria-busy={loading}>
         <div class="section-heading">
           <h2 id="breakdown-title">Breakdown</h2>
           <span class="muted">{breakdown.length || '—'}</span>
         </div>
         <div class="breakdown-tabs" aria-label="Breakdown grouping">
-          {#each ['harnesses', 'models', 'providers', 'devices', 'projects'] as group (group)}<button
+          {#each breakdownGroups as group (group)}<button
               class={grouping === group ? 'active' : ''}
               aria-pressed={grouping === group}
-              onclick={() => {
-                if (
-                  group === 'harnesses' ||
-                  group === 'models' ||
-                  group === 'providers' ||
-                  group === 'devices' ||
-                  group === 'projects'
-                )
-                  grouping = group;
-                showAll = false;
-              }}>{group.charAt(0).toUpperCase() + group.slice(1)}</button
+              onclick={() => params.update({ breakdown: group, expanded: false })}
+              >{group.charAt(0).toUpperCase() + group.slice(1)}</button
             >{/each}
+        </div>
+        <div class="breakdown-summary">
+          <div
+            class="breakdown-share-track"
+            role="img"
+            aria-label={`${metric === 'tokens' ? 'Token' : 'Priced cost'} share by ${grouping}`}
+          >
+            {#each breakdownOverview as segment (segment.name)}{#if segment.value > 0}<span
+                  style:width={`${share(segment.value, breakdownTotal)}%`}
+                  style:background={segment.color}
+                  title={`${breakdownName(segment.name)}: ${metric === 'tokens' ? `${compact.format(segment.value)} tokens` : currency.format(segment.value)} · ${share(segment.value, breakdownTotal).toFixed(1)}%`}
+                  aria-hidden="true"
+                ></span>{/if}{/each}
+          </div>
+          <span class="breakdown-pricing-note"
+            >{metric === 'costUSD' && unpriced > 0 ? `${compact.format(unpriced)} unpriced tokens excluded` : ''}</span
+          >
         </div>
         <div class="breakdown-list">
           {#each visibleBreakdown as row (row.name)}<div class="breakdown-row">
               <div class="breakdown-top">
                 <span class="breakdown-name" title={row.name}
-                  ><i style:background={colors[row.name] ?? '#4DABF7'}></i>{grouping === 'devices'
-                    ? deviceName(row.name)
-                    : grouping === 'projects'
-                      ? projectName(row.name)
-                      : (names[row.name] ?? row.name)}</span
-                ><b>{formatCost(row)}</b>
+                  ><i class="category-swatch" style:background={categoryColor(row.name, grouping)} aria-hidden="true"
+                  ></i><span class="breakdown-label">{breakdownName(row.name)}</span></span
+                ><b title={metric === 'tokens' ? `${integer.format(row.tokens)} tokens` : formatCost(row)}
+                  >{metric === 'tokens' ? compact.format(row.tokens) : formatCost(row)}</b
+                >
               </div>
               <div class="breakdown-track">
                 <span
-                  style:width={`${Math.max(0, totals?.tokens ? (row.tokens / totals.tokens) * 100 : 0)}%`}
-                  style:background={colors[row.name] ?? '#4DABF7'}
+                  style:width={`${share(row[metric], breakdownTotal)}%`}
+                  style:background={categoryColor(row.name, grouping)}
                 ></span>
               </div>
               <div class="breakdown-meta">
-                <span>{compact.format(row.tokens)} tokens</span><span
-                  >{totals?.tokens ? ((row.tokens / totals.tokens) * 100).toFixed(1) : '0'}%</span
+                <span
+                  title={row.unpricedTokens > 0
+                    ? `${integer.format(row.unpricedTokens)} tokens have no model price`
+                    : ''}
+                  >{metric === 'tokens'
+                    ? formatCost(row)
+                    : `${compact.format(row.tokens)} tokens`}{#if row.unpricedTokens > 0}<span
+                      class="breakdown-unpriced"
+                    >
+                      · {compact.format(row.unpricedTokens)} unpriced</span
+                    >{/if}</span
+                ><span
+                  >{metric === 'costUSD' && row.tokens > 0 && row.unpricedTokens >= row.tokens
+                    ? '—'
+                    : `${share(row[metric], breakdownTotal).toFixed(1)}%`}</span
                 >
               </div>
             </div>{:else}<div class="breakdown-empty">{data ? 'No usage to show' : 'Loading breakdown…'}</div>{/each}
         </div>
-        {#if breakdown.length > 5}<button class="text-button show-more" onclick={() => (showAll = !showAll)}
-            >{showAll ? 'Show top five' : `Show all ${breakdown.length}`}</button
-          >{/if}
+        <div class="breakdown-footer">
+          {#if breakdown.length > 5}<button
+              class="text-button show-more"
+              onclick={() => params.update({ expanded: !showAll })}
+              >{showAll ? 'Show top five' : `Show all ${breakdown.length}`}</button
+            >{/if}
+        </div>
       </section>
     </div>
 
-    <section class="sessions-panel" aria-labelledby="sessions-title">
+    <section class="sessions-panel" aria-labelledby="sessions-title" aria-busy={loading}>
       <div class="section-heading">
         <div class="sessions-title">
           <h2 id="sessions-title">Sessions</h2>
@@ -520,8 +678,8 @@
             type="search"
             placeholder="Search sessions"
             aria-label="Search sessions"
-            bind:value={sessionSearch}
-            oninput={() => (sessionPage = 0)}
+            value={sessionSearch}
+            oninput={(event) => params.update({ search: event.currentTarget.value, page: 1 }, { pushHistory: false })}
           /></label
         >
       </div>
@@ -530,9 +688,9 @@
           <thead
             ><tr
               ><th scope="col">Session / project</th><th scope="col">Harness / model</th><th scope="col" class="numeric"
-                ><button onclick={() => (sort = 'tokens')}>Tokens</button></th
+                ><button onclick={() => params.update({ sort: 'tokens', page: 1 })}>Tokens</button></th
               ><th scope="col" class="numeric">Est. cost</th><th scope="col" class="numeric"
-                ><button onclick={() => (sort = 'lastActiveAt')}>Last active</button></th
+                ><button onclick={() => params.update({ sort: 'lastActiveAt', page: 1 })}>Last active</button></th
               ></tr
             ></thead
           ><tbody
@@ -542,9 +700,18 @@
                     >{projectName(session.repository ?? session.project)}</span
                   ><span class="session-id">{session.id.slice(0, 16)} · {deviceName(session.deviceId)}</span></td
                 ><td
-                  ><span class="session-harness">{names[session.harness] ?? session.harness}</span><span
-                    class="session-model"
-                    title={session.model}>{session.model}</span
+                  ><span class="session-harness"
+                    ><i
+                      class="category-swatch"
+                      style:background={seriesColor(session.harness, 'harnesses')}
+                      aria-hidden="true"
+                    ></i><span>{categoryNames[session.harness] ?? session.harness}</span></span
+                  ><span class="session-model" title={session.model}
+                    ><i
+                      class="category-swatch"
+                      style:background={seriesColor(session.model, 'models')}
+                      aria-hidden="true"
+                    ></i><span>{session.model}</span></span
                   ></td
                 ><td class="numeric">{compact.format(session.tokens)}</td><td class="numeric">{formatCost(session)}</td
                 ><td class="numeric session-time" title={new Date(session.lastActiveAt).toLocaleString()}
@@ -574,12 +741,12 @@
           <button
             aria-label="Previous page"
             disabled={currentPage === 0}
-            onclick={() => (sessionPage = currentPage - 1)}
+            onclick={() => params.update({ page: currentPage })}
             ><span class="previous-arrow"><Icon name="arrow" size={16} /></span></button
           ><span>{currentPage + 1} / {pages}</span><button
             aria-label="Next page"
             disabled={currentPage >= pages - 1}
-            onclick={() => (sessionPage = currentPage + 1)}><Icon name="arrow" size={16} /></button
+            onclick={() => params.update({ page: currentPage + 2 })}><Icon name="arrow" size={16} /></button
           >
         </div>
       </div>
@@ -613,9 +780,11 @@
   <div class="sources-list">
     {#each data?.sources ?? [] as source (`${source.harness}:${source.path}`)}<div class="source-row">
         <div>
-          <strong>{names[source.harness] ?? source.harness}</strong><span class={['source-status', source.status]}
-            >{source.status}</span
-          >
+          <strong
+            ><i class="category-swatch" style:background={seriesColor(source.harness, 'harnesses')} aria-hidden="true"
+            ></i>
+            {categoryNames[source.harness] ?? source.harness}</strong
+          ><span class={['source-status', source.status]}>{source.status}</span>
         </div>
         <code>{source.path}</code><span>{source.files} files · {integer.format(source.events)} usage records</span
         >{#if source.error}<p>{source.error}</p>{/if}

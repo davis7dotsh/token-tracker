@@ -1,11 +1,20 @@
 import { homedir } from 'node:os';
-import { Effect, FileSystem, Path, Result } from 'effect';
+import { Effect, FileSystem, Path, Result, Stream } from 'effect';
 import { CollectionError, type SourceStatus, type UsageEvent, type UsageResult } from '../../shared/domain';
 import type { PricingPolicy } from '../../shared/pricing';
-import { deduplicate, parseClaude, parseCodex, parsePi, type ParsedFile } from './parsers';
+import { deduplicate, claudeParser, codexParser, piParser, type ParsedFile } from './parsers';
+import {
+  fileSignature,
+  parsedCachePath,
+  prepareParsedCache,
+  pruneParsedCache,
+  readParsedCache,
+  writeParsedCache,
+} from './cache';
 import { estimateCost, resolveDisplayModel } from './pricing';
 import { loadPricing } from './pricing-runtime';
-import { resolveRepository } from './repository';
+import { makeRepositoryResolver } from './repository';
+import { collectGrokFiles } from './grok';
 
 export { buildDashboard, provider, validateTimezone } from './dashboard';
 export { canonicalRepository, resolveRepository } from './repository';
@@ -16,8 +25,12 @@ export type CollectionOptions = {
   claudeDirs?: readonly string[];
   codexDirs?: readonly string[];
   piDirs?: readonly string[];
+  grokDirs?: readonly string[];
   deviceId?: string;
   pricingPolicy?: PricingPolicy;
+  // Only background collection writes this optional metadata cache. Manual
+  // checks omit it and remain entirely read-only.
+  cacheDirectory?: string;
 };
 type MutableSource = { -readonly [K in keyof SourceStatus]: SourceStatus[K] };
 
@@ -50,6 +63,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   }
   const codexDirs = options.codexDirs ?? environmentDirs('CODEX_HOME') ?? [path.join(home, '.codex')];
   const piDirs = options.piDirs ?? environmentDirs('PI_CODING_AGENT_DIR') ?? [path.join(home, '.pi', 'agent')];
+  const grokDirs = options.grokDirs ?? environmentDirs('GROK_HOME') ?? [path.join(home, '.grok')];
   const sources: MutableSource[] = [];
   const seen = new Set<string>();
   const addSource = (harness: SourceStatus['harness'], root: string) => {
@@ -70,9 +84,15 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   }
   for (const root of piDirs)
     addSource('pi', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
+  for (const root of grokDirs)
+    addSource('grok', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
+  const cacheDirectory =
+    options.cacheDirectory && (yield* prepareParsedCache(options.cacheDirectory)) ? options.cacheDirectory : undefined;
   const warnings: string[] = [];
   const files: ParsedFile[] = [];
+  const retainedCacheFiles = new Set<string>();
   for (const [sourceIndex, source] of sources.entries()) {
+    if (source.harness === 'grok') continue;
     const realRoot = yield* Effect.result(fs.realPath(source.path));
     if (Result.isFailure(realRoot)) {
       if (realRoot.failure.reason._tag !== 'NotFound') {
@@ -120,17 +140,41 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     let malformed = 0;
     let unreadable = 0;
     for (const file of paths) {
-      const contents = yield* Effect.result(fs.readFileString(file));
-      if (Result.isFailure(contents)) {
+      const info = yield* Effect.result(fileSignature(file));
+      if (Result.isFailure(info)) {
         unreadable++;
         continue;
       }
-      const parsed =
-        source.harness === 'claude'
-          ? parseClaude(contents.success, file)
-          : source.harness === 'codex'
-            ? parseCodex(contents.success, file)
-            : parsePi(contents.success, file);
+      const cachePath = cacheDirectory ? parsedCachePath(cacheDirectory, source.harness, file) : undefined;
+      if (cachePath) retainedCacheFiles.add(path.basename(cachePath));
+      let parsed: ParsedFile | null = cachePath ? yield* readParsedCache(cachePath, info.success.signature) : null;
+      if (!parsed) {
+        const parser =
+          source.harness === 'claude'
+            ? claudeParser(file)
+            : source.harness === 'codex'
+              ? codexParser(file)
+              : piParser(file);
+        const decoder = new TextDecoder();
+        const contents = yield* Effect.result(
+          fs
+            .stream(file, { bytesToRead: info.success.size })
+            .pipe(
+              Stream.runForEach((chunk) => Effect.sync(() => parser.push(decoder.decode(chunk, { stream: true })))),
+            ),
+        );
+        if (Result.isFailure(contents)) {
+          unreadable++;
+          continue;
+        }
+        parser.push(decoder.decode());
+        parsed = parser.finish();
+        if (cachePath) {
+          const afterRead = yield* Effect.result(fileSignature(file));
+          if (Result.isSuccess(afterRead) && afterRead.success.signature === info.success.signature)
+            yield* writeParsedCache(cachePath, info.success.signature, parsed);
+        }
+      }
       malformed += parsed.malformed;
       for (const entry of parsed.events) entry.source = sourceIndex;
       files.push(parsed);
@@ -141,8 +185,17 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
       warnings.push(`${source.harness}: ${source.error}`);
     }
   }
+  const grok = yield* collectGrokFiles(
+    sources.flatMap((source, index) => (source.harness === 'grok' ? [{ source, index }] : [])),
+    cacheDirectory,
+    retainedCacheFiles,
+  );
+  files.push(...grok.files);
+  warnings.push(...grok.warnings);
+  if (cacheDirectory) yield* pruneParsedCache(cacheDirectory, retainedCacheFiles);
   const entries = deduplicate(files);
   const repositories = new Map<string, string | null>();
+  const resolveRepository = makeRepositoryResolver();
   for (const entry of entries) {
     if (!repositories.has(entry.event.project))
       repositories.set(entry.event.project, yield* resolveRepository(entry.event.project));
@@ -164,7 +217,17 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
         ...(options.deviceId ? { deviceId: options.deviceId } : {}),
       };
     })
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id));
+    .sort((left, right) =>
+      left.timestamp < right.timestamp
+        ? -1
+        : left.timestamp > right.timestamp
+          ? 1
+          : left.id < right.id
+            ? -1
+            : left.id > right.id
+              ? 1
+              : 0,
+    );
   if (unknownModels.size)
     warnings.push(
       `No reliable API price for: ${[...unknownModels].sort().join(', ')}. These tokens are included, but their costs are unavailable.`,

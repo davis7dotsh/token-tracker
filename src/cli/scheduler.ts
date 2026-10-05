@@ -33,6 +33,7 @@ const xml = (value: string) =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const absoluteSourcePath = (value: string) =>
   resolve(value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value);
+const launchdDomains = () => [`gui/${process.getuid?.() ?? 0}`, `user/${process.getuid?.() ?? 0}`];
 const scheduledEnvironment = (directory: string) => [
   { name: 'TOKEN_TRACKER_CONFIG_DIR', value: directory },
   ...[
@@ -43,13 +44,16 @@ const scheduledEnvironment = (directory: string) => [
     'CLAUDE_CONFIG_DIR',
     'CODEX_HOME',
     'PI_CODING_AGENT_DIR',
+    'GROK_HOME',
   ].flatMap((name) => {
     const value = process.env[name];
     if (!value) return [];
-    const resolved = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR'].includes(name)
+    const resolved = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'GROK_HOME'].includes(name)
       ? value
           .split(',')
-          .map((path) => absoluteSourcePath(path.trim()))
+          .map((path) => path.trim())
+          .filter(Boolean)
+          .map(absoluteSourcePath)
           .join(',')
       : absoluteSourcePath(value);
     return [{ name, value: resolved }];
@@ -65,7 +69,7 @@ export const systemdUnits = (command: readonly string[], directory: string, minu
     'Type=oneshot',
     `ExecStart=${[...command, 'sync', '--quiet'].map(systemdQuote).join(' ')}`,
     ...scheduledEnvironment(directory).map(({ name, value }) => `Environment=${systemdQuote(`${name}=${value}`)}`),
-    'TimeoutStartSec=10min',
+    'TimeoutStartSec=11min',
     '',
   ].join('\n'),
   timer: [
@@ -87,6 +91,7 @@ export const systemdUnits = (command: readonly string[], directory: string, minu
 export const launchdPlist = (command: readonly string[], directory: string, minutes: number) =>
   `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
   `<plist version="1.0"><dict>\n<key>Label</key><string>sh.davis.token-tracker.sync</string>\n` +
+  `<key>LimitLoadToSessionType</key><array><string>Aqua</string><string>Background</string></array>\n` +
   `<key>ProgramArguments</key><array>${[...command, 'sync', '--quiet'].map((value) => `<string>${xml(value)}</string>`).join('')}</array>\n` +
   `<key>EnvironmentVariables</key><dict>${scheduledEnvironment(directory)
     .map(({ name, value }) => `<key>${xml(name)}</key><string>${xml(value)}</string>`)
@@ -126,10 +131,16 @@ export const installSchedule = Effect.fn('cli.installSchedule')(function* (minut
   if (process.platform === 'darwin') {
     const agents = join(homedir(), 'Library', 'LaunchAgents');
     const plist = join(agents, 'sh.davis.token-tracker.sync.plist');
-    const domain = `gui/${process.getuid?.() ?? 0}`;
+    const [guiDomain, userDomain] = launchdDomains();
+    const domain = yield* run(['launchctl', 'print', guiDomain]).pipe(
+      Effect.as(guiDomain),
+      Effect.catch(() => Effect.succeed(userDomain)),
+    );
     yield* fs.makeDirectory(agents, { recursive: true });
     yield* fs.writeFileString(plist, launchdPlist(command, directory, minutes), { mode: 0o600 });
-    yield* run(['launchctl', 'bootout', domain, plist]).pipe(Effect.catch(() => Effect.void));
+    for (const previousDomain of launchdDomains()) {
+      yield* run(['launchctl', 'bootout', previousDomain, plist]).pipe(Effect.catch(() => Effect.void));
+    }
     yield* run(['launchctl', 'bootstrap', domain, plist]);
     return 'launchd' as const;
   }
@@ -146,7 +157,9 @@ export const removeSchedule = Effect.fn('cli.removeSchedule')(function* (schedul
     yield* run(['systemctl', '--user', 'daemon-reload']);
   } else if (scheduler === 'launchd') {
     const plist = join(homedir(), 'Library', 'LaunchAgents', 'sh.davis.token-tracker.sync.plist');
-    yield* run(['launchctl', 'bootout', `gui/${process.getuid?.() ?? 0}`, plist]).pipe(Effect.catch(() => Effect.void));
+    for (const domain of launchdDomains()) {
+      yield* run(['launchctl', 'bootout', domain, plist]).pipe(Effect.catch(() => Effect.void));
+    }
     yield* fs.remove(plist, { force: true });
   }
 });

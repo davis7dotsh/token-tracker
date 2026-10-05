@@ -1,5 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
+  import { createAliasValidation } from '#lib/client/pricing-editor.ts';
   import type { makeDashboardClient } from '#lib/client/rpc.ts';
   import type { UsageQuery } from '#lib/shared/domain.ts';
   import type { PricingInfo, PricingRule } from '#lib/shared/pricing.ts';
@@ -30,34 +31,64 @@
   let kind = $state<PricingRule['kind']>('alias');
   let target = $state('');
   let nickname = $state('');
-  let inputRate = $state<number | undefined>();
-  let outputRate = $state<number | undefined>();
-  let cacheReadRate = $state<number | undefined>();
-  let cacheWriteRate = $state<number | undefined>();
-  let cacheWrite1hRate = $state<number | undefined>();
+  let inputRate = $state<number | null | undefined>();
+  let outputRate = $state<number | null | undefined>();
+  let cacheReadRate = $state<number | null | undefined>();
+  let cacheWriteRate = $state<number | null | undefined>();
+  let cacheWrite1hRate = $state<number | null | undefined>();
   let request: AbortController | undefined;
   let requestVersion = 0;
+  let mutationVersion = 0;
+  let editorVersion = 0;
 
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
+  const validRate = (value: number | null | undefined) => value == null || (Number.isFinite(value) && value >= 0);
   const saved = $derived(settings?.info.rules ?? []);
   const unresolved = $derived(settings?.unresolved ?? []);
   const currentRule = $derived(saved.find((rule) => rule.model === model));
   const currentUnknown = $derived(unresolved.find((entry) => entry.model === model));
-  const catalogMatches = $derived(
-    (settings?.info.models ?? []).filter((name) => name.toLowerCase().includes(target.toLowerCase())).slice(0, 60),
+  const validateAlias = $derived(settings ? createAliasValidation(settings.info) : undefined);
+  const aliasIssue = $derived(validateAlias?.(model, target));
+  const catalogEntries = $derived((settings?.info.models ?? []).map((name) => ({ name, search: name.toLowerCase() })));
+  const catalogMatches = $derived.by(() => {
+    const search = target.trim().toLowerCase();
+    const matches: string[] = [];
+    for (const entry of catalogEntries) {
+      if (entry.search.includes(search) && validateAlias?.(model, entry.name) === undefined) matches.push(entry.name);
+      if (matches.length === 60) break;
+    }
+    return matches;
+  });
+  const validRates = $derived(
+    inputRate != null &&
+      outputRate != null &&
+      [inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate].every(validRate),
   );
-  const canSave = $derived(Boolean(model.trim() && !busy && !loading));
+  const canSave = $derived(
+    Boolean(
+      model.trim() &&
+      model.trim().length <= 200 &&
+      settings &&
+      !busy &&
+      !loadFailed &&
+      (kind === 'alias' ? !aliasIssue : kind === 'free' || (validRates && nickname.trim().length <= 200)),
+    ),
+  );
 
   const messageFor = (failure: unknown) =>
     failure instanceof Error ? failure.message : 'Could not update pricing. Try again.';
-  const validRate = (value: number | undefined) => value === undefined || (Number.isFinite(value) && value >= 0);
+
+  function editDraft() {
+    editorVersion += 1;
+    error = '';
+    success = '';
+  }
 
   function selectModel(value: string) {
     model = value;
     editing = true;
-    error = '';
+    editDraft();
     loadFailed = false;
-    success = '';
     const rule = saved.find((entry) => entry.model === value);
     kind = rule?.kind ?? 'alias';
     target = rule?.kind === 'alias' ? rule.target : '';
@@ -69,9 +100,16 @@
     cacheWrite1hRate = rule?.kind === 'rates' ? rule.rates.cacheWrite1hPerMillion : undefined;
   }
 
-  async function load() {
-    if (!client) return;
+  function cancelLoad() {
     request?.abort();
+    request = undefined;
+    requestVersion += 1;
+    loading = false;
+  }
+
+  async function load(background = false, feedbackEditor = editorVersion) {
+    if (!client) return;
+    cancelLoad();
     const controller = new AbortController();
     request = controller;
     const version = ++requestVersion;
@@ -88,8 +126,10 @@
       }
     } catch (failure) {
       if (!controller.signal.aborted && version === requestVersion) {
-        error = messageFor(failure);
-        loadFailed = true;
+        if (feedbackEditor === editorVersion) {
+          error = background ? `Changes saved. ${messageFor(failure)}` : messageFor(failure);
+          loadFailed = !background;
+        }
       }
     } finally {
       if (version === requestVersion) loading = false;
@@ -98,7 +138,7 @@
 
   export function show() {
     if (!dialog.open) dialog.showModal();
-    success = '';
+    editDraft();
     void load();
   }
 
@@ -106,12 +146,34 @@
     untrack(() => {
       dialog = element;
     });
-    return () => request?.abort();
+    return endEditing;
+  }
+
+  function endEditing() {
+    cancelLoad();
+    editDraft();
   }
 
   function close() {
-    request?.abort();
+    endEditing();
     dialog.close();
+  }
+
+  function pricingChanged(info: PricingInfo, message: string, feedbackEditor: number, resetEditor = false) {
+    if (settings) settings = { ...settings, info };
+    if (feedbackEditor === editorVersion && dialog.open) {
+      if (resetEditor) selectModel(model);
+      feedbackEditor = editorVersion;
+      success = message;
+    }
+    // The mutation has already persisted. Keep editing responsive while the
+    // dashboard and unresolved-model list catch up independently.
+    const version = mutationVersion;
+    void onchange().catch((failure) => {
+      if (version === mutationVersion && feedbackEditor === editorVersion && dialog.open)
+        error = `Changes saved. ${messageFor(failure)}`;
+    });
+    if (dialog.open) void load(true, feedbackEditor);
   }
 
   async function save(event: SubmitEvent) {
@@ -125,8 +187,8 @@
     let rule: PricingRule;
     if (kind === 'alias') {
       const canonical = target.trim();
-      if (!canonical || canonical.length > 200) {
-        error = 'Choose the model this alias refers to.';
+      if (aliasIssue) {
+        error = aliasIssue;
         return;
       }
       rule = { model: rawModel, kind: 'alias', target: canonical };
@@ -134,8 +196,8 @@
       rule = { model: rawModel, kind: 'free' };
     } else {
       if (
-        inputRate === undefined ||
-        outputRate === undefined ||
+        inputRate == null ||
+        outputRate == null ||
         ![inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate].every(validRate)
       ) {
         error = 'Enter nonnegative input and output rates. Leave unavailable cache rates blank.';
@@ -152,68 +214,72 @@
         rates: {
           inputPerMillion: inputRate,
           outputPerMillion: outputRate,
-          ...(cacheReadRate === undefined ? {} : { cacheReadPerMillion: cacheReadRate }),
-          ...(cacheWriteRate === undefined ? {} : { cacheWritePerMillion: cacheWriteRate }),
-          ...(cacheWrite1hRate === undefined ? {} : { cacheWrite1hPerMillion: cacheWrite1hRate }),
+          ...(cacheReadRate == null ? {} : { cacheReadPerMillion: cacheReadRate }),
+          ...(cacheWriteRate == null ? {} : { cacheWritePerMillion: cacheWriteRate }),
+          ...(cacheWrite1hRate == null ? {} : { cacheWrite1hPerMillion: cacheWrite1hRate }),
         },
       };
     }
+    cancelLoad();
+    const version = ++mutationVersion;
+    const editor = editorVersion;
     busy = 'Saving…';
     error = '';
     loadFailed = false;
     success = '';
     try {
-      await client.setPricingRule(rule);
-      await onchange();
-      await load();
-      success = 'Saved';
+      const info = await client.setPricingRule(rule);
+      if (version === mutationVersion) pricingChanged(info, 'Saved', editor);
     } catch (failure) {
-      error = messageFor(failure);
+      if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
     } finally {
-      busy = '';
+      if (version === mutationVersion) busy = '';
     }
   }
 
   async function resetRule() {
     if (!client || !currentRule || busy) return;
+    cancelLoad();
+    const version = ++mutationVersion;
+    const editor = editorVersion;
     busy = 'Resetting…';
     error = '';
     loadFailed = false;
     success = '';
     try {
-      await client.deletePricingRule(currentRule.model);
-      await onchange();
-      await load();
-      selectModel(model);
-      success = 'Reset to catalog pricing';
+      const info = await client.deletePricingRule(currentRule.model);
+      if (version === mutationVersion) pricingChanged(info, 'Reset to catalog pricing', editor, true);
     } catch (failure) {
-      error = messageFor(failure);
+      if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
     } finally {
-      busy = '';
+      if (version === mutationVersion) busy = '';
     }
   }
 
   async function refreshCatalog() {
     if (!client || busy) return;
+    cancelLoad();
+    const version = ++mutationVersion;
+    const editor = editorVersion;
     busy = 'Updating prices…';
     error = '';
     loadFailed = false;
     success = '';
     try {
       const refreshed = await client.refreshPricing();
-      await onchange();
-      await load();
-      if (refreshed.refreshError) error = refreshed.refreshError;
-      else success = 'Catalog updated';
+      if (version === mutationVersion) {
+        pricingChanged(refreshed, 'Catalog updated', editor);
+        if (editor === editorVersion && dialog.open && refreshed.refreshError) error = refreshed.refreshError;
+      }
     } catch (failure) {
-      error = messageFor(failure);
+      if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
     } finally {
-      busy = '';
+      if (version === mutationVersion) busy = '';
     }
   }
 </script>
 
-<dialog class="pricing-dialog" aria-labelledby="pricing-title" {@attach mountDialog} onclose={() => request?.abort()}>
+<dialog class="pricing-dialog" aria-labelledby="pricing-title" {@attach mountDialog} onclose={endEditing}>
   <div class="dialog-heading">
     <h2 id="pricing-title">Model pricing</h2>
     <button class="icon-button" aria-label="Close model pricing" onclick={close}><Icon name="close" /></button>
@@ -257,7 +323,7 @@
         >Add a rule</button
       >
     </div>
-    <form class="pricing-editor" onsubmit={save}>
+    <form class="pricing-editor" onsubmit={save} oninput={editDraft}>
       {#if editing}
         <label class="pricing-field"
           >Model ID<input
@@ -280,6 +346,7 @@
               disabled={Boolean(busy)}
               aria-pressed={kind === option.value}
               onclick={() => {
+                editDraft();
                 if (option.value === 'alias' || option.value === 'rates' || option.value === 'free')
                   kind = option.value;
               }}>{option.label}</button
@@ -290,6 +357,8 @@
             >Actual model<input
               list="pricing-catalog"
               aria-label="Actual model"
+              aria-invalid={Boolean(target.trim() && aliasIssue)}
+              aria-describedby="pricing-feedback"
               bind:value={target}
               maxlength="200"
               required
@@ -391,15 +460,14 @@
         </div>{/if}
     </form>
   </div>
-  <div class="pricing-feedback" aria-live="polite">
-    {#if error}<span role="alert">{error}</span>{#if loadFailed}<button
-          class="text-button"
-          disabled={Boolean(busy)}
-          onclick={() => void load()}>Retry</button
-        >{/if}{:else if success}<span class="pricing-success"><Icon name="check" size={15} />{success}</span
+  <div id="pricing-feedback" class="pricing-feedback" aria-live="polite">
+    {#if error}<span role="alert">{error}</span
+      >{:else if kind === 'alias' && editing && target.trim() && aliasIssue}<span>{aliasIssue}</span
+      >{:else if success}<span class="pricing-success"><Icon name="check" size={15} />{success}</span
       >{:else if settings?.info.refreshError}<span>{settings.info.refreshError}</span>{:else if loading || busy}<span
         >{busy || 'Updating…'}</span
       >{/if}
+    {#if loadFailed}<button class="text-button" disabled={Boolean(busy)} onclick={() => void load()}>Retry</button>{/if}
   </div>
   <div class="pricing-dialog-footer">
     <span>Changes apply across this dashboard.</span><button class="button" onclick={close}>Done</button>

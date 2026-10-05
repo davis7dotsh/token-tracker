@@ -30,7 +30,7 @@ SOFTWARE.
 
 ## Fonts
 
-DM Sans and Manrope are bundled under the SIL Open Font License 1.1. Their complete notices are included in `static/dm-sans-license.txt` and `static/manrope-license.txt`.
+Geist is self-hosted through `@fontsource-variable/geist` under the SIL Open Font License 1.1. Its complete notice is included in `static/geist-license.txt`.
 
 ## D3
 

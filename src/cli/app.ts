@@ -94,6 +94,7 @@ const makeCheckCommand = <Name extends string>(name: Name) =>
             },
             now,
             hostname(),
+            pricing.policy,
           ),
         catch: () =>
           new CliFailure({
@@ -255,6 +256,7 @@ const disconnect = Command.make(
     yield* fs.remove(join(configDirectory(), 'checkpoint.json'), {
       force: true,
     });
+    yield* fs.remove(join(configDirectory(), 'checkpoint-journal.jsonl'), { force: true });
     yield* Console.log('Disconnected. Future usage checks stay local. Uploaded history remains on the dashboard.');
   }),
 );
@@ -317,6 +319,6 @@ const serve = Command.make(
 ).pipe(Command.withDescription('Start the SvelteKit dashboard through Bun.'));
 
 export const cli = makeCheckCommand('token-tracker').pipe(
-  Command.withDescription('Token usage for Claude Code, Codex, and Pi.'),
+  Command.withDescription('Token usage for Claude Code, Codex, Pi, and Grok Build.'),
   Command.withSubcommands([check, connect, sync, status, disconnect, serve]),
 );

@@ -9,7 +9,9 @@
     "cli.cjs",
     "dist/token-tracker-*",
     "build",
+    "patches",
     "README.md",
+    "PERFORMANCE.md",
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",
@@ -23,6 +25,7 @@
     "start": "bun build/index.js",
     "check": "svelte-kit sync && vp check && bun run check:svelte",
     "test": "bun test tests",
+    "bench": "bun scripts/benchmark-rpc.ts",
     "cli": "bun src/cli/run.ts",
     "build:cli": "bun scripts/build-cli.ts",
     "update:pricing": "bun scripts/update-pricing.ts",
@@ -35,9 +38,11 @@
   "dependencies": {
     "@effect/platform-bun": "4.0.0",
     "@effect/sql-sqlite-bun": "4.0.0",
+    "@fontsource-variable/geist": "5.3.0",
     "@js-temporal/polyfill": "^0.5.1",
     "d3": "7.9.0",
-    "effect": "4.0.0"
+    "effect": "4.0.0",
+    "runed": "0.37.1"
   },
   "devDependencies": {
     "@sveltejs/adapter-node": "6.0.0",
@@ -56,5 +61,8 @@
   "overrides": {
     "vite": "npm:@voidzero-dev/vite-plus-core@1.0.0"
   },
-  "packageManager": "bun@1.4.2"
+  "packageManager": "bun@1.4.2",
+  "patchedDependencies": {
+    "runed@0.37.1": "patches/runed@0.37.1.patch"
+  }
 }

@@ -285,8 +285,8 @@ describe('dashboard aggregation', () => {
   ])('%s DST day keeps elapsed hours distinct and conserves tokens and cost', (_name, now, hours, first, second) => {
     const response = buildDashboard(
       result([
-        event({ timestamp: first, inputTokens: 11 }),
-        event({ timestamp: second, harness: 'pi', inputTokens: 22 }),
+        event({ timestamp: first, inputTokens: 11, costUsd: 0.125 }),
+        event({ timestamp: second, harness: 'pi', model: 'grok-4.6', inputTokens: 22, costKnown: false, costUsd: 0 }),
       ]),
       { range: 'today', timezone: 'America/Los_Angeles' },
       new Date(now),
@@ -297,6 +297,107 @@ describe('dashboard aggregation', () => {
     expect(response.hourly.reduce((sum, hour) => sum + hour.tokens, 0)).toBe(response.totals.tokens);
     expect(response.hourly.reduce((sum, hour) => sum + hour.costUSD, 0)).toBeCloseTo(response.totals.costUSD, 12);
     expect(new Date(response.hourly[2].start).getTime() - new Date(response.hourly[1].start).getTime()).toBe(3_600_000);
+    for (const dimension of ['providers', 'models'] as const) {
+      expect(response.hourly[1][dimension]).toEqual([
+        { name: dimension === 'providers' ? 'openai' : 'gpt-6.1-sol', tokens: 18, costUSD: 0.125, unpricedTokens: 0 },
+      ]);
+      expect(response.hourly[2][dimension]).toEqual([
+        { name: dimension === 'providers' ? 'xai' : 'grok-4.6', tokens: 29, costUSD: 0, unpricedTokens: 29 },
+      ]);
+      const chart = response.hourly.flatMap((hour) => hour[dimension] ?? []);
+      expect(chart.reduce((sum, group) => sum + group.tokens, 0)).toBe(response.totals.tokens);
+      expect(chart.reduce((sum, group) => sum + group.costUSD, 0)).toBe(response.totals.costUSD);
+      expect(chart.reduce((sum, group) => sum + (group.unpricedTokens ?? 0), 0)).toBe(response.totals.unpricedTokens);
+    }
+  });
+
+  test('provider and model chart buckets conserve filtered accounting, including missing prices', () => {
+    const response = buildDashboard(
+      result([
+        event({ timestamp: '2026-10-03T10:00:00Z', costUsd: 0.125 }),
+        event({ timestamp: '2026-10-03T10:20:00Z', deviceId: 'mac', inputTokens: 20, costUsd: 0.25 }),
+        event({
+          timestamp: '2026-10-03T11:00:00Z',
+          model: 'claude-fable-5-1',
+          harness: 'claude',
+          inputTokens: 30,
+          costUsd: 0.5,
+        }),
+        event({ timestamp: '2026-10-03T11:20:00Z', model: 'grok-4.6', harness: 'pi', inputTokens: 40, costUsd: 0.125 }),
+        event({
+          timestamp: '2026-10-03T11:30:00Z',
+          model: 'xai/grok-4.6',
+          harness: 'pi',
+          inputTokens: 50,
+          costUsd: 0.125,
+        }),
+        event({
+          timestamp: '2026-10-03T11:40:00Z',
+          model: 'quasar-alpha',
+          inputTokens: 60,
+          costKnown: false,
+          costUsd: 0,
+        }),
+        event({ timestamp: '2026-10-03T12:00:01Z', inputTokens: 999 }),
+        event({ timestamp: '2026-10-02T23:59:59Z', inputTokens: 999 }),
+      ]),
+      { range: 'today', timezone: 'UTC' },
+      new Date('2026-10-03T12:00:00Z'),
+    );
+    expect(response.totals).toMatchObject({ tokens: 252, costUSD: 1.125, unpricedTokens: 67 });
+    for (const buckets of [response.daily, response.hourly]) {
+      for (const bucket of buckets) {
+        for (const dimension of ['providers', 'models'] as const) {
+          const chart = bucket[dimension] ?? [];
+          expect(chart.reduce((sum, group) => sum + group.tokens, 0)).toBe(bucket.tokens);
+          expect(chart.reduce((sum, group) => sum + group.costUSD, 0)).toBe(bucket.costUSD);
+          expect(chart.reduce((sum, group) => sum + (group.unpricedTokens ?? 0), 0)).toBe(
+            bucket.harnesses.reduce((sum, group) => sum + group.unpricedTokens, 0),
+          );
+        }
+      }
+      for (const dimension of ['providers', 'models'] as const) {
+        for (const group of response[dimension]) {
+          const chart = buckets.flatMap((bucket) => bucket[dimension] ?? []).filter(({ name }) => name === group.name);
+          expect(chart.reduce((sum, item) => sum + item.tokens, 0)).toBe(group.tokens);
+          expect(chart.reduce((sum, item) => sum + item.costUSD, 0)).toBe(group.costUSD);
+          expect(chart.reduce((sum, item) => sum + (item.unpricedTokens ?? 0), 0)).toBe(group.unpricedTokens);
+        }
+      }
+    }
+    expect(response.daily[0].providers?.find(({ name }) => name === 'xai')).toEqual({
+      name: 'xai',
+      tokens: 104,
+      costUSD: 0.25,
+      unpricedTokens: 0,
+    });
+    expect(Schema.decodeUnknownSync(DashboardResponse)(response).daily[0].models).toEqual(response.daily[0].models);
+  });
+
+  test('empty chart buckets retain zero series and older responses can omit chart dimensions', () => {
+    const response = buildDashboard(
+      result([event()]),
+      { range: 'today', models: [] },
+      new Date('2026-10-03T12:00:00Z'),
+    );
+    expect(response.totals.tokens).toBe(0);
+    expect(
+      [...response.daily, ...response.hourly].every(
+        (bucket) => bucket.providers?.length === 0 && bucket.models?.length === 0,
+      ),
+    ).toBe(true);
+    const legacy = {
+      ...response,
+      daily: response.daily.map(({ date, tokens, costUSD, harnesses }) => ({ date, tokens, costUSD, harnesses })),
+      hourly: response.hourly.map(({ start, end, tokens, costUSD, harnesses }) => ({
+        start,
+        end,
+        tokens,
+        costUSD,
+        harnesses,
+      })),
+    };
+    expect(Schema.decodeUnknownSync(DashboardResponse)(legacy).daily[0].providers).toBeUndefined();
   });
 
   test('half-hour timezone buckets start at local midnight', () => {

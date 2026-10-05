@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Effect, Schema } from 'effect';
@@ -11,6 +11,7 @@ import {
   estimateCost,
   repriceEvent,
   resolveDisplayModel,
+  tokenCostParts,
   validatePricingRules,
 } from '../../src/lib/server/usage/pricing';
 import {
@@ -125,6 +126,86 @@ test('legacy reported costs survive insufficient metadata while metadata upgrade
   expect(eventDigest(upgraded)).toBe(eventDigest({ ...upgraded }));
 });
 
+test('complete Grok ledger costs survive collection and hub repricing for uncatalogued Build model IDs', () => {
+  const recorded = event({
+    harness: 'grok',
+    model: 'grok-4.7-build-fast',
+    inputTokens: 15_059,
+    outputTokens: 104,
+    cacheReadTokens: 17_152,
+    reasoningTokens: 67,
+    costKnown: true,
+    costUsd: 267_362_400 / 10_000_000_000,
+    reportedCostUsd: 267_362_400 / 10_000_000_000,
+    requests: 2,
+  });
+  expect(estimateCost(recorded)).toEqual({ costKnown: true, costUsd: 0.02673624 });
+  expect(repriceEvent(recorded, bundledPolicy)).toMatchObject({
+    model: 'grok-4.7-build-fast',
+    rawModel: 'grok-4.7-build-fast',
+    costKnown: true,
+    costUsd: 0.02673624,
+    requests: 2,
+  });
+  expect(estimateCost({ ...recorded, costKnown: false, costUsd: 0 })).toEqual({
+    costKnown: true,
+    costUsd: 0.02673624,
+  });
+  expect(estimateCost({ ...recorded, reportedCostUsd: 0 })).toEqual({ costKnown: false, costUsd: 0 });
+  expect(estimateCost({ ...recorded, harness: 'codex' })).toEqual({ costKnown: false, costUsd: 0 });
+
+  const rules: PricingRule[] = [
+    { model: recorded.model, kind: 'free' },
+    {
+      model: recorded.model,
+      kind: 'rates',
+      rates: { inputPerMillion: 2, outputPerMillion: 6, cacheReadPerMillion: 0.5 },
+    },
+    { model: recorded.model, kind: 'alias', target: 'grok-4.6' },
+  ];
+  for (const rule of rules) {
+    const pricing = policy([rule]);
+    const expected = estimateCost(recorded, 0, '', pricing);
+    expect(expected.costKnown).toBe(true);
+    expect(expected.costUsd).not.toBe(recorded.costUsd);
+    const repriced = repriceEvent(recorded, pricing);
+    expect(repriced.costUsd).toBe(expected.costUsd);
+    expect(repriced.reportedCostUsd).toBe(recorded.reportedCostUsd);
+    expect(repriceEvent(repriced, bundledPolicy).costUsd).toBe(recorded.costUsd);
+  }
+});
+
+test('Grok multi-call rows keep native costs and missing costs stay unpriced even for catalog models', () => {
+  // Two 150k-input requests are each below the 200k tier. Applying the tier to
+  // this aggregate would incorrectly double both input and output prices.
+  const aggregate = event({
+    harness: 'grok',
+    model: 'grok-4.6',
+    inputTokens: 300_000,
+    outputTokens: 2_000,
+    cacheReadTokens: 0,
+    reasoningTokens: 0,
+    reportedCostUsd: 0.612,
+    requests: 2,
+  });
+  expect(estimateCost(aggregate)).toEqual({ costKnown: true, costUsd: 0.612 });
+  expect(repriceEvent(aggregate, bundledPolicy)).toMatchObject({ costKnown: true, costUsd: 0.612 });
+  expect(estimateCost({ ...aggregate, harness: 'pi' }).costUsd).toBeCloseTo(1.224, 12);
+  const { reportedCostUsd: _reported, ...incomplete } = aggregate;
+  expect(estimateCost(incomplete)).toEqual({ costKnown: false, costUsd: 0 });
+  expect(repriceEvent({ ...incomplete, costUsd: 9, costKnown: true }, bundledPolicy)).toMatchObject({
+    costKnown: false,
+    costUsd: 0,
+  });
+  expect(estimateCost({ ...aggregate, reportedCostUsd: Infinity })).toEqual({ costKnown: false, costUsd: 0 });
+  const custom = policy([
+    { model: aggregate.model, kind: 'rates', rates: { inputPerMillion: 1, outputPerMillion: 2 } },
+  ]);
+  const repriced = repriceEvent(aggregate, custom);
+  expect(repriced.costUsd).toBeCloseTo(0.304, 12);
+  expect(repriceEvent(repriced, bundledPolicy).costUsd).toBe(0.612);
+});
+
 test('aliases reject nonexistent models, cycles, duplicate rules and fuzzy guesses', () => {
   expect(
     validatePricingRules(bundledPolicy.catalog, [{ model: 'one', kind: 'alias', target: 'missing-target' }]),
@@ -143,6 +224,217 @@ test('aliases reject nonexistent models, cycles, duplicate rules and fuzzy guess
   ).toContain('one pricing');
   expect(estimateCost(event({ model: 'gpt-6.1-sol-probably' })).costKnown).toBe(false);
   expect(estimateCost(event({ model: 'constructor' })).costKnown).toBe(false);
+});
+
+const ultrafastPolicy = {
+  ...bundledPolicy,
+  catalog: {
+    ...bundledPolicy.catalog,
+    models: {
+      'gpt-6-astra': {
+        input_cost_per_token: 1e-6,
+        input_cost_per_token_above_272k_tokens: 2e-6,
+        output_cost_per_token: 2e-6,
+        cache_read_input_token_cost: 3e-6,
+        cache_creation_input_token_cost: 4e-6,
+        cache_creation_input_token_cost_above_1hr: 5e-6,
+        input_cost_per_token_ultrafast: 10e-6,
+        output_cost_per_token_ultrafast: 20e-6,
+        cache_read_input_token_cost_ultrafast: 30e-6,
+        cache_creation_input_token_cost_ultrafast: 40e-6,
+        cache_creation_input_token_cost_above_1hr_ultrafast: 50e-6,
+        input_cost_per_token_above_272k_tokens_ultrafast: 100e-6,
+        output_cost_per_token_above_272k_tokens_ultrafast: 200e-6,
+        cache_read_input_token_cost_above_272k_tokens_ultrafast: 300e-6,
+        cache_creation_input_token_cost_above_272k_tokens_ultrafast: 400e-6,
+        cache_creation_input_token_cost_above_1hr_above_272k_tokens_ultrafast: 500e-6,
+      },
+    },
+  },
+  rules: [{ model: 'vega-alpha', kind: 'alias', target: 'gpt-6-astra' }],
+} satisfies PricingPolicy;
+const ultrafastEvent = () =>
+  event({
+    model: 'gpt-6-astra',
+    serviceTier: 'ultrafast',
+    inputTokens: 100,
+    outputTokens: 200,
+    cacheReadTokens: 300,
+    cacheWriteTokens: 400,
+    cacheWrite1hTokens: 100,
+  });
+
+test('ultrafast uses its catalog rates for every token bucket and context size through aliases', () => {
+  const request = ultrafastEvent();
+  const priced = repriceEvent(request, ultrafastPolicy);
+  expect(priced.costKnown).toBe(true);
+  expect(priced.costUsd).toBeCloseTo(0.031, 12);
+  const large = repriceEvent({ ...request, inputTokens: 300_000 }, ultrafastPolicy);
+  expect(large.costKnown).toBe(true);
+  expect(large.costUsd).toBeCloseTo(30.3, 12);
+  const alias = repriceEvent({ ...request, model: 'vega-alpha' }, ultrafastPolicy);
+  expect(alias).toMatchObject({ model: 'gpt-6-astra', rawModel: 'vega-alpha', costKnown: true });
+  expect(alias.costUsd).toBe(priced.costUsd);
+});
+
+test('missing ultrafast cache rates remain unpriced despite available standard rates', () => {
+  const { cache_read_input_token_cost_ultrafast: _missing, ...rates } = ultrafastPolicy.catalog.models['gpt-6-astra'];
+  const pricing = {
+    ...ultrafastPolicy,
+    catalog: { ...ultrafastPolicy.catalog, models: { 'gpt-6-astra': rates } },
+  };
+  expect(repriceEvent(ultrafastEvent(), pricing)).toMatchObject({ costKnown: false, costUsd: 0 });
+  expect(repriceEvent({ ...ultrafastEvent(), cacheReadTokens: 0 }, pricing).costKnown).toBe(true);
+});
+
+test('an unknown service tier remains unpriced instead of borrowing catalog rates', () => {
+  expect(repriceEvent({ ...ultrafastEvent(), serviceTier: 'unknown-tier' }, ultrafastPolicy)).toMatchObject({
+    costKnown: false,
+    costUsd: 0,
+  });
+});
+
+test('token cost parts share ultrafast context selection including large cache reads and aliases', () => {
+  const fixtures = [
+    { inputTokens: 100, cacheReadTokens: 300, expected: [0.001, 0.004, 0.009, 0.017] },
+    { inputTokens: 300_000, cacheReadTokens: 300, expected: [30, 0.04, 0.09, 0.17] },
+    { inputTokens: 100, cacheReadTokens: 300_000, expected: [0.01, 0.04, 90, 0.17] },
+  ];
+  for (const { expected, ...tokens } of fixtures) {
+    const priced = repriceEvent({ ...ultrafastEvent(), model: 'vega-alpha', ...tokens }, ultrafastPolicy);
+    const parts = tokenCostParts(priced, ultrafastPolicy);
+    expect(parts).toBeDefined();
+    if (!parts) throw new Error('Complete ultrafast rates must be attributable');
+    [parts.input, parts.output, parts.cacheRead, parts.cacheWrite].forEach((cost, index) => {
+      expect(cost).toBeCloseTo(expected[index], 12);
+    });
+    expect(Object.values(parts).reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(priced.costUsd, 12);
+  }
+});
+
+test('custom token cost parts use USD per million and separate cache-write durations without counting reasoning twice', () => {
+  const pricing = policy([
+    {
+      model: 'quasar-alpha',
+      kind: 'rates',
+      rates: {
+        inputPerMillion: 2,
+        outputPerMillion: 8,
+        cacheReadPerMillion: 0.2,
+        cacheWritePerMillion: 2.5,
+        cacheWrite1hPerMillion: 4,
+      },
+    },
+  ]);
+  const request = event({
+    inputTokens: 1_000_000,
+    outputTokens: 2_000_000,
+    cacheReadTokens: 3_000_000,
+    cacheWriteTokens: 4_000_000,
+    cacheWrite1hTokens: 1_000_000,
+    reasoningTokens: 500_000,
+    serviceTier: 'unknown-tier',
+  });
+  const priced = repriceEvent(request, pricing);
+  const parts = tokenCostParts(priced, pricing);
+  expect(parts).toMatchObject({ input: 2, output: 16, cacheWrite: 11.5 });
+  expect(parts?.cacheRead).toBeCloseTo(0.6, 12);
+  expect(priced.costUsd).toBeCloseTo(30.1, 12);
+  expect(request).toMatchObject({ costKnown: false, costUsd: 0 });
+});
+
+test('free token parts need no tier or TTL metadata while retained and incomplete prices remain unavailable', () => {
+  const { serviceTier: _tier, cacheWrite1hTokens: _ttl, ...legacy } = ultrafastEvent();
+  const retained = repriceEvent({ ...legacy, costKnown: true, costUsd: 9 }, ultrafastPolicy);
+  expect(retained.costUsd).toBe(9);
+  expect(tokenCostParts(retained, ultrafastPolicy)).toBeUndefined();
+  expect(tokenCostParts(ultrafastEvent(), ultrafastPolicy)).toBeUndefined();
+  const free = policy([{ model: legacy.model, kind: 'free' }]);
+  expect(tokenCostParts(repriceEvent(legacy, free), free)).toEqual({
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+  });
+  const { cache_read_input_token_cost_ultrafast: _rate, ...rates } = ultrafastPolicy.catalog.models['gpt-6-astra'];
+  const incomplete = {
+    ...ultrafastPolicy,
+    catalog: { ...ultrafastPolicy.catalog, models: { 'gpt-6-astra': rates } },
+  };
+  expect(tokenCostParts({ ...ultrafastEvent(), costKnown: true }, incomplete)).toBeUndefined();
+  expect(
+    tokenCostParts({ ...ultrafastEvent(), serviceTier: 'unknown-tier', costKnown: true }, ultrafastPolicy),
+  ).toBeUndefined();
+});
+
+test('native Grok totals stay unattributed while explicit rates can produce token parts', () => {
+  const native = event({
+    model: 'gpt-6-astra',
+    harness: 'grok',
+    serviceTier: '',
+    reportedCostUsd: 12,
+    requests: 3,
+  });
+  const priced = repriceEvent(native, bundledPolicy);
+  expect(priced.costUsd).toBe(12);
+  expect(tokenCostParts(priced, bundledPolicy)).toBeUndefined();
+  const custom = policy([
+    {
+      model: native.model,
+      kind: 'rates',
+      rates: { inputPerMillion: 2, outputPerMillion: 8, cacheReadPerMillion: 0.2 },
+    },
+  ]);
+  const explicit = repriceEvent(native, custom);
+  const parts = tokenCostParts(explicit, custom);
+  expect(parts).toBeDefined();
+  if (!parts) throw new Error('Explicit Grok rates must be attributable');
+  expect(Object.values(parts).reduce((sum, cost) => sum + cost, 0)).toBeCloseTo(explicit.costUsd, 12);
+  expect(explicit.reportedCostUsd).toBe(12);
+});
+
+test('token parts refuse inconsistent totals and different pricing snapshots instead of prorating', () => {
+  const priced = repriceEvent(ultrafastEvent(), ultrafastPolicy);
+  expect(tokenCostParts({ ...priced, costUsd: priced.costUsd + 1 }, ultrafastPolicy)).toBeUndefined();
+  const changed = {
+    ...ultrafastPolicy,
+    catalog: {
+      ...ultrafastPolicy.catalog,
+      models: {
+        'gpt-6-astra': { ...ultrafastPolicy.catalog.models['gpt-6-astra'], input_cost_per_token_ultrafast: 99e-6 },
+      },
+    },
+  };
+  expect(tokenCostParts(priced, changed)).toBeUndefined();
+});
+
+test('prepared alias chains stay independent across snapshots and preserve missing-rate and tier semantics', () => {
+  const rules: PricingRule[] = Array.from({ length: 256 }, (_, index) => ({
+    model: `proxy-${index}`,
+    kind: 'alias',
+    target: index === 255 ? 'quasar-alpha' : `proxy-${index + 1}`,
+  }));
+  const custom = {
+    model: 'quasar-alpha',
+    kind: 'rates' as const,
+    nickname: 'Custom model',
+    rates: { inputPerMillion: 2, outputPerMillion: 8, cacheReadPerMillion: 0.2 },
+  };
+  const priced = policy([...rules, custom]);
+  expect(validatePricingRules(priced.catalog, priced.rules)).toBeNull();
+  const request = event({ model: 'proxy-0', serviceTier: 'unknown-tier' });
+  for (let index = 0; index < 2; index++) {
+    expect(repriceEvent(request, priced)).toMatchObject({ model: 'Custom model', costKnown: true });
+    expect(repriceEvent({ ...request, cacheWriteTokens: 10 }, priced).costKnown).toBe(false);
+  }
+  const free = policy([...rules, { model: 'quasar-alpha', kind: 'free' }]);
+  expect(repriceEvent(request, free)).toMatchObject({ model: 'quasar-alpha', costUsd: 0, costKnown: true });
+  expect(repriceEvent(request, policy(rules))).toMatchObject({ model: 'proxy-0', costKnown: false });
+  const catalog = policy([{ model: 'proxy-0', kind: 'alias', target: 'gpt-6.1-sol' }]);
+  expect(estimateCost(request, 0, 'constructor', catalog).costKnown).toBe(false);
+  expect(estimateCost(event({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 }), 0, 'constructor').costKnown).toBe(
+    false,
+  );
 });
 
 test('disk loading is read-only and durable edits serialize without lost rules', async () => {
@@ -171,6 +463,40 @@ test('disk loading is read-only and durable edits serialize without lost rules',
   expect((await Effect.runPromise(loadPricing(directory))).info.rules.map((rule) => rule.model)).toEqual([
     'another-model',
   ]);
+});
+
+test('cached pricing snapshots detect external edits, atomic replacement, deletion and corruption', async () => {
+  const directory = await temporary();
+  const filename = join(directory, 'pricing-state.json');
+  const original = await Effect.runPromise(setPricingRule({ model: 'model-a', kind: 'free' }, directory));
+  expect(await Effect.runPromise(loadPricing(directory))).toBe(original);
+  const initialBytes = await readFile(filename, 'utf8');
+  const editedBytes = initialBytes.replace('"model-a"', '"model-b"');
+  expect(editedBytes.length).toBe(initialBytes.length);
+  await writeFile(filename, editedBytes);
+  const edited = await Effect.runPromise(loadPricing(directory));
+  expect(edited.info.rules).toEqual([{ model: 'model-b', kind: 'free' }]);
+  expect(edited.policy.revision).not.toBe(original.policy.revision);
+  expect(await Effect.runPromise(loadPricing(directory))).toBe(edited);
+
+  const replacement = join(directory, 'external-replacement.json');
+  await writeFile(replacement, initialBytes);
+  await rename(replacement, filename);
+  const restored = await Effect.runPromise(loadPricing(directory));
+  expect(restored.policy.revision).toBe(original.policy.revision);
+  expect(restored.info.rules).toEqual(original.info.rules);
+
+  await rm(filename);
+  const absent = await Effect.runPromise(loadPricing(directory));
+  expect(absent.info.rules).toEqual([]);
+  expect(absent.info.refreshError).toBeNull();
+  expect(await Effect.runPromise(loadPricing(directory))).toBe(absent);
+  await writeFile(filename, '{invalid-json');
+  const invalid = await Effect.runPromise(loadPricing(directory));
+  expect(invalid.info.rules).toEqual([]);
+  expect(invalid.info.refreshError).toContain('could not be read');
+  await writeFile(filename, editedBytes);
+  expect((await Effect.runPromise(loadPricing(directory))).info.rules).toEqual(edited.info.rules);
 });
 
 test('invalid custom rates fail schema validation and dependent aliases prevent unsafe deletion', async () => {

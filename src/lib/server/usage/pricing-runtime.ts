@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Effect, Schema } from 'effect';
@@ -30,9 +31,21 @@ const stableJson = (value: unknown): string => {
       .join(',')}}`;
   return JSON.stringify(value) ?? 'null';
 };
+const canonicalCatalogs = new WeakMap<typeof PriceSnapshot.Type, string>();
+const canonicalCatalog = (catalog: typeof PriceSnapshot.Type) => {
+  const cached = canonicalCatalogs.get(catalog);
+  if (cached !== undefined) return cached;
+  const canonical = stableJson(catalog);
+  canonicalCatalogs.set(catalog, canonical);
+  return canonical;
+};
 const revision = (stored: StoredPricing) =>
   createHash('sha256')
-    .update(stableJson([stored.catalog, stored.rules]))
+    .update('[')
+    .update(canonicalCatalog(stored.catalog))
+    .update(',')
+    .update(stableJson(stored.rules))
+    .update(']')
     .digest('hex');
 const defaultStored = (): StoredPricing => ({ catalog: prices, rules: [], checkedAt: null, refreshError: null });
 const dataDirectory = (directory?: string) =>
@@ -41,9 +54,20 @@ const dataDirectory = (directory?: string) =>
       process.env.TOKEN_TRACKER_DATA_DIR ??
       join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'token-tracker'),
   );
+const pricingStates = new WeakMap<StoredPricing, PricingState>();
+const catalogModelNames = new WeakMap<typeof PriceSnapshot.Type, readonly string[]>();
+const modelNames = (catalog: typeof PriceSnapshot.Type) => {
+  const cached = catalogModelNames.get(catalog);
+  if (cached) return cached;
+  const models = Object.keys(catalog.models).sort();
+  catalogModelNames.set(catalog, models);
+  return models;
+};
 const toState = (stored: StoredPricing): PricingState => {
+  const cached = pricingStates.get(stored);
+  if (cached) return cached;
   const policy = { catalog: stored.catalog, rules: stored.rules, revision: revision(stored) };
-  return {
+  const state = {
     policy,
     info: {
       revision: policy.revision,
@@ -51,23 +75,55 @@ const toState = (stored: StoredPricing): PricingState => {
       checkedAt: stored.checkedAt,
       source: stored.catalog.source,
       rules: stored.rules,
-      models: [...new Set([...Object.keys(stored.catalog.models), ...stored.rules.map((rule) => rule.model)])].sort(),
+      models: stored.rules.length
+        ? [...new Set([...modelNames(stored.catalog), ...stored.rules.map((rule) => rule.model)])].sort()
+        : modelNames(stored.catalog),
       refreshError: stored.refreshError,
     },
   };
+  pricingStates.set(stored, state);
+  return state;
 };
 const failure = (message: string) => new PricingFailure({ message });
+const storedByDirectory = new Map<string, { fingerprint: string | null; stored: StoredPricing }>();
+const rememberStored = (directory: string, fingerprint: string | null, stored: StoredPricing) => {
+  storedByDirectory.delete(directory);
+  storedByDirectory.set(directory, { fingerprint, stored });
+  if (storedByDirectory.size > 32) {
+    const oldest = storedByDirectory.keys().next().value;
+    if (oldest !== undefined) storedByDirectory.delete(oldest);
+  }
+};
+// File identity and nanosecond timestamps detect atomic replacement and edits
+// from other processes, while unchanged requests reuse a validated snapshot.
+const fingerprintFor = (file: BigIntStats) => `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`;
+const storedFingerprint = async (directory: string) => {
+  const file = await stat(join(directory, stateFile), { bigint: true });
+  if (file.size > BigInt(maximumStateBytes)) throw failure('The saved pricing catalog is too large.');
+  return fingerprintFor(file);
+};
 const readStored = async (directory: string): Promise<StoredPricing> => {
   try {
+    const fingerprint = await storedFingerprint(directory);
+    const cached = storedByDirectory.get(directory);
+    if (cached?.fingerprint === fingerprint) return cached.stored;
     const contents = await readFile(join(directory, stateFile));
     if (contents.byteLength > maximumStateBytes) throw failure('The saved pricing catalog is too large.');
     const stored = Schema.decodeUnknownSync(StoredPricing)(JSON.parse(contents.toString('utf8')));
     const invalid = validatePricingRules(stored.catalog, stored.rules);
     if (invalid) throw failure(invalid);
+    // A concurrent external write can change the path between stat and read.
+    // Its snapshot is usable for this request but must not enter the cache.
+    if (fingerprint === (await storedFingerprint(directory))) rememberStored(directory, fingerprint, stored);
     return stored;
   } catch (error) {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')
-      return defaultStored();
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      const cached = storedByDirectory.get(directory);
+      if (cached?.fingerprint === null) return cached.stored;
+      const stored = defaultStored();
+      rememberStored(directory, null, stored);
+      return stored;
+    }
     return {
       ...defaultStored(),
       refreshError: 'The saved pricing catalog could not be read; bundled prices remain available.',
@@ -80,7 +136,17 @@ const persistStored = async (directory: string, stored: StoredPricing) => {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
     await writeFile(temporary, JSON.stringify(stored) + '\n', { mode: 0o600, flag: 'wx', flush: true });
+    const written = await stat(temporary, { bigint: true });
     await rename(temporary, join(directory, stateFile));
+    const saved = await stat(join(directory, stateFile), { bigint: true });
+    if (
+      saved.dev === written.dev &&
+      saved.ino === written.ino &&
+      saved.size === written.size &&
+      saved.mtimeNs === written.mtimeNs
+    )
+      rememberStored(directory, fingerprintFor(saved), stored);
+    else storedByDirectory.delete(directory);
   } catch {
     throw failure('Could not save pricing settings. Check the dashboard data directory.');
   } finally {

@@ -32,6 +32,69 @@ const localEvent: UsageEvent = {
 };
 const localData = { events: [localEvent], sources: [], warnings: [], pricingUpdatedAt: '2026-10-03T00:00:00.000Z' };
 
+test('Grok aggregate usage preserves calls, native cost, copied-device accounting, and pricing resets over RPC', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-grok-'));
+  directories.push(directory);
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, { device: localDevice, collect: Effect.succeed({ ...localData, events: [] }) }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const endpoint = `http://127.0.0.1:${server.port}/rpc`;
+  const runtime = ManagedRuntime.make(rpcClientLayer(endpoint));
+  const browser = makeDashboardClient(endpoint);
+  const model = 'grok-4.7-build-fast';
+  const reportedCostUsd = 0.02673624;
+  const event: UsageEvent = {
+    ...localEvent,
+    harness: 'grok',
+    id: 'grok:turn:session:1:' + model,
+    model,
+    rawModel: model,
+    requests: 3,
+    reportedCostUsd,
+    costUsd: reportedCostUsd,
+    serviceTier: '',
+  };
+  try {
+    for (const id of ['grok-device', 'copied-grok-device']) {
+      const device = { id, name: id, platform: 'darwin' };
+      const registration = await runtime.runPromise(
+        Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device })),
+      );
+      expect(
+        await runtime.runPromise(
+          Effect.flatMap(UsageClient, (client) =>
+            client.SyncUsage({
+              deviceId: id,
+              token: registration.token,
+              batch: {
+                device,
+                events: [event],
+                sources: [{ harness: 'grok', path: '/.grok/sessions', files: 1, events: 1, status: 'ready' }],
+              },
+            }),
+          ),
+        ),
+      ).toMatchObject({ accepted: 1, updated: 0 });
+    }
+    const usage = await browser.getUsage({ harnesses: ['grok'] });
+    expect(usage.totals).toMatchObject({ tokens: 175, requests: 3, sessions: 1, costUSD: reportedCostUsd });
+    expect(usage.filters.providers).toEqual(['xai']);
+    expect(usage.sessions[0]).toMatchObject({ harness: 'grok', requests: 3 });
+    expect((await browser.getUsage({ devices: ['grok-device'] })).totals.requests).toBe(3);
+    await browser.setPricingRule({ model, kind: 'free' }, pairingSecret);
+    expect((await browser.getUsage({ harnesses: ['grok'] })).totals.costUSD).toBe(0);
+    await browser.deletePricingRule(model, pairingSecret);
+    expect((await browser.getUsage({ harnesses: ['grok'] })).totals.costUSD).toBe(reportedCostUsd);
+  } finally {
+    await browser.dispose();
+    await runtime.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
 test('browser and CLI use the actual Effect RPC HTTP wire with typed errors and authenticated retries', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-wire-'));
   directories.push(directory);
@@ -397,5 +460,41 @@ test('an offline HTTP server produces a friendly bounded browser failure', async
     expect(Date.now() - started).toBeLessThan(1000);
   } finally {
     await browser.dispose();
+  }
+});
+
+test('browser and native RPC clients preserve custom endpoints without a redirect', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-endpoint-'));
+  directories.push(directory);
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, { device: localDevice, collect: Effect.succeed(localData) }),
+  );
+  const requests: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      const url = new URL(request.url);
+      requests.push(`${url.pathname}${url.search}`);
+      if (url.pathname === '/bridge/tracker/') return Response.redirect(new URL('/bridge/tracker', url), 308);
+      if (url.pathname !== '/bridge/tracker' || (url.search && url.search !== '?client=native'))
+        return new Response('Unknown endpoint', { status: 404 });
+      return handler.handler(new Request(new URL('/rpc', url), request));
+    },
+  });
+  const endpoint = `http://127.0.0.1:${server.port}/bridge/tracker`;
+  const browser = makeDashboardClient(endpoint);
+  const native = ManagedRuntime.make(rpcClientLayer(`${endpoint}?client=native`));
+  try {
+    expect((await browser.getUsage()).totals.tokens).toBe(175);
+    expect((await native.runPromise(Effect.flatMap(UsageClient, (client) => client.GetDevices())))[0]?.name).toBe(
+      'Hub',
+    );
+    expect(requests).toEqual(['/bridge/tracker', '/bridge/tracker?client=native']);
+  } finally {
+    await browser.dispose();
+    await native.dispose();
+    await server.stop(true);
+    await handler.dispose();
   }
 });

@@ -1,0 +1,338 @@
+diff --git a/dist/utilities/use-search-params/use-search-params.svelte.d.ts b/dist/utilities/use-search-params/use-search-params.svelte.d.ts
+index 76b0f83690678d4040c6cae644e7db9aeb4e7b0c..bc682f9e19b5a6f8564824228be001c88b6ea605 100644
+--- a/dist/utilities/use-search-params/use-search-params.svelte.d.ts
++++ b/dist/utilities/use-search-params/use-search-params.svelte.d.ts
+@@ -72,6 +72,7 @@ export interface SearchParamsOptions {
+     dateFormats?: Record<string, "date" | "datetime">;
+ }
+ type ExtractParamValuesOptions = {
++    stringFields?: Set<string>;
+     numberFields?: Set<string>;
+     arrayFields?: Set<string>;
+     dateFields?: Set<string>;
+@@ -224,7 +225,7 @@ declare class SearchParams<Schema extends StandardSchemaV1> {
+      *
+      * @param values An object containing parameter key-value pairs to update
+      */
+-    update(values: Partial<StandardSchemaV1.InferOutput<Schema>>): void;
++    update(values: Partial<StandardSchemaV1.InferOutput<Schema>>, navigation?: { pushHistory?: boolean }): void;
+     /**
+      * Check if a key exists in the schema
+      * This is a critical method used by the Proxy handler to determine
+diff --git a/dist/utilities/use-search-params/use-search-params.svelte.js b/dist/utilities/use-search-params/use-search-params.svelte.js
+index 8ddeb0eacf7ef5884c222536ff76588a4134d0c7..958ca97b8bfd8d0f36c6efe5d235aaf3e3b4a2bb 100644
+--- a/dist/utilities/use-search-params/use-search-params.svelte.js
++++ b/dist/utilities/use-search-params/use-search-params.svelte.js
+@@ -1,12 +1,26 @@
+ import { SvelteURLSearchParams } from "svelte/reactivity";
+ import { dequal } from "dequal/lite";
+ import * as lzString from "lz-string";
+-import { browser, building } from "$app/environment";
++import { browser, building } from "$app/env";
+ import { goto } from "$app/navigation";
+ import { page } from "$app/state";
+ import { IsMounted } from "../is-mounted/is-mounted.svelte.js";
+ import { BROWSER } from "esm-env";
+ import { untrack } from "svelte";
++// SvelteKit 3 separates the shallow URL from the last loaded page URL.
++function currentURL() {
++    return page.shallow?.url ?? page.url;
++}
++function navigateSearchParams(params, pushHistory = false) {
++    const url = new URL(currentURL().href);
++    url.search = params.toString();
++    return goto(url, {
++        shallow: true,
++        replace: !pushHistory,
++        persistState: true,
++        reset: false,
++    });
++}
+ /**
+  * Serialize a value to a URL-compatible string representation
+  * @param value The value to serialize
+@@ -68,10 +82,14 @@ function serializeValue(value, key, dateFormats = {}, codecEncoders = new Map())
+  * @internal
+  */
+ export function extractParamValues(searchParams, options = {}) {
+-    const { numberFields = new Set(), arrayFields = new Set(), dateFields = new Set(), codecFields = new Set(), } = options;
++    const { stringFields = new Set(), numberFields = new Set(), arrayFields = new Set(), dateFields = new Set(), codecFields = new Set(), } = options;
+     const params = {};
+     for (const [key, value] of searchParams.entries()) {
+         try {
++            if (stringFields.has(key)) {
++                params[key] = value;
++                continue;
++            }
+             // Special handling for empty arrays and objects
+             if (value === "[]") {
+                 params[key] = [];
+@@ -161,6 +179,7 @@ function extractSchemaInfo(schema) {
+     if (!validationResult || !("value" in validationResult)) {
+         return {
+             keys: [],
++            stringFields: new Set(),
+             numberFields: new Set(),
+             dateFields: new Set(),
+             dateFormats: new Map(),
+@@ -172,6 +191,7 @@ function extractSchemaInfo(schema) {
+     }
+     const defaultValues = validationResult.value;
+     const keys = Object.keys(defaultValues);
++    const stringFields = new Set();
+     const numberFields = new Set();
+     const dateFields = new Set();
+     const dateFormats = new Map();
+@@ -180,7 +200,10 @@ function extractSchemaInfo(schema) {
+     const arrayFields = new Set();
+     // Determine which fields are number, date or array types by checking default value types
+     for (const [key, defaultValue] of Object.entries(defaultValues)) {
+-        if (typeof defaultValue === "number") {
++        if (typeof defaultValue === "string") {
++            stringFields.add(key);
++        }
++        else if (typeof defaultValue === "number") {
+             numberFields.add(key);
+         }
+         else if (defaultValue instanceof Date) {
+@@ -211,6 +234,7 @@ function extractSchemaInfo(schema) {
+     }
+     return {
+         keys,
++        stringFields,
+         numberFields,
+         dateFields,
+         dateFormats,
+@@ -235,7 +259,7 @@ function extractSchemaInfo(schema) {
+  * @internal
+  */
+ function extractSelectiveParamValues(searchParams, schemaKeys, options = {}) {
+-    const { numberFields = new Set(), arrayFields = new Set(), dateFields = new Set(), codecFields = new Set(), } = options;
++    const { stringFields = new Set(), numberFields = new Set(), arrayFields = new Set(), dateFields = new Set(), codecFields = new Set(), } = options;
+     const params = {};
+     // Only access parameters that are defined in the schema
+     // This maintains SvelteKit's fine-grained reactivity
+@@ -244,6 +268,10 @@ function extractSelectiveParamValues(searchParams, schemaKeys, options = {}) {
+         if (value === null)
+             continue;
+         try {
++            if (stringFields.has(key)) {
++                params[key] = value;
++                continue;
++            }
+             if (value === "[]") {
+                 params[key] = [];
+                 continue;
+@@ -324,6 +352,7 @@ class SearchParams {
+      * Set of field names that expect number types based on schema validation
+      * Used to intelligently convert URL string values to numbers only when appropriate
+      */
++    #stringFields;
+     #numberFields;
+     /**
+      * Set of field names that expect Date types based on schema validation
+@@ -395,7 +424,7 @@ class SearchParams {
+         }, {});
+         // Store default values, number fields, and date fields
+         this.#defaultValues = { ...schemaInfo.defaultValues };
+-        this.#numberFields = schemaInfo.numberFields;
++        this.#stringFields = schemaInfo.stringFields;
+         this.#numberFields = schemaInfo.numberFields;
+         this.#arrayFields = schemaInfo.arrayFields;
+         this.#dateFields = schemaInfo.dateFields;
+@@ -417,10 +446,11 @@ class SearchParams {
+         if (this.#cacheInitialized)
+             return;
+         this.#cacheInitialized = true;
+-        // only initialize from URL if updateURL is true and we're in browser
+-        if (!this.#options.updateURL || !BROWSER || building)
++        // Component SSR can read the request URL, matching the first hydrated
++        // render. Navigation and browser-only effects remain client-only.
++        if (!this.#options.updateURL || building)
+             return;
+-        const urlParams = page.url.searchParams;
++        const urlParams = currentURL().searchParams;
+         const compressedParamName = this.#options.compressedParamName || "_data";
+         // Handle compressed mode
+         if (this.#options.compress && urlParams.has(compressedParamName)) {
+@@ -549,7 +579,7 @@ class SearchParams {
+      *
+      * @param values An object containing parameter key-value pairs to update
+      */
+-    update(values) {
++    update(values, navigation = {}) {
+         this.#initializeCacheFromURL();
+         if (!values || typeof values !== "object")
+             return;
+@@ -617,14 +647,14 @@ class SearchParams {
+             if (this.#options.updateURL && BROWSER && !building) {
+                 // Handle the compression mode if enabled
+                 if (this.#options.compress) {
+-                    this.#handleCompressedUpdate(validatedResult);
++                    this.#handleCompressedUpdate(validatedResult, navigation.pushHistory);
+                 }
+                 else {
+                     // Normal mode - update the URL
+                     // Start from the current local cache to preserve all params
+                     const urlParams = this.#updateParamsWithValidatedValues(this.#localCache, filteredValues, validatedResult, false // use URLSearchParams for URL updates
+                     );
+-                    this.#navigateWithParams(urlParams);
++                    this.#navigateWithParams(urlParams, navigation.pushHistory);
+                 }
+             }
+         }
+@@ -683,7 +713,7 @@ class SearchParams {
+             this.#localCache = new SvelteURLSearchParams();
+             // If updateURL is true, clear the URL
+             if (this.#options.updateURL && BROWSER && !building) {
+-                goto("?", { replaceState: true, noScroll: this.#options.noScroll });
++                this.#navigateWithParams(new URLSearchParams(), false);
+             }
+         }
+     }
+@@ -740,7 +770,7 @@ class SearchParams {
+      * Helper method to handle updates when compression is enabled
+      * @private
+      */
+-    #handleCompressedUpdate(fullParamsObject) {
++    #handleCompressedUpdate(fullParamsObject, pushHistory) {
+         try {
+             // Start with all values, then serialize only fields that need special handling
+             const serializedObject = { ...fullParamsObject };
+@@ -760,7 +790,7 @@ class SearchParams {
+             const compressedParamName = this.#options.compressedParamName || "_data";
+             newSearchParams.set(compressedParamName, compressed);
+             // Update URL
+-            this.#navigateWithParams(newSearchParams);
++            this.#navigateWithParams(newSearchParams, pushHistory);
+         }
+         catch (e) {
+             console.error("Error compressing data, falling back to normal mode", e);
+@@ -773,7 +803,7 @@ class SearchParams {
+                 const stringValue = this.#serializeValue(value, key);
+                 newSearchParams.set(key, stringValue);
+             }
+-            this.#navigateWithParams(newSearchParams);
++            this.#navigateWithParams(newSearchParams, pushHistory);
+         }
+     }
+     /**
+@@ -781,15 +811,24 @@ class SearchParams {
+      * Handles debouncing and history state
+      * @private
+      */
+-    #navigateWithParams(params) {
++    #navigateWithParams(params, pushHistory = this.#options.pushHistory) {
+         const navigateToNewUrl = () => {
+             if (!BROWSER)
+                 return;
+-            // When pushHistory is false, use replaceState to avoid creating a browser history entry
+-            const gotoOptions = !this.#options.pushHistory
+-                ? { replaceState: true, keepFocus: true }
+-                : { keepFocus: true };
+-            goto("?" + params.toString(), { ...gotoOptions, noScroll: this.#options.noScroll });
++            // Reset/compressed updates must preserve parameters owned elsewhere.
++            const next = new URLSearchParams(params);
++            const compressedKey = this.#options.compressedParamName || "_data";
++            // The cache may collapse repeated foreign keys. Restore them from
++            // the current URL, which also avoids stale values after navigation.
++            for (const key of new Set(next.keys())) {
++                if (!this.has(key) && !(this.#options.compress && key === compressedKey))
++                    next.delete(key);
++            }
++            for (const [key, value] of currentURL().searchParams) {
++                if (!this.has(key) && !(this.#options.compress && key === compressedKey))
++                    next.append(key, value);
++            }
++            void navigateSearchParams(next, pushHistory);
+         };
+         // If debounce is set, delay the URL update
+         if (this.#options.debounce && this.#options.debounce > 0) {
+@@ -838,6 +877,7 @@ class SearchParams {
+         }
+         // If not using compression, use the normal extraction with number and array field detection
+         return extractParamValues(searchParams, {
++            stringFields: this.#stringFields,
+             numberFields: this.#numberFields,
+             arrayFields: this.#arrayFields,
+             dateFields: this.#dateFields,
+@@ -1225,6 +1265,7 @@ export function validateSearchParams(url, schema, options = {}) {
+         // Normal (uncompressed) extraction - use selective extraction for fine-grained reactivity
+         const schemaInfo = extractSchemaInfo(schema);
+         const paramsObject = extractSelectiveParamValues(url.searchParams, schemaInfo.keys, {
++            stringFields: schemaInfo.stringFields,
+             numberFields: schemaInfo.numberFields,
+             dateFields: schemaInfo.dateFields,
+             codecFields: schemaInfo.codecFields,
+@@ -1375,7 +1416,8 @@ export function useSearchParams(schema, options = {}) {
+         // Remove incorrect params on initialization (only after hydration, only once)
+         if (!hasInitialized && options.updateURL !== false) {
+             const schemaInfo = extractSchemaInfo(schema);
+-            const currentParams = extractParamValues(page.url.searchParams, {
++            const currentParams = extractParamValues(currentURL().searchParams, {
++                stringFields: schemaInfo.stringFields,
+                 numberFields: schemaInfo.numberFields,
+                 dateFields: schemaInfo.dateFields,
+                 codecFields: schemaInfo.codecFields,
+@@ -1391,11 +1433,11 @@ export function useSearchParams(schema, options = {}) {
+                     .map((issue) => Array.isArray(issue.path) && issue.path.length > 0 ? issue.path[0] : null)
+                     .filter(Boolean);
+                 if (invalidKeys.length > 0) {
+-                    const newSearchParams = new URLSearchParams(page.url.searchParams.toString());
++                    const newSearchParams = new URLSearchParams(currentURL().searchParams.toString());
+                     for (const key of invalidKeys) {
+                         newSearchParams.delete(String(key));
+                     }
+-                    goto("?" + newSearchParams.toString(), { replaceState: true });
++                    void navigateSearchParams(newSearchParams);
+                 }
+             }
+         }
+@@ -1418,13 +1460,14 @@ export function useSearchParams(schema, options = {}) {
+                 }
+                 else {
+                     // For non-compressed mode, manually build the URL
+-                    const currentParams = extractParamValues(page.url.searchParams, {
++                    const currentParams = extractParamValues(currentURL().searchParams, {
++                        stringFields: schemaInfo.stringFields,
+                         numberFields: schemaInfo.numberFields,
+                         dateFields: schemaInfo.dateFields,
+                         codecFields: schemaInfo.codecFields,
+                         arrayFields: schemaInfo.arrayFields,
+                     });
+-                    const newSearchParams = new URLSearchParams(page.url.searchParams.toString());
++                    const newSearchParams = new URLSearchParams(currentURL().searchParams.toString());
+                     let needsUpdate = false;
+                     // For each default value, add it to the URL if not already present
+                     for (const [key, defaultValue] of Object.entries(schemaInfo.defaultValues)) {
+@@ -1443,7 +1486,7 @@ export function useSearchParams(schema, options = {}) {
+                     if (needsUpdate) {
+                         // Always use replaceState: true for initialization to avoid creating a new history entry
+                         // Don't use debouncing for initialization as this is a one-time operation
+-                        goto("?" + newSearchParams.toString(), { replaceState: true });
++                        void navigateSearchParams(newSearchParams);
+                     }
+                 }
+             }
+@@ -1455,8 +1498,8 @@ export function useSearchParams(schema, options = {}) {
+     $effect(() => {
+         if (!isMounted.current || building || options.updateURL === false)
+             return;
+-        // Access page.url.searchParams to create reactivity dependency
+-        const urlParams = page.url.searchParams;
++        // Read both shallow and loaded URLs so Back/Forward remains reactive.
++        const urlParams = currentURL().searchParams;
+         // Don't sync if this is during initial mount (before cache is even initialized)
+         if (!hasInitialized)
+             return;
+@@ -1498,8 +1541,8 @@ export function useSearchParams(schema, options = {}) {
+                 };
+             }
+             else if (prop === "update") {
+-                return function (values) {
+-                    return target.update(values);
++                return function (values, navigation) {
++                    return target.update(values, navigation);
+                 };
+             }
+             else if (prop === "cleanup") {

@@ -8,7 +8,8 @@ const money = (value: number) =>
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   }).format(value);
-const harnessName = (value: string) => ({ claude: 'Claude Code', codex: 'Codex', pi: 'Pi' })[value] ?? value;
+const harnessName = (value: string) =>
+  ({ claude: 'Claude Code', codex: 'Codex', pi: 'Pi', grok: 'Grok Build' })[value] ?? value;
 
 export const formatReport = (report: DashboardResponse) => {
   const row = (name: string, count: number, cost: number) =>

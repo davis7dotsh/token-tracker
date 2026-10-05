@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, and Pi. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit dashboard and CLI share typed Effect RPC contracts. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, and [Grok Build](https://github.com/xai-org/grok-build). Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit dashboard and CLI share typed Effect RPC contracts. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
 
 The running draft is [http://enceladus.otter-hawksbill.ts.net:8787](http://enceladus.otter-hawksbill.ts.net:8787), available on the same Tailscale network.
 
@@ -22,6 +22,8 @@ HOST=127.0.0.1 PORT=8787 bun run start
 
 The dashboard includes harness/model/provider/device/project filters, token and estimated-cost charts, session details, source diagnostics, and CSV export. The period selector switches between six months, 30 days, seven days, and today. Today shows hourly buckets in the browser's timezone, including daylight saving changes.
 
+Runed's `useSearchParams` keeps the period, filters, chart settings, breakdown, and session search/sort/page in the URL. Copying a link or reloading restores the view; browser back/forward restores earlier selections. Chart and table controls work locally without reloading usage data.
+
 The theme defaults to System, with persistent Light and Dark overrides. Initial loading, refreshes, empty results, and connection failures have separate states; existing results remain visible during refreshes.
 
 ## Local usage checks
@@ -31,6 +33,7 @@ bun run cli
 bun run cli check --range 7d
 bun run cli check --days 14 --project .
 bun run cli check --range all --harness codex,pi --model gpt-6.1-sol --json
+bun run cli check --harness grok
 bun run cli check --since 2026-09-01 --until 2026-10-01
 ```
 
@@ -41,6 +44,8 @@ bun run cli check --since 2026-09-01 --until 2026-10-01
 - `--project <path>` resolves repository identity, including worktrees. Harness/model filters accept comma-separated values. `--timezone` overrides the machine timezone for calendar grouping.
 
 Git origin remotes are normalized across SSH/HTTPS and credential differences. Clones and worktrees of the same repository combine across machines. Projects without a discoverable origin fall back to local directory paths.
+
+On macOS, optional Git metadata lookup skips Documents, Desktop, Downloads, and managed cloud storage, including links pointing into those locations. Background sync does not request access to historical project folders just to identify a repository. Usage still comes from the configured log directories; skipped repository lookups retain the recorded project path for grouping.
 
 ## Connect machines and sync
 
@@ -59,7 +64,7 @@ Alternatively pass `--pairing-secret <secret>`. `--name <name>` sets the device 
 - `connect` registers the device, enables a scheduled push every **five minutes**, and uploads all available history. Terminal report timeframes do not limit syncing.
 - Linux uses a user systemd timer; macOS uses a LaunchAgent. Scheduled native clients keep a durable executable copy independent of the npm cache. Configured log directories are preserved.
 - Later runs send only new or changed accounting records. Stable IDs and content fingerprints detect corrections and newly imported historical logs without relying on a timestamp watermark.
-- Checkpoints are written atomically after acknowledged batches. Failed uploads retry later; replaying an accepted batch does not increase totals. Archiving/removing local logs does not erase uploaded history.
+- Acknowledged batches append a small checkpoint journal; a successful changed sync compacts it into an atomic snapshot. Failed uploads retry later; replaying an accepted batch does not increase totals. Archiving/removing local logs does not erase uploaded history.
 - Each machine pushes independently. The server does not poll machines or require incoming connections to laptops.
 - Before collecting, sync downloads changed pricing rules and catalog rates from the hub into a validated local cache. Manual checks use that cache offline and remain read-only.
 - Uploads contain token/cost counters and session/project metadata, never prompts, responses, tool output, or provider credentials.
@@ -118,22 +123,31 @@ The dashboard runs as a separate Bun server. Native `serve` launches the package
 | Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present  | `CLAUDE_CONFIG_DIR`   |
 | Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl` | `CODEX_HOME`          |
 | Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                       | `PI_CODING_AGENT_DIR` |
+| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback       | `GROK_HOME`           |
 
 Overrides accept comma-separated roots. Malformed records are skipped with diagnostics; incomplete JSONL records are reread on later checks. Collection does not follow arbitrary nested directory symlinks.
+
+Grok Build's native CLI stores a compact accounting ledger for each session under its [session directory](https://docs.x.ai/build/features/sessions). `GROK_HOME` can point to the Grok home directory or directly to its `sessions` directory. The collector prefers `usage.json` per-turn/model counters and reads `summary.json` session metadata, with the parent directory's `.cwd` file as a fallback for long project paths. If the ledger is missing or invalid, it streams accounting updates from the session's legacy `updates.jsonl`, including history written by Grok Build 1.0.13. Only accounting and session metadata are cached or uploaded; conversation text is discarded.
+
+Scheduled sync and dashboard collection stream JSONL or read compact Grok accounting ledgers, caching only parsed accounting metadata. File identity, size, and nanosecond modification/change times invalidate changed files; each collection reapplies current pricing and resolves repository identity. Changed files are reparsed completely so late model metadata and corrected counters remain accurate. Manual checks read directly from source files and remain read-only.
 
 Accounting follows [ccusage](https://github.com/ccusage/ccusage) as an upstream reference; this app uses its own TypeScript collector rather than invoking the ccusage CLI. Total tokens are uncached input plus output plus cache reads plus cache writes. Reasoning is already part of output and is never added again.
 
 Claude streamed records and Codex response identities are deduplicated. Codex cached input is separated from total input; cumulative-only records use deltas, with compaction-aware baselines and per-response counters where available. Copied records can be deduplicated across devices while device filters preserve individual-machine views.
 
-Costs are **estimated API-equivalent costs**, calculated from a cached LiteLLM catalog and saved model rules, with the bundled snapshot in `src/lib/server/usage/pricing.json` as the initial fallback. They are not subscription charges or invoices. Supported cache TTL, service-tier, and context-length rates are accounted for. Unknown models or unavailable rates retain their tokens with cost reported as unpriced.
+Grok Build's input counters include cached tokens, so the collector separates cache reads/writes from uncached input before totaling usage. Reasoning is already included in output. A ledger row can represent several model calls; its request count preserves those calls rather than counting the row as a single request. Grok costs use complete positive native USD accounting by default. These aggregate rows do not expose each call's context size, so automatic catalog estimates are not applied. Explicit saved pricing rules can override native costs; resetting a rule restores the original reported cost without requiring another device sync. Without an explicit pricing rule, absent or partial native costs remain unpriced. Subscription sessions may omit native costs, which do not represent subscription charges.
+
+Inherited Grok fork turns retain their original session ownership and are counted once. Parent turns already include subagent usage, so child sessions are excluded; missing readable parent accounting produces a partial-source warning. Subagent totals can lag until the parent writes its next durable turn.
+
+Costs are **API-equivalent costs**, using native Grok accounting as described above and estimates from a cached LiteLLM catalog and saved model rules for other harnesses. The bundled snapshot in `src/lib/server/usage/pricing.json` is the initial catalog fallback. These costs are not subscription charges or invoices. Supported cache TTL, service-tier, and context-length rates are accounted for. Unknown models or unavailable costs retain their tokens with cost reported as unpriced.
 
 Open **Model pricing** beside the cost metric or in the footer. The small notification indicates models that need pricing in the selected view. The dialog shows original IDs and lets you:
 
 - Attach an ID to an existing model. Its usage, model filters, provider, sessions, and CSV then use the target model, including its catalog pricing rules.
 - Set a display nickname and custom input, output, cache-read, five-minute cache-write, and one-hour cache-write rates in USD per million tokens. Custom rates apply across service tiers and context sizes; blank cache rates stay unknown and explicit zero means free.
-- Mark a model free, edit saved rules, or reset to catalog pricing.
+- Mark a model free, edit saved rules, or reset to default pricing.
 
-The server stores rules and catalog data atomically in private `pricing-state.json` in its data directory. It checks for new catalog prices daily and retains the previous catalog and all rules if refreshing fails. **Refresh prices** requests an immediate update. Updated collectors preserve the original model ID, service tier, and cache duration so historical usage can be repriced consistently on the hub; older synchronized records without enough metadata keep their reported costs until their machine resyncs with the updated collector. Token totals are unaffected by pricing changes.
+The server stores rules and catalog data atomically in private `pricing-state.json` in its data directory. It checks for new catalog prices daily and retains the previous catalog and all rules if refreshing fails. **Refresh prices** requests an immediate update. Updated collectors preserve the original model ID, service tier, cache duration, and complete native Grok cost so historical usage can be repriced consistently on the hub; older synchronized records without enough metadata keep their reported costs until their machine resyncs with the updated collector. Token totals are unaffected by pricing changes.
 
 In this personal deployment, anyone who can access the dashboard through the tailnet can manage pricing. Browser writes require a same-origin request; direct RPC writes require the hub pairing secret. Hosted accounts will need owner roles before broader sharing.
 
@@ -162,6 +176,12 @@ tailscale serve status
 
 ## Verification and structure
 
+See [PERFORMANCE.md](PERFORMANCE.md) for the performance audit and measurements. To measure the running dashboard without changing its data:
+
+```sh
+bun run bench http://enceladus.otter-hawksbill.ts.net:8787
+```
+
 ```sh
 bun run lint          # Oxlint, including type-aware rules and TypeScript checks
 bun run format        # Oxfmt, including Svelte components
@@ -177,6 +197,8 @@ Zed uses the project settings in `.zed/settings.json` to format supported source
 `check` synchronizes SvelteKit types, runs `vp check` for formatting/linting/TypeScript diagnostics, then runs `svelte-check --tsgo` for component types, Svelte compiler diagnostics, and CSS. `bun run check:svelte` runs just the Svelte check; `bun run lint:fix` applies safe lint fixes. Lint correctness diagnostics and Svelte warnings fail checks.
 
 The toolchain is pinned to Vite+ 1.0.0 and the latest stable native TypeScript compiler verified during setup, 7.0.2, installed as `@typescript/native` via an npm alias. This is the released Go compiler previously published as `@typescript/native-preview`; its executable is now named `tsc`. TypeScript 6 remains installed for SvelteKit and Svelte Check's JavaScript tooling APIs. Vite+ bundles its own Go-based `oxlint-tsgolint` 7.0.2003 for type-aware linting. Formatting/lint settings live in `vite.config.ts`, with Svelte formatting enabled and generated builds, the pricing snapshot, and third-party license text excluded from formatting.
+
+Runed 0.37.1 is pinned with a Bun patch in `patches/` for SvelteKit 3's shallow URL/navigation APIs, matching server-rendered URL state, literal string parameters, and per-update history behavior. Recheck the patch when upgrading Runed or SvelteKit.
 
 Tests cover parser deduplication/compaction, cache and pricing accounting, filtering/timezone boundaries, authenticated RPC and atomic SQLite writes, retry-safe checkpoints, historical imports/corrections, and read-only CLI checks. Linux scheduled pushes have also been exercised with the compiled binary. macOS binaries cross-compile; LaunchAgent execution needs verification on an actual Mac.
 

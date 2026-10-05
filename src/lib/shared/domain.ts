@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
 
-export const Harness = Schema.Literals(['claude', 'codex', 'pi']);
+export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok']);
 export const UsageRange = Schema.Literals(['today', '7d', '30d', '6m', '90d', 'all']);
 const TokenCount = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
 const ApiCost = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
@@ -27,9 +27,11 @@ export const UsageEvent = Schema.Struct({
   cacheWriteTokens: TokenCount,
   reasoningTokens: TokenCount,
   costUsd: ApiCost,
+  reportedCostUsd: Schema.optionalKey(ApiCost),
   costKnown: Schema.Boolean,
   serviceTier: Schema.optionalKey(Schema.String),
   cacheWrite1hTokens: Schema.optionalKey(TokenCount),
+  requests: Schema.optionalKey(TokenCount),
   deviceId: Schema.optionalKey(Schema.String),
 });
 export type UsageEvent = typeof UsageEvent.Type;
@@ -80,6 +82,13 @@ export const Totals = Schema.Struct(totalFields);
 export type Totals = typeof Totals.Type;
 export const Breakdown = Schema.Struct({ name: Schema.String, ...totalFields });
 export type Breakdown = typeof Breakdown.Type;
+export const ChartSeries = Schema.Struct({
+  name: Schema.String,
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  unpricedTokens: Schema.optionalKey(Schema.Number),
+});
+export type ChartSeries = typeof ChartSeries.Type;
 export const Session = Schema.Struct({
   id: Schema.String,
   harness: Harness,
@@ -93,6 +102,14 @@ export const Session = Schema.Struct({
   ...totalFields,
 });
 export type Session = typeof Session.Type;
+const TokenCostPart = Schema.Struct({ costUSD: ApiCost, unavailableTokens: TokenCount });
+export const TokenCosts = Schema.Struct({
+  input: TokenCostPart,
+  output: TokenCostPart,
+  cacheRead: TokenCostPart,
+  cacheWrite: TokenCostPart,
+  unattributedCostUSD: ApiCost,
+});
 export const DashboardResponse = Schema.Struct({
   machine: Schema.String,
   generatedAt: Schema.String,
@@ -100,6 +117,7 @@ export const DashboardResponse = Schema.Struct({
   range: UsageRange,
   period: Schema.Struct({ start: Schema.String, end: Schema.String }),
   totals: Totals,
+  tokenCosts: Schema.optionalKey(TokenCosts),
   previous: Schema.NullOr(Totals),
   daily: Schema.Array(
     Schema.Struct({
@@ -107,6 +125,8 @@ export const DashboardResponse = Schema.Struct({
       tokens: Schema.Number,
       costUSD: Schema.Number,
       harnesses: Schema.Array(Breakdown),
+      providers: Schema.optionalKey(Schema.Array(ChartSeries)),
+      models: Schema.optionalKey(Schema.Array(ChartSeries)),
     }),
   ),
   hourly: Schema.Array(
@@ -116,6 +136,8 @@ export const DashboardResponse = Schema.Struct({
       tokens: Schema.Number,
       costUSD: Schema.Number,
       harnesses: Schema.Array(Breakdown),
+      providers: Schema.optionalKey(Schema.Array(ChartSeries)),
+      models: Schema.optionalKey(Schema.Array(ChartSeries)),
     }),
   ),
   harnesses: Schema.Array(Breakdown),

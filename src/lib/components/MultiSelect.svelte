@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
   import Icon from './Icon.svelte';
   let {
     label,
@@ -6,23 +7,37 @@
     value,
     onchange,
     names = {},
+    grouping,
+    colors,
   }: {
     label: string;
     options: readonly string[];
     value: readonly string[] | undefined;
     onchange: (next: readonly string[] | undefined) => void;
     names?: Record<string, string>;
+    grouping?: VisualGrouping;
+    colors?: ReadonlyMap<string, string>;
   } = $props();
   let open = $state(false);
   let search = $state('');
   let wrapper: HTMLDivElement;
   let trigger: HTMLButtonElement;
   const selected = $derived(value ?? options);
-  const visible = $derived(
-    options.filter((item) => (names[item] ?? item).toLowerCase().includes(search.toLowerCase())),
+  const selectedSet = $derived(new Set(selected));
+  const searchable = $derived(
+    options.map((item) => ({
+      item,
+      label: names[item] ?? item,
+      search: (names[item] ?? item).toLowerCase(),
+      color: colors?.get(item) ?? (grouping ? seriesColor(item, grouping) : undefined),
+    })),
   );
+  const visible = $derived.by(() => {
+    const normalized = search.toLowerCase();
+    return searchable.filter((entry) => entry.search.includes(normalized));
+  });
   function toggle(item: string) {
-    const next = selected.includes(item) ? selected.filter((entry) => entry !== item) : [...selected, item];
+    const next = selectedSet.has(item) ? selected.filter((entry) => entry !== item) : [...selected, item];
     onchange(next.length === options.length ? undefined : next);
   }
   function outside(event: PointerEvent) {
@@ -67,10 +82,11 @@
           /></label
         >{/if}
       <div class="filter-options">
-        {#each visible as item (item)}
+        {#each visible as entry (entry.item)}
           <label class="filter-option"
-            ><input type="checkbox" checked={selected.includes(item)} onchange={() => toggle(item)} /><span
-              >{names[item] ?? item}</span
+            ><input type="checkbox" checked={selectedSet.has(entry.item)} onchange={() => toggle(entry.item)} />
+            {#if entry.color}<i class="category-swatch" style:background={entry.color} aria-hidden="true"></i>{/if}<span
+              title={entry.label}>{entry.label}</span
             ></label
           >
         {:else}<p class="popover-empty">No matches</p>{/each}

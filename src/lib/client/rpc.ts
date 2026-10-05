@@ -1,5 +1,5 @@
 import { Cause, Context, Effect, Exit, Layer, ManagedRuntime, Option } from 'effect';
-import { FetchHttpClient } from 'effect/http';
+import { FetchHttpClient, HttpClient, HttpClientRequest } from 'effect/http';
 import { RpcClient, RpcSerialization } from 'effect/rpc';
 import { UsageRpc } from '../shared/rpc';
 import type { UsageQuery } from '../shared/domain';
@@ -14,9 +14,12 @@ export class UsageClient extends Context.Service<UsageClient>()('token-tracker/U
 export const rpcClientLayer = (url: string) =>
   Layer.effect(UsageClient, UsageClient.make).pipe(
     Layer.provide(
-      RpcClient.layerProtocolHttp({ url }).pipe(
-        Layer.provide(Layer.mergeAll(FetchHttpClient.layer, RpcSerialization.layerNdjson)),
-      ),
+      RpcClient.layerProtocolHttp({
+        url,
+        // RPC posts to an empty path. Preserve the endpoint exactly instead
+        // of inserting a trailing slash and paying for a SvelteKit redirect.
+        transformClient: (client) => HttpClient.mapRequest(client, HttpClientRequest.setUrl(url)),
+      }).pipe(Layer.provide(Layer.mergeAll(FetchHttpClient.layer, RpcSerialization.layerNdjson))),
     ),
   );
 

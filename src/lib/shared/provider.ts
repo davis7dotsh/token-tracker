@@ -1,0 +1,62 @@
+const namespaces: Record<string, string> = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  xai: 'xai',
+  'x-ai': 'xai',
+  google: 'google',
+  gemini: 'google',
+  google_genai: 'google',
+  vertex_ai: 'google',
+  'vertex-ai': 'google',
+  deepseek: 'deepseek',
+  qwen: 'alibaba',
+  alibaba: 'alibaba',
+  dashscope: 'alibaba',
+  mistral: 'mistral',
+  mistralai: 'mistral',
+  meta: 'meta',
+  'meta-llama': 'meta',
+  moonshot: 'moonshot',
+  moonshotai: 'moonshot',
+  zai: 'zai',
+  'z-ai': 'zai',
+  zhipu: 'zai',
+  cohere: 'cohere',
+  amazon: 'amazon',
+  aws: 'amazon',
+  bedrock: 'amazon',
+  bedrock_converse: 'amazon',
+  bedrock_mantle: 'amazon',
+  azure: 'azure',
+  azure_ai: 'azure',
+  openrouter: 'openrouter',
+  together: 'together',
+  together_ai: 'together',
+  groq: 'groq',
+  perplexity: 'perplexity',
+  nvidia: 'nvidia',
+  huggingface: 'huggingface',
+  fireworks: 'fireworks',
+  fireworks_ai: 'fireworks',
+};
+const families = [
+  ['openai', ['gpt-', 'chatgpt-', 'o1-', 'o3-', 'o4-', 'codex-mini-']],
+  ['anthropic', ['claude-']],
+  ['google', ['gemini-', 'gemma-']],
+  ['xai', ['grok-']],
+  ['deepseek', ['deepseek-']],
+  ['alibaba', ['qwen']],
+  ['mistral', ['mistral-', 'mixtral-', 'codestral-', 'magistral-', 'ministral-', 'devstral-']],
+  ['meta', ['llama-', 'llama2-', 'llama3-', 'llama4-']],
+  ['moonshot', ['kimi-', 'moonshot-']],
+  ['zai', ['glm-']],
+  ['cohere', ['command-r', 'command-a']],
+  ['amazon', ['amazon.nova-']],
+] as const;
+
+export const provider = (model: string) => {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.includes('/')) return namespaces[normalized.split('/')[0]] ?? 'unknown';
+  for (const [name, prefixes] of families) if (prefixes.some((prefix) => normalized.startsWith(prefix))) return name;
+  return ['o1', 'o3', 'o4'].includes(normalized) ? 'openai' : 'unknown';
+};

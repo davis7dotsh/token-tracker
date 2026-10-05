@@ -25,12 +25,25 @@ export const eventDigest = (event: UsageEvent) =>
         event.serviceTier,
         event.cacheWrite1hTokens,
         event.rawModel,
+        ...(event.requests === undefined && event.reportedCostUsd === undefined
+          ? []
+          : [{ requests: event.requests, reportedCostUsd: event.reportedCostUsd }]),
       ]),
     )
     .digest('hex');
 
+// Compute a changed record's digest once and reuse it for acknowledgement.
+export const changedRecords = (events: readonly UsageEvent[], checkpoint: Checkpoint) => {
+  const changed: { event: UsageEvent; digest: string }[] = [];
+  for (const event of events) {
+    const digest = eventDigest(event);
+    if (checkpoint.eventDigests[event.id] !== digest) changed.push({ event, digest });
+  }
+  return changed;
+};
+
 export const changedEvents = (events: readonly UsageEvent[], checkpoint: Checkpoint) =>
-  events.filter((event) => checkpoint.eventDigests[event.id] !== eventDigest(event));
+  changedRecords(events, checkpoint).map((record) => record.event);
 
 // Called only after an atomic server acknowledgement. Missing source files do
 // not erase uploaded history: moving/archiving local logs is common.
@@ -47,7 +60,6 @@ export const acknowledgeEvents = (
   },
 });
 
-export const batchesOf = <A>(values: readonly A[], limit = 500) =>
-  Array.from({ length: Math.ceil(values.length / limit) }, (_, index) =>
-    values.slice(index * limit, (index + 1) * limit),
-  );
+export function* batchesOf<A>(values: readonly A[], limit = 500) {
+  for (let offset = 0; offset < values.length; offset += limit) yield values.slice(offset, offset + limit);
+}

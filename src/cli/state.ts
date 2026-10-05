@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { Effect, FileSystem, Schema } from 'effect';
+import { ByteSize, Effect, FileSystem, Schema } from 'effect';
 
 export class CliFailure extends Schema.TaggedError<CliFailure>()('CliFailure', {
   message: Schema.String,
@@ -71,14 +71,63 @@ export const readCheckpoint = Effect.fn('cli.readCheckpoint')(function* (connect
     syncedAt: null,
     eventDigests: {},
   };
-  if (!(yield* fs.exists(path))) return empty;
-  const value = yield* parseJson(yield* fs.readFileString(path));
-  const checkpoint = yield* Schema.decodeUnknownEffect(Checkpoint)(value).pipe(
-    Effect.mapError(
-      () => new CliFailure({ message: 'Invalid sync checkpoint. Remove checkpoint.json to safely replay history.' }),
-    ),
-  );
-  return checkpoint.remote === connection.url && checkpoint.deviceId === connection.device.id ? checkpoint : empty;
+  let checkpoint = empty;
+  if (yield* fs.exists(path)) {
+    const value = yield* parseJson(yield* fs.readFileString(path));
+    const decoded = yield* Schema.decodeUnknownEffect(Checkpoint)(value).pipe(
+      Effect.mapError(
+        () => new CliFailure({ message: 'Invalid sync checkpoint. Remove checkpoint.json to safely replay history.' }),
+      ),
+    );
+    if (decoded.remote === connection.url && decoded.deviceId === connection.device.id) checkpoint = decoded;
+  }
+  const journalPath = join(configDirectory(), 'checkpoint-journal.jsonl');
+  if (!(yield* fs.exists(journalPath))) return checkpoint;
+  const journal = yield* fs.readFileString(journalPath);
+  // Each complete line is an acknowledged delta. A killed append may leave an
+  // incomplete final line, which is safe to retry because uploads are idempotent.
+  const lines = journal.split('\n');
+  for (let index = 0; index < lines.length - 1; index++) {
+    if (!lines[index].trim()) continue;
+    const decoded = yield* parseJson(lines[index]).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Checkpoint)),
+      Effect.catch(() => Effect.succeed(null)),
+    );
+    if (!decoded || decoded.remote !== connection.url || decoded.deviceId !== connection.device.id) continue;
+    Object.assign(checkpoint.eventDigests, decoded.eventDigests);
+    checkpoint = { ...checkpoint, syncedAt: decoded.syncedAt };
+  }
+  return checkpoint;
+});
+
+// Journal writes grow with the acknowledged batch, rather than with all
+// previously synced history. Snapshots remain compatible with older clients.
+export const appendCheckpoint = Effect.fn('cli.appendCheckpoint')(function* (delta: Checkpoint) {
+  const fs = yield* FileSystem.FileSystem;
+  const directory = configDirectory();
+  yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
+  yield* fs.writeFileString(join(directory, 'checkpoint-journal.jsonl'), `\n${JSON.stringify(delta)}\n`, {
+    flag: 'a',
+    mode: 0o600,
+  });
+});
+
+export const compactCheckpoint = Effect.fn('cli.compactCheckpoint')(function* (checkpoint: Checkpoint) {
+  const fs = yield* FileSystem.FileSystem;
+  yield* writePrivateJson('checkpoint.json', checkpoint);
+  // If interrupted between these operations, replaying the journal over the
+  // new snapshot is harmless. Never remove acknowledgements before the rename.
+  yield* fs.remove(join(configDirectory(), 'checkpoint-journal.jsonl'), { force: true });
+});
+
+export const compactCheckpointIfLarge = Effect.fn('cli.compactCheckpointIfLarge')(function* (checkpoint: Checkpoint) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = join(configDirectory(), 'checkpoint-journal.jsonl');
+  if (!(yield* fs.exists(path))) return;
+  const info = yield* fs.stat(path);
+  // Empty heartbeat runs usually append a tiny delta. Bound their journal too,
+  // so long-idle machines do not accumulate an ever-growing status read.
+  if (ByteSize.toBigInt(info.size) >= 1024n * 1024n) yield* compactCheckpoint(checkpoint);
 });
 
 // A lock prevents an interactive sync and the scheduled job from racing their
