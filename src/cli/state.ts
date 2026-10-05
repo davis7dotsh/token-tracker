@@ -22,6 +22,7 @@ export const Checkpoint = Schema.Struct({
   deviceId: Schema.String,
   syncedAt: Schema.NullOr(Schema.String),
   eventDigests: Schema.Record(Schema.String, Schema.String),
+  deletedIds: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type Checkpoint = typeof Checkpoint.Type;
 
@@ -84,6 +85,8 @@ export const readCheckpoint = Effect.fn('cli.readCheckpoint')(function* (connect
   const journalPath = join(configDirectory(), 'checkpoint-journal.jsonl');
   if (!(yield* fs.exists(journalPath))) return checkpoint;
   const journal = yield* fs.readFileString(journalPath);
+  const deletedIds = new Set(checkpoint.deletedIds ?? []);
+  const eventDigests = { ...checkpoint.eventDigests };
   // Each complete line is an acknowledged delta. A killed append may leave an
   // incomplete final line, which is safe to retry because uploads are idempotent.
   const lines = journal.split('\n');
@@ -94,10 +97,15 @@ export const readCheckpoint = Effect.fn('cli.readCheckpoint')(function* (connect
       Effect.catch(() => Effect.succeed(null)),
     );
     if (!decoded || decoded.remote !== connection.url || decoded.deviceId !== connection.device.id) continue;
-    Object.assign(checkpoint.eventDigests, decoded.eventDigests);
-    checkpoint = { ...checkpoint, syncedAt: decoded.syncedAt };
+    Object.assign(eventDigests, decoded.eventDigests);
+    for (const id of Object.keys(decoded.eventDigests)) deletedIds.delete(id);
+    for (const id of decoded.deletedIds ?? []) {
+      delete eventDigests[id];
+      deletedIds.add(id);
+    }
+    checkpoint = { ...checkpoint, eventDigests, syncedAt: decoded.syncedAt };
   }
-  return checkpoint;
+  return deletedIds.size || checkpoint.deletedIds ? { ...checkpoint, deletedIds: [...deletedIds] } : checkpoint;
 });
 
 // Journal writes grow with the acknowledged batch, rather than with all

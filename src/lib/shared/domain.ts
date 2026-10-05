@@ -51,6 +51,7 @@ export const UsageResult = Schema.Struct({
   sources: Schema.Array(SourceStatus),
   warnings: Schema.Array(Schema.String),
   pricingUpdatedAt: Schema.String,
+  retractedIds: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type UsageResult = typeof UsageResult.Type;
 

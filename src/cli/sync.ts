@@ -41,6 +41,7 @@ export const commitChangedBatches = <E, R, E2, R2, E3, R3>(
 ) =>
   Effect.gen(function* () {
     const digests = changed.length ? { ...checkpoint.eventDigests } : checkpoint.eventDigests;
+    const deletedIds = new Set(checkpoint.deletedIds ?? []);
     let current = checkpoint;
     let accepted = 0;
     let updated = 0;
@@ -56,12 +57,53 @@ export const commitChangedBatches = <E, R, E2, R2, E3, R3>(
       };
       yield* persistDelta(delta);
       Object.assign(digests, delta.eventDigests);
+      for (const record of records) deletedIds.delete(record.event.id);
       current = { ...checkpoint, eventDigests: digests, syncedAt: acknowledgement.receivedAt };
       accepted += acknowledgement.accepted;
       updated += acknowledgement.updated;
     }
+    if (checkpoint.deletedIds && changed.length) current = { ...current, deletedIds: [...deletedIds] };
     if (changed.length || checkpoint.syncedAt === null) yield* compact(current);
     return { checkpoint: current, accepted, updated };
+  });
+
+// Parser corrections prove inherited identities independently of checkpoints.
+// Keep acknowledged withdrawals so repeated scans are cheap, while checkpoint
+// loss still repairs the hub. Missing local logs never imply deletion.
+export const commitRetractedBatches = <E, R, E2, R2, E3, R3>(
+  checkpoint: Checkpoint,
+  retractedIds: readonly string[],
+  upload: (ids: readonly string[]) => Effect.Effect<SyncAck, E, R>,
+  persistDelta: (delta: Checkpoint) => Effect.Effect<void, E2, R2>,
+  compact: (checkpoint: Checkpoint) => Effect.Effect<void, E3, R3>,
+) =>
+  Effect.gen(function* () {
+    const withdrawn = new Set(checkpoint.deletedIds ?? []);
+    const ids = [...new Set(retractedIds)].filter((id) => !withdrawn.has(id));
+    if (!ids.length) return { checkpoint, deleted: 0 };
+    const digests = { ...checkpoint.eventDigests };
+    let current = checkpoint;
+    let deleted = 0;
+    for (const batch of batchesOf(ids)) {
+      const acknowledgement = yield* upload(batch);
+      yield* persistDelta({
+        version: 1,
+        remote: checkpoint.remote,
+        deviceId: checkpoint.deviceId,
+        syncedAt: acknowledgement.receivedAt,
+        eventDigests: {},
+        deletedIds: batch,
+      });
+      for (const id of batch) {
+        delete digests[id];
+        withdrawn.add(id);
+      }
+      current = { ...checkpoint, eventDigests: digests, syncedAt: acknowledgement.receivedAt };
+      deleted += acknowledgement.deleted;
+    }
+    current = { ...current, deletedIds: [...withdrawn] };
+    yield* compact(current);
+    return { checkpoint: current, deleted };
   });
 
 const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
@@ -110,12 +152,31 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
       appendCheckpoint,
       compactCheckpoint,
     );
-    if (!changed.length) yield* compactCheckpointIfLarge(result.checkpoint);
+    const retractions = yield* commitRetractedBatches(
+      result.checkpoint,
+      data.retractedIds ?? [],
+      (deletedIds) =>
+        client
+          .SyncUsage({
+            deviceId: connection.device.id,
+            token: connection.token,
+            batch: {
+              device: connection.device,
+              events: [],
+              deletedIds,
+            },
+          })
+          .pipe(Effect.timeout('30 seconds')),
+      appendCheckpoint,
+      compactCheckpoint,
+    );
+    if (!changed.length) yield* compactCheckpointIfLarge(retractions.checkpoint);
     return {
       changed: changed.length,
       accepted: result.accepted,
       updated: result.updated,
-      syncedAt: result.checkpoint.syncedAt,
+      deleted: retractions.deleted,
+      syncedAt: retractions.checkpoint.syncedAt,
     };
   }).pipe(
     Effect.timeout('10 minutes'),
@@ -129,7 +190,7 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
   );
   if (!quiet)
     yield* Console.log(
-      `Synced ${synchronized.changed.toLocaleString('en-US')} changed records (${synchronized.accepted} new, ${synchronized.updated} updated).`,
+      `Synced ${synchronized.changed.toLocaleString('en-US')} changed records (${synchronized.accepted} new, ${synchronized.updated} updated).${synchronized.deleted ? ` Removed ${synchronized.deleted.toLocaleString('en-US')} replayed records.` : ''}`,
     );
   return synchronized;
 });
