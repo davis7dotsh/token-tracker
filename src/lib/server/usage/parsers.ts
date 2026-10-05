@@ -9,6 +9,7 @@ type Candidate = {
   sidechain: boolean;
   cacheWrite1h: number;
   tier: string;
+  nativeMessageId?: string;
 };
 export type ParsedFile = {
   events: Candidate[];
@@ -17,6 +18,7 @@ export type ParsedFile = {
   parentId: string;
   forkedAt: string;
   compactionIds?: Set<string>;
+  retractedIds?: string[];
 };
 
 const isObject = (value: unknown): value is Metadata =>
@@ -163,14 +165,15 @@ export const claudeParser = (file: string) => {
         ? `claude:uuid:${text(record.uuid)}`
         : fallbackId('claude', session, stamp, record.ordinal, line);
     const tier = usage.speed === 'fast' ? 'priority' : text(usage.service_tier);
-    parsed.events.push(
-      candidate(
+    parsed.events.push({
+      ...candidate(
         event,
         tier,
         Math.min(event.cacheWriteTokens, number(cache.ephemeral_1h_input_tokens)),
         record.isSidechain === true,
       ),
-    );
+      ...(text(message.id) ? { nativeMessageId: text(message.id) } : {}),
+    });
     return true;
   });
 };
@@ -205,6 +208,23 @@ const tokenDelta = (current: Metadata, previous: Metadata | undefined) => {
   );
 };
 type CodexContext = { model: string; cwd: string; tier: string };
+const codexTaskStart = (payload: Metadata) => {
+  const started = timestamp(payload.started_at);
+  const turnId = text(payload.turn_id);
+  // UUIDv7 turn IDs retain their creation time even when older rollouts omit
+  // started_at and rewrite every copied record's outer timestamp on a fork.
+  const turnMillis = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(turnId)
+    ? Number.parseInt(turnId.slice(0, 8) + turnId.slice(9, 13), 16)
+    : undefined;
+  if (
+    turnMillis !== undefined &&
+    (!started || Math.floor(turnMillis / 1000) === Math.floor(Date.parse(started) / 1000))
+  )
+    return { millis: turnMillis, precision: 1 };
+  const precision =
+    hasNumber(payload.started_at) && Number.isInteger(payload.started_at) && payload.started_at <= 1e11 ? 1000 : 1;
+  return started ? { millis: Date.parse(started), precision } : undefined;
+};
 const codexEvent = (stamp: string, session: string, context: CodexContext, tokens: Metadata) => {
   const event = eventBase('codex', stamp, session, context.model, context.cwd);
   const input = number(tokens.input_tokens);
@@ -234,22 +254,28 @@ export const codexParser = (file: string) => {
     tokens: Metadata;
     threadTokens: Metadata | undefined;
   }[] = [];
-  const cumulative: Candidate[] = [];
   const snapshots: { entry: Candidate; line: number; tokens: Metadata; total: Metadata | undefined }[] = [];
   const compactionMarkers = new Map<string, number>();
   let firstMetadata = true;
   let historyStart: number | undefined;
+  let copiedAncestry = false;
+  let inheritedTask = false;
+  let nativeStartLine: number | undefined;
   const visit = (record: Metadata, line: number) => {
     const payload = object(record.payload);
     const type = text(record.type);
     if (type === 'session_meta') {
-      if (!firstMetadata) return true;
+      if (!firstMetadata) {
+        if (text(payload.id) === parsed.parentId) copiedAncestry = true;
+        return true;
+      }
       firstMetadata = false;
       historyStart = hasNumber(payload.subagent_history_start_ordinal)
         ? payload.subagent_history_start_ordinal
         : undefined;
       parsed.sessionId = text(payload.id) || text(payload.session_id) || parsed.sessionId;
-      parsed.parentId = text(payload.forked_from_id) || text(payload.parent_thread_id);
+      const spawn = object(object(object(payload.source).subagent).thread_spawn);
+      parsed.parentId = text(payload.forked_from_id) || text(payload.parent_thread_id) || text(spawn.parent_thread_id);
       parsed.forkedAt = timestamp(payload.timestamp) || timestamp(record.timestamp);
       context = {
         ...context,
@@ -273,6 +299,15 @@ export const codexParser = (file: string) => {
       return true;
     }
     if (type === 'event_msg') {
+      if (payload.type === 'task_started' && parsed.parentId && parsed.forkedAt && nativeStartLine === undefined) {
+        const start = codexTaskStart(payload);
+        if (start) {
+          const creation = Date.parse(parsed.forkedAt);
+          if (Math.floor(start.millis / start.precision) < Math.floor(creation / start.precision)) inheritedTask = true;
+          else nativeStartLine = line;
+        }
+        return true;
+      }
       if (payload.type === 'thread_settings_applied') {
         const tier = object(payload.thread_settings).service_tier;
         if (typeof tier === 'string') context = { ...context, tier: text(tier) };
@@ -297,7 +332,6 @@ export const codexParser = (file: string) => {
       if (tokenTotal(event)) {
         event.id = `codex:total:${hash(JSON.stringify([parsed.sessionId, stamp, event.inputTokens, event.outputTokens, event.cacheReadTokens, event.cacheWriteTokens, event.reasoningTokens]))}`;
         const entry = candidate(event, current.tier);
-        cumulative.push(entry);
         snapshots.push({
           entry,
           line,
@@ -338,13 +372,31 @@ export const codexParser = (file: string) => {
       (first, pending) => (pending.entry.event.timestamp < first ? pending.entry.event.timestamp : first),
       '\uffff',
     );
-    parsed.events = cumulative.filter((entry) => entry.event.timestamp < firstRecord);
+    const replayBoundary =
+      parsed.parentId && (copiedAncestry || inheritedTask)
+        ? (nativeStartLine ?? (inheritedTask ? Infinity : undefined))
+        : undefined;
+    // Outer timestamps belong to the fork write, not the copied API requests.
+    // Retain their terminal total as `previous` above, but remove their usage
+    // before the first native child task. Independent child requests still count.
+    parsed.events = snapshots.flatMap((snapshot) => {
+      if (snapshot.entry.event.timestamp >= firstRecord) return [];
+      if (replayBoundary !== undefined && snapshot.line < replayBoundary) {
+        (parsed.retractedIds ??= []).push(snapshot.entry.event.id);
+        return [];
+      }
+      return [snapshot.entry];
+    });
     parsed.compactionIds = new Set(
       precise.filter((pending) => compactionMarkers.has(pending.responseId)).map((pending) => pending.responseId),
     );
     for (const [index, pending] of precise.entries()) {
       const markerLine = compactionMarkers.get(pending.responseId);
       if (!pending.threadId && markerLine === undefined) continue;
+      if (!pending.threadId && replayBoundary !== undefined && pending.line < replayBoundary) {
+        (parsed.retractedIds ??= []).push(pending.entry.event.id);
+        continue;
+      }
       if (markerLine !== undefined) {
         // A local compaction's advancing snapshot can already include its
         // request. Match only the latest response between record and marker;
@@ -400,6 +452,11 @@ export const piParser = (file: string) => {
   return recordParser(parsed, (record, line) => {
     if (record.type === 'session') {
       parsed.sessionId = text(record.id) || parsed.sessionId;
+      // Pi creates a new header when it copies a branch, while preserving
+      // every inherited entry ID. Native filenames end in the source UUID.
+      const parent = text(record.parentSession);
+      parsed.parentId = parent ? fileSession(parent).split('_').at(-1) || '' : '';
+      parsed.forkedAt = parent ? timestamp(record.timestamp) : '';
       cwd = text(record.cwd);
       return true;
     }
@@ -436,6 +493,76 @@ export const parseClaude = (contents: string, file: string) => parseContents(con
 export const parseCodex = (contents: string, file: string) => parseContents(contents, codexParser(file));
 export const parsePi = (contents: string, file: string) => parseContents(contents, piParser(file));
 
+export const filterClaudeReplays = (files: ParsedFile[]) => {
+  const originals = new Map<string, Set<string>>();
+  const replayKey = (entry: Candidate) => JSON.stringify([entry.nativeMessageId, entry.event.sessionId]);
+  for (const file of files)
+    for (const entry of file.events) {
+      if (entry.event.harness !== 'claude' || entry.sidechain || !entry.nativeMessageId) continue;
+      const key = replayKey(entry);
+      const identities = originals.get(key);
+      if (identities) identities.add(entry.event.id);
+      else originals.set(key, new Set([entry.event.id]));
+    }
+  for (const file of files) {
+    const retracted = new Set(file.retractedIds);
+    file.events = file.events.filter((entry) => {
+      if (entry.event.harness !== 'claude' || !entry.sidechain || !entry.nativeMessageId) return true;
+      const identities = originals.get(replayKey(entry));
+      // /btw can replay a parent message with a new request ID and inflated
+      // cache counts. The original request is authoritative. Keep unmatched
+      // child requests and ambiguous gateway IDs rather than guessing.
+      if (!identities || identities.size !== 1) return true;
+      if (!identities.has(entry.event.id)) retracted.add(entry.event.id);
+      return false;
+    });
+    if (retracted.size) file.retractedIds = [...retracted];
+  }
+};
+
+export const filterPiReplays = (files: ParsedFile[]) => {
+  const sessions = files.filter((file) => file.events.some(({ event }) => event.harness === 'pi'));
+  const parents = new Map(sessions.map((file) => [file.sessionId, file]));
+  const nativeEntries = new Map(
+    sessions.map((file) => [
+      file.sessionId,
+      new Set(
+        file.events.map(({ event }) => [event.id.slice(`pi:${file.sessionId}:`.length), event.timestamp].join(':')),
+      ),
+    ]),
+  );
+  for (const file of sessions) {
+    if (!file.parentId || file.parentId === file.sessionId) continue;
+    for (const entry of file.events) {
+      const { event } = entry;
+      const prefix = `pi:${file.sessionId}:`;
+      // Derived transcripts without native entry IDs cannot prove lineage.
+      if (!event.id.startsWith(prefix)) continue;
+      const nativeId = event.id.slice(prefix.length);
+      const oldId = event.id;
+      let owner = file;
+      const visited = new Set<string>([file.sessionId]);
+      while (owner.parentId && !visited.has(owner.parentId)) {
+        const parent = parents.get(owner.parentId);
+        const inherited = nativeEntries.get(owner.parentId)?.has(`${nativeId}:${event.timestamp}`);
+        const beforeCopy = owner.forkedAt && event.timestamp < owner.forkedAt;
+        if (!inherited && !beforeCopy) break;
+        event.sessionId = owner.parentId;
+        event.id = `pi:${event.sessionId}:${nativeId}`;
+        visited.add(owner.parentId);
+        if (!parent) break;
+        owner = parent;
+      }
+      if (event.id !== oldId) {
+        (file.retractedIds ??= []).push(oldId);
+        // The source row wins over an inherited snapshot after a downward
+        // correction, even when the stale copy reports more tokens.
+        entry.sidechain = true;
+      }
+    }
+  }
+};
+
 export const filterCodexReplays = (files: ParsedFile[]) => {
   const parents = new Map(
     files.filter((file) => file.events[0]?.event.harness === 'codex').map((file) => [file.sessionId, file]),
@@ -451,6 +578,7 @@ export const filterCodexReplays = (files: ParsedFile[]) => {
     ]);
   const parentReplays = new Map<ParsedFile, Set<string>>();
   for (const child of files) {
+    if (child.events[0]?.event.harness !== 'codex') continue;
     if (!child.parentId || child.parentId === child.sessionId) continue;
     const parent = parents.get(child.parentId);
     child.events = child.events.filter((replay) => {
@@ -476,7 +604,9 @@ export const filterCodexReplays = (files: ParsedFile[]) => {
 };
 
 export const deduplicate = (files: ParsedFile[]) => {
+  filterClaudeReplays(files);
   filterCodexReplays(files);
+  filterPiReplays(files);
   const entries = new Map<string, Candidate>();
   for (const file of files)
     for (const incoming of file.events) {

@@ -193,7 +193,14 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   files.push(...grok.files);
   warnings.push(...grok.warnings);
   if (cacheDirectory) yield* pruneParsedCache(cacheDirectory, retainedCacheFiles);
+  const candidateIds = new Set(files.flatMap((file) => file.events.map((entry) => entry.event.id)));
   const entries = deduplicate(files);
+  const retainedIds = new Set(entries.map((entry) => entry.event.id));
+  // Withdraw only identities proved to be replayed or replaced. Missing source
+  // files remain uploaded history, including archived logs removed locally.
+  const retractedIds = [...new Set([...candidateIds, ...files.flatMap((file) => file.retractedIds ?? [])])].filter(
+    (id) => !retainedIds.has(id),
+  );
   const repositories = new Map<string, string | null>();
   const resolveRepository = makeRepositoryResolver();
   for (const entry of entries) {
@@ -237,5 +244,6 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     sources,
     warnings,
     pricingUpdatedAt: `${pricingPolicy.catalog.updatedAt} (${pricingPolicy.revision})`,
+    ...(retractedIds.length ? { retractedIds } : {}),
   } satisfies UsageResult;
 });

@@ -64,7 +64,9 @@ Alternatively pass `--pairing-secret <secret>`. `--name <name>` sets the device 
 - `connect` registers the device, enables a scheduled push every **five minutes**, and uploads all available history. Terminal report timeframes do not limit syncing.
 - Linux uses a user systemd timer; macOS uses a LaunchAgent. Scheduled native clients keep a durable executable copy independent of the npm cache. Configured log directories are preserved.
 - Later runs send only new or changed accounting records. Stable IDs and content fingerprints detect corrections and newly imported historical logs without relying on a timestamp watermark.
+- Genuine subagent calls count once. Inherited Codex counters, Claude sidechain message replays, and Pi fork entries retain their original ownership instead of adding usage again. Codex fork accounting uses native task creation metadata because copied records can have rewritten timestamps.
 - Acknowledged batches append a small checkpoint journal; a successful changed sync compacts it into an atomic snapshot. Failed uploads retry later; replaying an accepted batch does not increase totals. Archiving/removing local logs does not erase uploaded history.
+- When source metadata proves a previously uploaded record was copied history, sync withdraws that identity after uploading its replacement. Withdrawals have durable acknowledgements and safe retries, including after an upload checkpoint is reset. Missing files alone never trigger withdrawals.
 - Each machine pushes independently. The server does not poll machines or require incoming connections to laptops.
 - Before collecting, sync downloads changed pricing rules and catalog rates from the hub into a validated local cache. Manual checks use that cache offline and remain read-only.
 - Uploads contain token/cost counters and session/project metadata, never prompts, responses, tool output, or provider credentials.

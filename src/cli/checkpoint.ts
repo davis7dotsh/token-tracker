@@ -58,6 +58,9 @@ export const acknowledgeEvents = (
     ...checkpoint.eventDigests,
     ...Object.fromEntries(events.map((event) => [event.id, eventDigest(event)])),
   },
+  ...(checkpoint.deletedIds
+    ? { deletedIds: checkpoint.deletedIds.filter((id) => !events.some((event) => event.id === id)) }
+    : {}),
 });
 
 export function* batchesOf<A>(values: readonly A[], limit = 500) {

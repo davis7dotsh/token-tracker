@@ -9,7 +9,7 @@ import type { ParsedFile } from './parsers';
 // Its format is separate from pricing: every collection reapplies current rates
 // and aliases, even when the source file itself has not changed.
 const CachedFile = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literal(2),
   signature: Schema.String,
   file: Schema.Struct({
     events: Schema.Array(
@@ -19,6 +19,7 @@ const CachedFile = Schema.Struct({
         sidechain: Schema.Boolean,
         cacheWrite1h: Schema.Number,
         tier: Schema.String,
+        nativeMessageId: Schema.optionalKey(Schema.String),
       }),
     ),
     malformed: Schema.Number,
@@ -26,6 +27,7 @@ const CachedFile = Schema.Struct({
     parentId: Schema.String,
     forkedAt: Schema.String,
     compactionIds: Schema.Array(Schema.String),
+    retractedIds: Schema.Array(Schema.String),
   }),
 });
 const decodeCache = Schema.decodeUnknownSync(CachedFile);
@@ -75,6 +77,7 @@ export const readParsedCache = Effect.fn('usage.readParsedCache')(function* (des
     parentId: cached.parentId,
     forkedAt: cached.forkedAt,
     compactionIds: new Set(cached.compactionIds),
+    retractedIds: [...cached.retractedIds],
   } satisfies ParsedFile;
 });
 
@@ -85,7 +88,11 @@ export const writeParsedCache = Effect.fn('usage.writeParsedCache')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const temporary = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const value = { version: 1, signature, file: { ...file, compactionIds: [...(file.compactionIds ?? [])] } };
+  const value = {
+    version: 2,
+    signature,
+    file: { ...file, compactionIds: [...(file.compactionIds ?? [])], retractedIds: file.retractedIds ?? [] },
+  };
   yield* fs.writeFileString(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' }).pipe(
     Effect.andThen(fs.rename(temporary, destination)),
     Effect.ensuring(fs.remove(temporary, { force: true }).pipe(Effect.catch(() => Effect.void))),
