@@ -1,6 +1,6 @@
 import { makeDashboardClient } from '../src/lib/client/rpc';
 
-const base = process.argv[2] ?? 'http://enceladus.otter-hawksbill.ts.net:8787';
+const base = process.argv[2] ?? 'https://nexus.otter-hawksbill.ts.net:10007';
 const client = makeDashboardClient(new URL('/rpc', base).href, { requestTimeoutMs: 60_000 });
 const query = { range: '30d' as const, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
 

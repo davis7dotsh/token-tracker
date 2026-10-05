@@ -1,0 +1,20 @@
+[Unit]
+Description=Token tracker dashboard
+After=network.target
+
+[Service]
+WorkingDirectory=/home/davis/services/token-tracker
+ExecStart=/home/davis/.vite-plus/package_manager/bun/1.4.2/bun/bin/bun.native /home/davis/services/token-tracker/build/index.js
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+Environment=ORIGIN=https://nexus.otter-hawksbill.ts.net:10007
+Environment=TOKEN_TRACKER_DATA_DIR=/home/davis/.local/share/token-tracker
+Environment=TOKEN_TRACKER_CONFIG_DIR=/home/davis/.config/token-tracker
+Environment=TOKEN_TRACKER_DOWNLOAD_DIR=/home/davis/services/token-tracker/artifacts/downloads
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

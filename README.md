@@ -2,7 +2,7 @@
 
 A TypeScript usage tracker for Claude Code, Codex, Pi, and [Grok Build](https://github.com/xai-org/grok-build). Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit dashboard and CLI share typed Effect RPC contracts. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
 
-The running draft is [http://enceladus.otter-hawksbill.ts.net:8787](http://enceladus.otter-hawksbill.ts.net:8787), available on the same Tailscale network.
+The dashboard runs on Nexus at [https://nexus.otter-hawksbill.ts.net:10007](https://nexus.otter-hawksbill.ts.net:10007), available on the same Tailscale network.
 
 ## Setup
 
@@ -55,7 +55,7 @@ Use that secret on the client machine:
 
 ```sh
 export TOKEN_TRACKER_PAIRING_SECRET='the-secret-from-your-dashboard-machine'
-bun run cli connect http://enceladus.otter-hawksbill.ts.net:8787
+bun run cli connect https://nexus.otter-hawksbill.ts.net:10007
 unset TOKEN_TRACKER_PAIRING_SECRET
 ```
 
@@ -101,11 +101,11 @@ The npm `token-tracker` executable selects its bundled platform binary. This dra
 npx --yes --package ./davis7-token-tracker-0.4.0.tgz token-tracker check --range 7d
 ```
 
-The preview also hosts the package for a quick check from another machine on the tailnet:
+The dashboard also hosts the package for a quick check from another machine on the tailnet:
 
 ```sh
-bunx --package http://enceladus.otter-hawksbill.ts.net:8787/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
-npx --yes --allow-remote=root --package http://enceladus.otter-hawksbill.ts.net:8787/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+bunx --package https://nexus.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+npx --yes --allow-remote=root --package https://nexus.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
 ```
 
 The `--allow-remote=root` option permits this URL package on npm 12.
@@ -159,27 +159,44 @@ bun run update:pricing
 
 ## Tailscale access
 
-The deployed preview listens on `100.89.249.69:8787` through a persistent user service and is accessible at [http://enceladus.otter-hawksbill.ts.net:8787](http://enceladus.otter-hawksbill.ts.net:8787).
+Nexus runs the dashboard from `/home/davis/services/token-tracker` through the persistent `token-tracker.service` user service. Bun listens on `127.0.0.1:8787`; Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves Nexus's other HTTPS services untouched.
 
-Serve another machine directly on its tailnet address:
+The checked-in [Nexus systemd unit](deploy/nexus/token-tracker.service) pins the managed Bun runtime and private data/configuration directories. After preparing the build and migrating the hub state, install it on Nexus:
 
 ```sh
-HOST="$(tailscale ip -4)" PORT=8787 bun run start
+mkdir -p ~/.config/systemd/user
+install -m 600 deploy/nexus/token-tracker.service ~/.config/systemd/user/token-tracker.service
+systemctl --user daemon-reload
+systemctl --user enable --now token-tracker.service
 ```
 
-Or keep the dashboard on localhost and configure Tailscale Serve for HTTPS:
+The production environment must set the public origin so browser pricing edits pass the same-origin check:
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:8787
+HOST=127.0.0.1 PORT=8787 ORIGIN=https://nexus.otter-hawksbill.ts.net:10007 bun run start
+```
+
+Configure the persistent HTTPS proxy and verify the dashboard:
+
+```sh
+tailscale serve --bg --https=10007 http://127.0.0.1:8787
 tailscale serve status
+systemctl --user status token-tracker.service
+curl -fsS https://nexus.otter-hawksbill.ts.net:10007/api/health
 ```
+
+The hub's durable state is `usage.sqlite`, `pairing-secret`, and `pricing-state.json` in `${XDG_DATA_HOME:-~/.local/share}/token-tracker`, or `TOKEN_TRACKER_DATA_DIR` when configured. Keep an immutable migration backup separate from the live data directory. Stop the old hub before taking the final SQLite backup so no acknowledged uploads arrive after the snapshot; use SQLite's backup API or copy only after the database has closed, accounting for any WAL files.
+
+When moving an existing hub, migrate its database, pairing secret, and pricing state together. Each client retains its own `device-id`, connection token, and checkpoint digests. Pause scheduled and interactive sync before atomically changing `connection.json.url`, `checkpoint.json.remote`, and matching `checkpoint-journal.jsonl` entries to the new canonical URL, then resume the existing schedule. Changing only the connection URL safely replays available history but loses incremental checkpoint matching; reconnecting also rotates that client's token.
+
+Keep Nexus's existing device identity distinct from Enceladus's; do not copy the old host's client configuration onto Nexus. The dashboard collects its host's own logs directly and excludes that same device's stored rows. Verify those logs cover its stored history before changing hosts. Enceladus continues as a scheduled client so its local usage remains visible on Nexus, alongside the other devices.
 
 ## Verification and structure
 
 See [PERFORMANCE.md](PERFORMANCE.md) for the performance audit and measurements. To measure the running dashboard without changing its data:
 
 ```sh
-bun run bench http://enceladus.otter-hawksbill.ts.net:8787
+bun run bench https://nexus.otter-hawksbill.ts.net:10007
 ```
 
 ```sh
