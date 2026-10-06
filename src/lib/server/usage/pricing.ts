@@ -263,5 +263,13 @@ export const repriceEvent = (event: UsageEvent, policy: PricingPolicy): UsageEve
     : hasPricingMetadata(event, resolved) || resolved?.kind === 'free'
       ? estimateResolvedCost(event, event.cacheWrite1hTokens ?? 0, event.serviceTier ?? '', resolved)
       : retainedCost(event);
+  // Unchanged immutable records can be shared across dashboard snapshots.
+  if (
+    event.rawModel === rawModel &&
+    event.model === model &&
+    event.costUsd === cost.costUsd &&
+    event.costKnown === cost.costKnown
+  )
+    return event;
   return { ...event, rawModel, model, ...cost };
 };
