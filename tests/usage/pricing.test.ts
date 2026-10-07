@@ -60,6 +60,57 @@ const policy = (rules: readonly (typeof PricingRule.Type)[]): PricingPolicy => (
   revision: 'test-rules',
 });
 
+test('unchanged catalog, unknown, native ledger, and legacy prices preserve immutable record identity', () => {
+  const catalog = event({ model: 'gpt-6.1-sol', rawModel: 'gpt-6.1-sol' });
+  const { serviceTier: _tier, cacheWrite1hTokens: _duration, ...legacy } = catalog;
+  const records = [
+    { ...catalog, ...estimateCost(catalog) },
+    event({ rawModel: 'quasar-alpha' }),
+    event({
+      harness: 'grok',
+      model: 'grok-4.7-build-fast',
+      rawModel: 'grok-4.7-build-fast',
+      reportedCostUsd: 0.02673624,
+      costUsd: 0.02673624,
+      costKnown: true,
+    }),
+    { ...legacy, costUsd: 9, costKnown: true },
+  ];
+  for (const record of records) {
+    const snapshot = Object.freeze(record);
+    expect(repriceEvent(snapshot, bundledPolicy)).toBe(snapshot);
+  }
+});
+
+test('pricing changes replace snapshots while preserving original usage and raw model identity', () => {
+  const snapshot = Object.freeze(event({ rawModel: 'quasar-alpha' }));
+  const free = repriceEvent(snapshot, policy([{ model: 'quasar-alpha', kind: 'free' }]));
+  expect(free).not.toBe(snapshot);
+  expect(free).toMatchObject({ costUsd: 0, costKnown: true });
+  const rates = policy([
+    {
+      model: 'quasar-alpha',
+      kind: 'rates',
+      rates: { inputPerMillion: 2, outputPerMillion: 8, cacheReadPerMillion: 0.2 },
+    },
+  ]);
+  const priced = repriceEvent(snapshot, rates);
+  expect(priced).not.toBe(snapshot);
+  expect(priced).toMatchObject({ model: 'quasar-alpha', rawModel: 'quasar-alpha', costKnown: true });
+  expect(priced.costUsd).toBeCloseTo(0.032, 12);
+  expect(repriceEvent(Object.freeze(priced), rates)).toBe(priced);
+
+  const alias = policy([{ model: 'quasar-alpha', kind: 'alias', target: 'gpt-6.1-sol' }]);
+  const renamed = repriceEvent(priced, alias);
+  expect(renamed).not.toBe(priced);
+  expect(renamed).toMatchObject({ model: 'gpt-6.1-sol', rawModel: 'quasar-alpha', costKnown: true });
+  const unpriced = repriceEvent(renamed, bundledPolicy);
+  expect(unpriced).not.toBe(renamed);
+  expect(unpriced).toEqual(snapshot);
+  expect(snapshot).toMatchObject({ model: 'quasar-alpha', rawModel: 'quasar-alpha', costKnown: false, costUsd: 0 });
+  expect(priced.model).toBe('quasar-alpha');
+});
+
 test('a confirmed alias uses canonical display/grouping and inherits context/tier pricing without losing raw identity', () => {
   const pricing = policy([{ model: 'quasar-alpha', kind: 'alias', target: 'gpt-6.1-sol' }]);
   const raw = event({ inputTokens: 200_000, cacheReadTokens: 100_000, outputTokens: 100, serviceTier: 'priority' });
