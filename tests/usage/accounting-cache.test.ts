@@ -18,13 +18,25 @@ test('cold, warm, and obsolete caches agree on canonical requests and replay wit
     timestamp: '2026-10-01T10:00:00Z',
     requestId,
     isSidechain,
-    message: { id: 'native-message', model: 'claude-sonnet-4-6', usage: { input_tokens: input, output_tokens: 10 } },
+    message: {
+      id: 'native-message',
+      model: 'claude-sonnet-4-6',
+      usage: {
+        input_tokens: input,
+        output_tokens: 10,
+        iterations: [{ type: 'advisor_message', model: 'claude-opus-4-6', input_tokens: input, output_tokens: 5 }],
+      },
+    },
   });
   const native = {
     type: 'message',
     id: 'native-entry',
     timestamp: '2026-10-01T10:00:00Z',
-    message: { role: 'assistant', model: 'gpt-6-astra', usage: { input: 100, output: 10 } },
+    message: {
+      role: 'assistant',
+      model: 'gpt-6-astra',
+      usage: { input: 100, output: 10, cacheWrite: 20, cacheWrite1h: 12 },
+    },
   };
   try {
     await mkdir(claude, { recursive: true });
@@ -56,20 +68,26 @@ test('cold, warm, and obsolete caches agree on canonical requests and replay wit
     const cold = await collect();
     const warm = await collect();
     expect(warm).toEqual(cold);
-    expect(cold.events).toHaveLength(3);
-    expect(cold.retractedIds?.sort()).toEqual(['claude:message:native-message:replayed', 'pi:child:native-entry']);
+    expect(cold.events).toHaveLength(4);
+    expect(cold.events.find((event) => event.model === 'claude-opus-4-6')?.inputTokens).toBe(100);
+    expect(
+      cold.events.filter((event) => event.harness === 'pi').every((event) => event.cacheWrite1hTokens === 12),
+    ).toBe(true);
+    expect(cold.retractedIds).toContain('claude:message:native-message:replayed');
+    expect(cold.retractedIds).toContain('pi:child:native-entry');
+    expect(cold.retractedIds?.filter((id) => id.startsWith('claude:advisor:'))).toHaveLength(1);
     const caches = await readdir(cacheDirectory);
     expect(caches).toHaveLength(4);
     for (const name of caches) {
       const file = join(cacheDirectory, name);
       const value = JSON.parse(await readFile(file, 'utf8'));
-      value.version = 1;
+      value.version = 2;
       // An old cache contains stale metadata and must cause a source reparse.
       value.file.events = [];
       await writeFile(file, JSON.stringify(value));
     }
     expect(await collect()).toEqual(cold);
-    for (const name of caches) expect(JSON.parse(await readFile(join(cacheDirectory, name), 'utf8')).version).toBe(2);
+    for (const name of caches) expect(JSON.parse(await readFile(join(cacheDirectory, name), 'utf8')).version).toBe(3);
     await rm(join(home, '.claude'), { recursive: true });
     await rm(join(home, '.pi'), { recursive: true });
     const missing = await collect();

@@ -9,7 +9,7 @@ import type { ParsedFile } from './parsers';
 // Its format is separate from pricing: every collection reapplies current rates
 // and aliases, even when the source file itself has not changed.
 const CachedFile = Schema.Struct({
-  version: Schema.Literal(2),
+  version: Schema.Literal(3),
   signature: Schema.String,
   file: Schema.Struct({
     events: Schema.Array(
@@ -89,7 +89,7 @@ export const writeParsedCache = Effect.fn('usage.writeParsedCache')(function* (
   const fs = yield* FileSystem.FileSystem;
   const temporary = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const value = {
-    version: 2,
+    version: 3,
     signature,
     file: { ...file, compactionIds: [...(file.compactionIds ?? [])], retractedIds: file.retractedIds ?? [] },
   };

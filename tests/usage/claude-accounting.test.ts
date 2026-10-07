@@ -19,6 +19,45 @@ const record = (
     },
   });
 const parsed = (...records: string[]) => parseClaude(`${records.join('\n')}\n`, 'session.jsonl');
+const advisorRecord = (
+  messageId: string,
+  requestId: string,
+  { sidechain = false, mainOutput = 2, advisorOutput = 4, mainInput = 2, mainCache = 20 } = {},
+) =>
+  JSON.stringify({
+    type: 'assistant',
+    timestamp: '2026-10-01T08:00:00Z',
+    sessionId: 'session',
+    requestId,
+    isSidechain: sidechain,
+    cwd: '/work/project',
+    message: {
+      id: messageId,
+      model: 'claude-fable-5-1',
+      usage: {
+        input_tokens: mainInput,
+        output_tokens: mainOutput,
+        cache_read_input_tokens: mainCache,
+        speed: 'fast',
+        iterations: [
+          { type: 'message', model: null, input_tokens: mainInput, output_tokens: mainOutput },
+          {
+            type: 'advisor_message',
+            model: 'claude-advisor',
+            input_tokens: 10,
+            output_tokens: advisorOutput,
+            cache_read_input_tokens: 30,
+            cache_creation_input_tokens: 8,
+            cache_creation: { ephemeral_1h_input_tokens: 3, ephemeral_5m_input_tokens: 5 },
+            output_tokens_details: { thinking_tokens: 99 },
+          },
+          { type: 'advisor_message', model: null, input_tokens: 50_000 },
+          { type: 'advisor_message', model: '', input_tokens: 50_000 },
+          { type: 'message', model: 'claude-advisor', input_tokens: 50_000 },
+        ],
+      },
+    },
+  });
 
 describe('Claude request accounting', () => {
   test.each([false, true])(
@@ -93,6 +132,32 @@ describe('Claude request accounting', () => {
     expect(file.retractedIds).toBeUndefined();
   });
 
+  test('requestless native response fragments with distinct timestamps and transcript UUIDs bill once', () => {
+    const first = {
+      type: 'assistant',
+      timestamp: '2026-10-01T08:00:00.000Z',
+      sessionId: 'session',
+      uuid: 'fragment-first',
+      parentUuid: 'earlier-transcript-entry',
+      message: {
+        id: 'msg_01NativeResponse',
+        model: 'claude-fable-5-1',
+        usage: { input_tokens: 2, output_tokens: 87, cache_read_input_tokens: 25_080 },
+        stop_reason: 'tool_use',
+      },
+    };
+    const second = {
+      ...first,
+      timestamp: '2026-10-01T08:00:00.018Z',
+      uuid: 'fragment-second',
+      parentUuid: first.uuid,
+    };
+    const entries = deduplicate([parsed(JSON.stringify(first), JSON.stringify(second))]);
+    expect(entries).toHaveLength(1);
+    expect(tokenTotal(entries[0].event)).toBe(25_169);
+    expect(entries[0].event.id).toBe('claude:message:msg_01NativeResponse:');
+  });
+
   test('repeated collection preserves canonical usage and the replay withdrawal', () => {
     const file = parsed(
       record('parent', 'request-parent'),
@@ -103,5 +168,75 @@ describe('Claude request accounting', () => {
     expect(second).toEqual(first);
     expect(second.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(32);
     expect(file.retractedIds).toEqual(['claude:message:parent:request-replay']);
+  });
+
+  test('advisor usage is additional, model-specific accounting while ordinary iterations remain included once', () => {
+    const entries = deduplicate([parsed(advisorRecord('parent', 'request-parent'))]);
+    expect(entries).toHaveLength(2);
+    expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(76);
+    expect(entries.find((entry) => entry.event.model === 'claude-fable-5-1')?.event.id).toBe(
+      'claude:message:parent:request-parent',
+    );
+    expect(entries.find((entry) => entry.event.model === 'claude-advisor')).toMatchObject({
+      event: {
+        sessionId: 'session',
+        project: '/work/project',
+        inputTokens: 10,
+        outputTokens: 4,
+        cacheReadTokens: 30,
+        cacheWriteTokens: 8,
+        reasoningTokens: 4,
+      },
+      cacheWrite1h: 3,
+      tier: 'priority',
+    });
+  });
+
+  test('advisor streaming rewrites and copied transcripts retain the final counters once', () => {
+    const first = advisorRecord('parent', 'request-parent');
+    const final = advisorRecord('parent', 'request-parent', { mainOutput: 10, advisorOutput: 9 });
+    const entries = deduplicate([parsed(first, final), parsed(first, final)]);
+    expect(entries).toHaveLength(2);
+    expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(89);
+    expect(entries.find((entry) => entry.event.model === 'claude-advisor')?.event.outputTokens).toBe(9);
+  });
+
+  test.each([false, true])(
+    'rewritten sidechain advisors retain parent ownership regardless of ordering (%s)',
+    (reverse) => {
+      const parent = parsed(advisorRecord('parent', 'original'));
+      const child = parsed(
+        advisorRecord('parent', 'replay', { sidechain: true, mainOutput: 999, advisorOutput: 999 }),
+        advisorRecord('child', 'native-child', { sidechain: true }),
+      );
+      const entries = deduplicate(reverse ? [child, parent] : [parent, child]);
+      expect(entries).toHaveLength(4);
+      expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(152);
+      expect(entries.filter((entry) => entry.event.model === 'claude-advisor')).toHaveLength(2);
+      expect(child.retractedIds).toHaveLength(2);
+      expect(child.retractedIds).toContain('claude:message:parent:replay');
+      expect(deduplicate(reverse ? [child, parent] : [parent, child])).toEqual(entries);
+    },
+  );
+
+  test('advisors remain billable when the main usage counters are empty', () => {
+    const entries = deduplicate([
+      parsed(advisorRecord('parent', 'request-parent', { mainInput: 0, mainOutput: 0, mainCache: 0 })),
+    ]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].event.model).toBe('claude-advisor');
+    expect(tokenTotal(entries[0].event)).toBe(52);
+  });
+
+  test('reused parent message IDs keep distinct advisor requests and ambiguous sidechains', () => {
+    const file = parsed(
+      advisorRecord('gateway', 'request-a'),
+      advisorRecord('gateway', 'request-b'),
+      advisorRecord('gateway', 'request-child', { sidechain: true }),
+    );
+    const entries = deduplicate([file]);
+    expect(entries).toHaveLength(6);
+    expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(228);
+    expect(file.retractedIds).toBeUndefined();
   });
 });

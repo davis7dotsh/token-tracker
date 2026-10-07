@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { deduplicate, parsePi, tokenTotal } from '../../src/lib/server/usage/parsers';
+import { estimateCost } from '../../src/lib/server/usage/pricing';
 
 const session = (id: string, parentSession?: string, timestamp = '2026-10-01T10:01:00Z') => ({
   type: 'session',
@@ -24,6 +25,58 @@ const parse = (header: ReturnType<typeof session>, rows: readonly unknown[]) =>
 const sourcePath = (id: string) => `/home/user/.pi/agent/sessions/project/2026-10-01T10-00-00-000Z_${id}.jsonl`;
 
 describe('Pi native branch accounting', () => {
+  test('preserves mixed one-hour cache writes for pricing without adding them to token totals', () => {
+    const row = message('cache123', '2026-10-01T10:00:30Z');
+    const [entry] = parse(session('duration'), [
+      {
+        ...row,
+        message: {
+          ...row.message,
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 600_000 },
+        },
+      },
+    ]).events;
+    const policy = {
+      revision: 'duration-test',
+      rules: [],
+      catalog: {
+        source: 'duration-test',
+        updatedAt: '2026-10-01',
+        models: {
+          'gpt-6-astra': {
+            cache_creation_input_token_cost: 0.00000125,
+            cache_creation_input_token_cost_above_1hr: 0.000002,
+          },
+        },
+      },
+    };
+    expect(entry.cacheWrite1h).toBe(600_000);
+    expect(tokenTotal(entry.event)).toBe(1_000_000);
+    const cost = estimateCost(entry.event, entry.cacheWrite1h, entry.tier, policy);
+    expect(cost.costKnown).toBe(true);
+    expect(cost.costUsd).toBeCloseTo(1.7, 10);
+  });
+
+  test.each([
+    { duration: 1200, expected: 1000 },
+    { duration: -20, expected: 0 },
+    { duration: undefined, expected: 0 },
+  ])('bounds one-hour cache-write metadata: $duration', ({ duration, expected }) => {
+    const row = message('cache123', '2026-10-01T10:00:30Z');
+    const [entry] = parse(session('duration'), [
+      {
+        ...row,
+        message: {
+          ...row.message,
+          usage: { ...row.message.usage, cacheWrite: 1000, cacheWrite1h: duration },
+        },
+      },
+    ]).events;
+    expect(entry.cacheWrite1h).toBe(expected);
+    expect(entry.event.cacheWriteTokens).toBe(1000);
+    expect(tokenTotal(entry.event)).toBe(1160);
+  });
+
   test('fork copies retain original call ownership while new child calls remain counted', () => {
     const inherited = message('abc12345', '2026-10-01T10:00:30Z');
     const own = message('def12345', '2026-10-01T10:01:30Z');

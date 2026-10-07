@@ -142,38 +142,57 @@ export const claudeParser = (file: string) => {
     if (record.type !== 'assistant' || !isObject(message.usage) || message.model === '<synthetic>') return true;
     const stamp = timestamp(record.timestamp);
     if (!stamp) return false;
-    const usage = message.usage;
-    const cache = object(usage.cache_creation);
-    const details = object(usage.output_tokens_details);
     const session = text(record.sessionId) || fileSession(file);
-    const event = eventBase('claude', stamp, session, message.model, record.cwd);
-    event.inputTokens = number(usage.input_tokens);
-    event.outputTokens = number(usage.output_tokens);
-    event.cacheReadTokens = number(usage.cache_read_input_tokens);
-    event.cacheWriteTokens = Math.max(
-      number(usage.cache_creation_input_tokens),
-      number(cache.ephemeral_1h_input_tokens) + number(cache.ephemeral_5m_input_tokens),
-    );
-    event.reasoningTokens = Math.min(
-      event.outputTokens,
-      Math.max(number(details.thinking_tokens), number(details.reasoning_tokens)),
-    );
-    if (!tokenTotal(event)) return true;
-    event.id = text(message.id)
+    const nativeMessageId = text(message.id);
+    const id = nativeMessageId
       ? `claude:message:${text(message.id)}:${text(record.requestId)}`
       : text(record.uuid)
         ? `claude:uuid:${text(record.uuid)}`
         : fallbackId('claude', session, stamp, record.ordinal, line);
-    const tier = usage.speed === 'fast' ? 'priority' : text(usage.service_tier);
-    parsed.events.push({
-      ...candidate(
-        event,
-        tier,
-        Math.min(event.cacheWriteTokens, number(cache.ephemeral_1h_input_tokens)),
-        record.isSidechain === true,
-      ),
-      ...(text(message.id) ? { nativeMessageId: text(message.id) } : {}),
-    });
+    const parentTier = message.usage.speed === 'fast' ? 'priority' : text(message.usage.service_tier);
+    const appendUsage = (usage: Metadata, model: unknown, usageId: string, replayId: string) => {
+      const cache = object(usage.cache_creation);
+      const details = object(usage.output_tokens_details);
+      const event = eventBase('claude', stamp, session, model, record.cwd);
+      event.id = usageId;
+      event.inputTokens = number(usage.input_tokens);
+      event.outputTokens = number(usage.output_tokens);
+      event.cacheReadTokens = number(usage.cache_read_input_tokens);
+      event.cacheWriteTokens = Math.max(
+        number(usage.cache_creation_input_tokens),
+        number(cache.ephemeral_1h_input_tokens) + number(cache.ephemeral_5m_input_tokens),
+      );
+      event.reasoningTokens = Math.min(
+        event.outputTokens,
+        Math.max(number(details.thinking_tokens), number(details.reasoning_tokens)),
+      );
+      if (!tokenTotal(event)) return;
+      const tier = usage.speed === 'fast' ? 'priority' : text(usage.service_tier) || parentTier;
+      parsed.events.push({
+        ...candidate(
+          event,
+          tier,
+          Math.min(event.cacheWriteTokens, number(cache.ephemeral_1h_input_tokens)),
+          record.isSidechain === true,
+        ),
+        ...(replayId ? { nativeMessageId: replayId } : {}),
+      });
+    };
+    appendUsage(message.usage, message.model, id, nativeMessageId);
+    if (Array.isArray(message.usage.iterations)) {
+      for (const [index, value] of message.usage.iterations.entries()) {
+        const usage = object(value);
+        if (usage.type !== 'advisor_message' || !text(usage.model) || text(usage.model) === '<synthetic>') continue;
+        // Ordinary iterations repeat the main counters. Advisors are additional
+        // model calls, with their own identities and parent replay ownership.
+        appendUsage(
+          usage,
+          usage.model,
+          `claude:advisor:${hash(JSON.stringify([id, index]))}`,
+          nativeMessageId ? `claude:advisor:${hash(JSON.stringify([nativeMessageId, index]))}` : '',
+        );
+      }
+    }
     return true;
   });
 };
@@ -480,7 +499,7 @@ export const piParser = (file: string) => {
     event.id = text(record.id)
       ? `pi:${parsed.sessionId}:${text(record.id)}`
       : fallbackId('pi', parsed.sessionId, stamp, record.ordinal, line);
-    parsed.events.push(candidate(event));
+    parsed.events.push(candidate(event, '', Math.min(event.cacheWriteTokens, number(usage.cacheWrite1h))));
     return true;
   });
 };
