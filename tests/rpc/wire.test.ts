@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, jest, test } from 'bun:test';
 import { Cause, Effect, Layer, ManagedRuntime, Option } from 'effect';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -460,6 +460,122 @@ test('an offline HTTP server produces a friendly bounded browser failure', async
     expect(Date.now() - started).toBeLessThan(1000);
   } finally {
     await browser.dispose();
+  }
+});
+
+test('default usage requests keep waiting after ten seconds and accept a slower healthy response', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-default-slow-'));
+  directories.push(directory);
+  const started = Promise.withResolvers<void>();
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, {
+      device: localDevice,
+      collect: Effect.sync(() => started.resolve()).pipe(
+        Effect.andThen(Effect.sleep('11 seconds')),
+        Effect.as(localData),
+      ),
+    }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const browser = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  jest.useFakeTimers({ now: new Date() });
+  try {
+    let settled = false;
+    const pending = browser.getUsage().finally(() => {
+      settled = true;
+    });
+    const outcome = Promise.allSettled([pending]);
+    await started.promise;
+    jest.advanceTimersByTime(10_001);
+    // Real HTTP traffic lets transport cancellation and promise callbacks drain.
+    await fetch(`http://127.0.0.1:${server.port}/api/health`);
+    expect(settled).toBe(false);
+    jest.advanceTimersByTime(999);
+    expect((await outcome)[0]).toMatchObject({ status: 'fulfilled', value: { totals: { tokens: 175 } } });
+  } finally {
+    jest.useRealTimers();
+    await browser.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
+test('default stalled usage requests stop at thirty seconds and finalize the server operation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-default-stalled-'));
+  directories.push(directory);
+  const started = Promise.withResolvers<void>();
+  const finalized = Promise.withResolvers<void>();
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, {
+      device: localDevice,
+      collect: Effect.sync(() => started.resolve()).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(Effect.sync(() => finalized.resolve())),
+      ),
+    }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const browser = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  jest.useFakeTimers({ now: new Date() });
+  try {
+    let settled = false;
+    const pending = browser.getUsage().finally(() => {
+      settled = true;
+    });
+    const outcome = Promise.allSettled([pending]);
+    await started.promise;
+    jest.advanceTimersByTime(29_999);
+    await fetch(`http://127.0.0.1:${server.port}/api/health`);
+    expect(settled).toBe(false);
+    jest.advanceTimersByTime(1);
+    expect((await outcome)[0]).toMatchObject({
+      status: 'rejected',
+      reason: { message: 'The dashboard took too long to respond. Try again.' },
+    });
+    await finalized.promise;
+  } finally {
+    jest.useRealTimers();
+    await browser.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
+test('default metadata requests retain their ten-second deadline', async () => {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<Response>();
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      if (new URL(request.url).pathname === '/ping') return new Response('ok');
+      started.resolve();
+      return release.promise;
+    },
+  });
+  const browser = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  jest.useFakeTimers({ now: new Date() });
+  try {
+    let settled = false;
+    const pending = browser.getDevices().finally(() => {
+      settled = true;
+    });
+    const outcome = Promise.allSettled([pending]);
+    await started.promise;
+    jest.advanceTimersByTime(9_999);
+    await fetch(`http://127.0.0.1:${server.port}/ping`);
+    expect(settled).toBe(false);
+    jest.advanceTimersByTime(1);
+    expect((await outcome)[0]).toMatchObject({
+      status: 'rejected',
+      reason: { message: 'The dashboard took too long to respond. Try again.' },
+    });
+  } finally {
+    jest.useRealTimers();
+    release.resolve(new Response(null, { status: 499 }));
+    await browser.dispose();
+    await server.stop(true);
   }
 });
 
