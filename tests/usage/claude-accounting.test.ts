@@ -22,7 +22,7 @@ const parsed = (...records: string[]) => parseClaude(`${records.join('\n')}\n`, 
 const advisorRecord = (
   messageId: string,
   requestId: string,
-  { sidechain = false, mainOutput = 2, advisorOutput = 4, mainInput = 2, mainCache = 20 } = {},
+  { sidechain = false, mainOutput = 2, advisorOutput = 4, mainInput = 2, mainCache = 20, includeAdvisor = true } = {},
 ) =>
   JSON.stringify({
     type: 'assistant',
@@ -39,22 +39,24 @@ const advisorRecord = (
         output_tokens: mainOutput,
         cache_read_input_tokens: mainCache,
         speed: 'fast',
-        iterations: [
-          { type: 'message', model: null, input_tokens: mainInput, output_tokens: mainOutput },
-          {
-            type: 'advisor_message',
-            model: 'claude-advisor',
-            input_tokens: 10,
-            output_tokens: advisorOutput,
-            cache_read_input_tokens: 30,
-            cache_creation_input_tokens: 8,
-            cache_creation: { ephemeral_1h_input_tokens: 3, ephemeral_5m_input_tokens: 5 },
-            output_tokens_details: { thinking_tokens: 99 },
-          },
-          { type: 'advisor_message', model: null, input_tokens: 50_000 },
-          { type: 'advisor_message', model: '', input_tokens: 50_000 },
-          { type: 'message', model: 'claude-advisor', input_tokens: 50_000 },
-        ],
+        iterations: includeAdvisor
+          ? [
+              { type: 'message', model: null, input_tokens: mainInput, output_tokens: mainOutput },
+              {
+                type: 'advisor_message',
+                model: 'claude-advisor',
+                input_tokens: 10,
+                output_tokens: advisorOutput,
+                cache_read_input_tokens: 30,
+                cache_creation_input_tokens: 8,
+                cache_creation: { ephemeral_1h_input_tokens: 3, ephemeral_5m_input_tokens: 5 },
+                output_tokens_details: { thinking_tokens: 99 },
+              },
+              { type: 'advisor_message', model: null, input_tokens: 50_000 },
+              { type: 'advisor_message', model: '', input_tokens: 50_000 },
+              { type: 'message', model: 'claude-advisor', input_tokens: 50_000 },
+            ]
+          : [],
       },
     },
   });
@@ -238,5 +240,82 @@ describe('Claude request accounting', () => {
     expect(entries).toHaveLength(6);
     expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(228);
     expect(file.retractedIds).toBeUndefined();
+  });
+
+  test.each([false, true])(
+    'asymmetric advisor presence preserves ambiguous parent requests in either file order (%s)',
+    (reverse) => {
+      const parent = parsed(
+        advisorRecord('gateway', 'request-a'),
+        advisorRecord('gateway', 'request-b', { includeAdvisor: false }),
+      );
+      const child = parsed(advisorRecord('gateway', 'request-child', { sidechain: true }));
+      const files = reverse ? [child, parent] : [parent, child];
+      const entries = deduplicate(files);
+      expect(entries).toHaveLength(5);
+      expect(entries.filter((entry) => entry.event.model === 'claude-advisor')).toHaveLength(2);
+      expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(176);
+      expect(child.retractedIds).toBeUndefined();
+      expect(deduplicate(files)).toEqual(entries);
+    },
+  );
+
+  test.each([false, true])(
+    'zero-main advisor requests preserve ambiguous parent ownership in either file order (%s)',
+    (reverse) => {
+      const parent = parsed(
+        advisorRecord('gateway', 'request-a', { mainInput: 0, mainOutput: 0, mainCache: 0 }),
+        advisorRecord('gateway', 'request-b', { includeAdvisor: false }),
+      );
+      const child = parsed(advisorRecord('gateway', 'request-child', { sidechain: true }));
+      const entries = deduplicate(reverse ? [child, parent] : [parent, child]);
+      expect(entries).toHaveLength(4);
+      expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(152);
+      expect(child.retractedIds).toBeUndefined();
+    },
+  );
+
+  test.each([false, true])(
+    'empty original requests prove ambiguity without emitting zero-token usage (%s)',
+    (reverse) => {
+      const parent = parsed(
+        advisorRecord('gateway', 'request-a'),
+        advisorRecord('gateway', 'request-b', { includeAdvisor: false, mainInput: 0, mainOutput: 0, mainCache: 0 }),
+      );
+      const child = parsed(advisorRecord('gateway', 'request-child', { sidechain: true }));
+      const entries = deduplicate(reverse ? [child, parent] : [parent, child]);
+      expect(entries).toHaveLength(4);
+      expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(152);
+      expect(entries.every((entry) => tokenTotal(entry.event) > 0)).toBe(true);
+      expect(parent.emptyClaudeRequests).toEqual([
+        { id: 'claude:message:gateway:request-b', nativeMessageId: 'gateway', sessionId: 'session' },
+      ]);
+      expect(child.retractedIds).toBeUndefined();
+    },
+  );
+
+  test('streamed empty placeholders stop requiring separate ownership once main or advisor usage is present', () => {
+    const empty = advisorRecord('gateway', 'request-a', {
+      includeAdvisor: false,
+      mainInput: 0,
+      mainOutput: 0,
+      mainCache: 0,
+    });
+    const file = parsed(
+      empty,
+      advisorRecord('gateway', 'request-a', { mainInput: 0, mainOutput: 0, mainCache: 0 }),
+      empty,
+    );
+    expect(file.emptyClaudeRequests).toBeUndefined();
+    expect(deduplicate([file])).toHaveLength(1);
+  });
+
+  test('advisors inherit a proven parent replay decision even when its original has no advisor row', () => {
+    const parent = parsed(advisorRecord('gateway', 'original', { includeAdvisor: false }));
+    const child = parsed(advisorRecord('gateway', 'replayed', { sidechain: true }));
+    const entries = deduplicate([child, parent]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].event.id).toBe('claude:message:gateway:original');
+    expect(child.retractedIds).toHaveLength(2);
   });
 });

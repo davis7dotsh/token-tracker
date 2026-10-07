@@ -10,6 +10,7 @@ type Candidate = {
   cacheWrite1h: number;
   tier: string;
   nativeMessageId?: string;
+  parentEventId?: string;
 };
 export type ParsedFile = {
   events: Candidate[];
@@ -19,6 +20,7 @@ export type ParsedFile = {
   forkedAt: string;
   compactionIds?: Set<string>;
   retractedIds?: string[];
+  emptyClaudeRequests?: readonly { id: string; nativeMessageId: string; sessionId: string }[];
 };
 
 const isObject = (value: unknown): value is Metadata =>
@@ -137,64 +139,80 @@ const recordParser = (
 
 export const claudeParser = (file: string) => {
   const parsed: ParsedFile = { events: [], malformed: 0, sessionId: '', parentId: '', forkedAt: '' };
-  return recordParser(parsed, (record, line) => {
-    const message = object(record.message);
-    if (record.type !== 'assistant' || !isObject(message.usage) || message.model === '<synthetic>') return true;
-    const stamp = timestamp(record.timestamp);
-    if (!stamp) return false;
-    const session = text(record.sessionId) || fileSession(file);
-    const nativeMessageId = text(message.id);
-    const id = nativeMessageId
-      ? `claude:message:${text(message.id)}:${text(record.requestId)}`
-      : text(record.uuid)
-        ? `claude:uuid:${text(record.uuid)}`
-        : fallbackId('claude', session, stamp, record.ordinal, line);
-    const parentTier = message.usage.speed === 'fast' ? 'priority' : text(message.usage.service_tier);
-    const appendUsage = (usage: Metadata, model: unknown, usageId: string, replayId: string) => {
-      const cache = object(usage.cache_creation);
-      const details = object(usage.output_tokens_details);
-      const event = eventBase('claude', stamp, session, model, record.cwd);
-      event.id = usageId;
-      event.inputTokens = number(usage.input_tokens);
-      event.outputTokens = number(usage.output_tokens);
-      event.cacheReadTokens = number(usage.cache_read_input_tokens);
-      event.cacheWriteTokens = Math.max(
-        number(usage.cache_creation_input_tokens),
-        number(cache.ephemeral_1h_input_tokens) + number(cache.ephemeral_5m_input_tokens),
-      );
-      event.reasoningTokens = Math.min(
-        event.outputTokens,
-        Math.max(number(details.thinking_tokens), number(details.reasoning_tokens)),
-      );
-      if (!tokenTotal(event)) return;
-      const tier = usage.speed === 'fast' ? 'priority' : text(usage.service_tier) || parentTier;
-      parsed.events.push({
-        ...candidate(
-          event,
-          tier,
-          Math.min(event.cacheWriteTokens, number(cache.ephemeral_1h_input_tokens)),
-          record.isSidechain === true,
-        ),
-        ...(replayId ? { nativeMessageId: replayId } : {}),
-      });
-    };
-    appendUsage(message.usage, message.model, id, nativeMessageId);
-    if (Array.isArray(message.usage.iterations)) {
-      for (const [index, value] of message.usage.iterations.entries()) {
-        const usage = object(value);
-        if (usage.type !== 'advisor_message' || !text(usage.model) || text(usage.model) === '<synthetic>') continue;
-        // Ordinary iterations repeat the main counters. Advisors are additional
-        // model calls, with their own identities and parent replay ownership.
-        appendUsage(
-          usage,
-          usage.model,
-          `claude:advisor:${hash(JSON.stringify([id, index]))}`,
-          nativeMessageId ? `claude:advisor:${hash(JSON.stringify([nativeMessageId, index]))}` : '',
+  const representedOriginals = new Set<string>();
+  const emptyRequests = new Map<string, NonNullable<ParsedFile['emptyClaudeRequests']>[number]>();
+  return recordParser(
+    parsed,
+    (record, line) => {
+      const message = object(record.message);
+      if (record.type !== 'assistant' || !isObject(message.usage) || message.model === '<synthetic>') return true;
+      const stamp = timestamp(record.timestamp);
+      if (!stamp) return false;
+      const session = text(record.sessionId) || fileSession(file);
+      const nativeMessageId = text(message.id);
+      const id = nativeMessageId
+        ? `claude:message:${text(message.id)}:${text(record.requestId)}`
+        : text(record.uuid)
+          ? `claude:uuid:${text(record.uuid)}`
+          : fallbackId('claude', session, stamp, record.ordinal, line);
+      const parentTier = message.usage.speed === 'fast' ? 'priority' : text(message.usage.service_tier);
+      const firstEntry = parsed.events.length;
+      const appendUsage = (usage: Metadata, model: unknown, usageId: string, advisor = false) => {
+        const cache = object(usage.cache_creation);
+        const details = object(usage.output_tokens_details);
+        const event = eventBase('claude', stamp, session, model, record.cwd);
+        event.id = usageId;
+        event.inputTokens = number(usage.input_tokens);
+        event.outputTokens = number(usage.output_tokens);
+        event.cacheReadTokens = number(usage.cache_read_input_tokens);
+        event.cacheWriteTokens = Math.max(
+          number(usage.cache_creation_input_tokens),
+          number(cache.ephemeral_1h_input_tokens) + number(cache.ephemeral_5m_input_tokens),
         );
+        event.reasoningTokens = Math.min(
+          event.outputTokens,
+          Math.max(number(details.thinking_tokens), number(details.reasoning_tokens)),
+        );
+        if (!tokenTotal(event)) return;
+        const tier = usage.speed === 'fast' ? 'priority' : text(usage.service_tier) || parentTier;
+        parsed.events.push({
+          ...candidate(
+            event,
+            tier,
+            Math.min(event.cacheWriteTokens, number(cache.ephemeral_1h_input_tokens)),
+            record.isSidechain === true,
+          ),
+          ...(nativeMessageId ? { nativeMessageId } : {}),
+          ...(advisor ? { parentEventId: id } : {}),
+        });
+      };
+      appendUsage(message.usage, message.model, id);
+      if (Array.isArray(message.usage.iterations)) {
+        for (const [index, value] of message.usage.iterations.entries()) {
+          const usage = object(value);
+          if (usage.type !== 'advisor_message' || !text(usage.model) || text(usage.model) === '<synthetic>') continue;
+          // Ordinary iterations repeat the main counters. Advisors are additional
+          // model calls, with their own identities and parent replay ownership.
+          appendUsage(usage, usage.model, `claude:advisor:${hash(JSON.stringify([id, index]))}`, true);
+        }
       }
-    }
-    return true;
-  });
+      if (nativeMessageId && record.isSidechain !== true) {
+        if (parsed.events.length > firstEntry) {
+          representedOriginals.add(id);
+          emptyRequests.delete(id);
+        } else if (!representedOriginals.has(id)) {
+          // Empty main/advisor counters still prove a distinct native request.
+          // Retain only otherwise unrepresented ownership, never a billable row.
+          emptyRequests.set(id, { id, nativeMessageId, sessionId: session });
+        }
+      }
+      return true;
+    },
+    () => {
+      if (emptyRequests.size) parsed.emptyClaudeRequests = [...emptyRequests.values()];
+      return parsed;
+    },
+  );
 };
 
 const codexModel = (record: Metadata) =>
@@ -515,14 +533,19 @@ export const parsePi = (contents: string, file: string) => parseContents(content
 export const filterClaudeReplays = (files: ParsedFile[]) => {
   const originals = new Map<string, Set<string>>();
   const replayKey = (entry: Candidate) => JSON.stringify([entry.nativeMessageId, entry.event.sessionId]);
-  for (const file of files)
+  const rememberOriginal = (key: string, id: string) => {
+    const identities = originals.get(key);
+    if (identities) identities.add(id);
+    else originals.set(key, new Set([id]));
+  };
+  for (const file of files) {
+    for (const request of file.emptyClaudeRequests ?? [])
+      rememberOriginal(JSON.stringify([request.nativeMessageId, request.sessionId]), request.id);
     for (const entry of file.events) {
       if (entry.event.harness !== 'claude' || entry.sidechain || !entry.nativeMessageId) continue;
-      const key = replayKey(entry);
-      const identities = originals.get(key);
-      if (identities) identities.add(entry.event.id);
-      else originals.set(key, new Set([entry.event.id]));
+      rememberOriginal(replayKey(entry), entry.parentEventId ?? entry.event.id);
     }
+  }
   for (const file of files) {
     const retracted = new Set(file.retractedIds);
     file.events = file.events.filter((entry) => {
@@ -532,7 +555,7 @@ export const filterClaudeReplays = (files: ParsedFile[]) => {
       // cache counts. The original request is authoritative. Keep unmatched
       // child requests and ambiguous gateway IDs rather than guessing.
       if (!identities || identities.size !== 1) return true;
-      if (!identities.has(entry.event.id)) retracted.add(entry.event.id);
+      if (!identities.has(entry.parentEventId ?? entry.event.id)) retracted.add(entry.event.id);
       return false;
     });
     if (retracted.size) file.retractedIds = [...retracted];
