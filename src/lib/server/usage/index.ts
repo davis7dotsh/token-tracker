@@ -193,7 +193,13 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   files.push(...grok.files);
   warnings.push(...grok.warnings);
   if (cacheDirectory) yield* pruneParsedCache(cacheDirectory, retainedCacheFiles);
-  const candidateIds = new Set(files.flatMap((file) => file.events.map((entry) => entry.event.id)));
+  const candidateIds = new Set<string>();
+  for (const file of files)
+    for (const entry of file.events) {
+      candidateIds.add(entry.event.id);
+      // Retire old array-position advisor IDs only if no current call owns them.
+      if (entry.legacyEventId) candidateIds.add(entry.legacyEventId);
+    }
   const entries = deduplicate(files);
   const retainedIds = new Set(entries.map((entry) => entry.event.id));
   // Withdraw only identities proved to be replayed or replaced. Missing source

@@ -203,6 +203,53 @@ describe('Claude request accounting', () => {
     expect(entries.find((entry) => entry.event.model === 'claude-advisor')?.event.outputTokens).toBe(9);
   });
 
+  test('ordinary iteration insertions cannot give a streamed advisor a second identity', () => {
+    const advisor = { type: 'advisor_message', model: 'claude-advisor', input_tokens: 10, output_tokens: 2 };
+    const fragment = (iterations: readonly unknown[]) =>
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-10-01T08:00:00Z',
+        sessionId: 'session',
+        requestId: 'request',
+        message: {
+          id: 'message',
+          model: 'claude-fable-5-1',
+          usage: { input_tokens: 2, output_tokens: 1, iterations },
+        },
+      });
+    const first = fragment([advisor]);
+    const final = fragment([{ type: 'message', input_tokens: 2, output_tokens: 1 }, advisor]);
+    const entries = deduplicate([parsed(first, final), parsed(first, final)]);
+    expect(entries).toHaveLength(2);
+    expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(15);
+    expect(entries.filter((entry) => entry.event.model === 'claude-advisor')).toHaveLength(1);
+  });
+
+  test('invalid advisor slots retain the identities of later advisors when filled in', () => {
+    const fragment = (iterations: readonly unknown[]) =>
+      parsed(
+        JSON.stringify({
+          type: 'assistant',
+          timestamp: '2026-10-01T08:00:00Z',
+          sessionId: 'session',
+          requestId: 'request',
+          message: {
+            id: 'message',
+            model: 'claude-fable-5-1',
+            usage: { input_tokens: 2, output_tokens: 1, iterations },
+          },
+        }),
+      );
+    const invalid = { type: 'advisor_message', model: null, input_tokens: 0 };
+    const later = { type: 'advisor_message', model: 'claude-advisor', input_tokens: 10, output_tokens: 2 };
+    const original = fragment([invalid, later]);
+    const originalAdvisor = original.events.find((entry) => entry.event.model === 'claude-advisor');
+    const entries = deduplicate([original, fragment([{ ...later, model: 'other-advisor' }, later])]);
+    expect(entries).toHaveLength(3);
+    expect(entries.find((entry) => entry.event.model === 'claude-advisor')?.event.id).toBe(originalAdvisor?.event.id);
+    expect(entries.filter((entry) => entry.event.model === 'other-advisor')).toHaveLength(1);
+  });
+
   test.each([false, true])(
     'rewritten sidechain advisors retain parent ownership regardless of ordering (%s)',
     (reverse) => {

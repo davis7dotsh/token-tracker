@@ -21,6 +21,7 @@ const CachedFile = Schema.Struct({
         tier: Schema.String,
         nativeMessageId: Schema.optionalKey(Schema.String),
         parentEventId: Schema.optionalKey(Schema.String),
+        legacyEventId: Schema.optionalKey(Schema.String),
       }),
     ),
     malformed: Schema.Number,

@@ -11,6 +11,7 @@ type Candidate = {
   tier: string;
   nativeMessageId?: string;
   parentEventId?: string;
+  legacyEventId?: string;
 };
 export type ParsedFile = {
   events: Candidate[];
@@ -188,12 +189,20 @@ export const claudeParser = (file: string) => {
       };
       appendUsage(message.usage, message.model, id);
       if (Array.isArray(message.usage.iterations)) {
+        let advisorIndex = 0;
         for (const [index, value] of message.usage.iterations.entries()) {
           const usage = object(value);
-          if (usage.type !== 'advisor_message' || !text(usage.model) || text(usage.model) === '<synthetic>') continue;
+          if (usage.type !== 'advisor_message') continue;
+          const ordinal = advisorIndex++;
+          if (!text(usage.model) || text(usage.model) === '<synthetic>') continue;
           // Ordinary iterations repeat the main counters. Advisors are additional
           // model calls, with their own identities and parent replay ownership.
-          appendUsage(usage, usage.model, `claude:advisor:${hash(JSON.stringify([id, index]))}`, true);
+          const advisorId = `claude:advisor:${hash(JSON.stringify([id, ordinal]))}`;
+          const beforeAdvisor = parsed.events.length;
+          appendUsage(usage, usage.model, advisorId, true);
+          const advisor = parsed.events.at(-1);
+          if (index !== ordinal && parsed.events.length > beforeAdvisor && advisor)
+            advisor.legacyEventId = `claude:advisor:${hash(JSON.stringify([id, index]))}`;
         }
       }
       if (nativeMessageId && record.isSidechain !== true) {

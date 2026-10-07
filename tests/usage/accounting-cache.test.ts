@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -204,6 +205,73 @@ test('empty-only ownership never withdraws previously acknowledged sidechain usa
     expect(cold.events).toEqual(uploaded.events);
     expect(cold.retractedIds).toBeUndefined();
     expect(changedRecords(cold.events, checkpoint)).toEqual([]);
+    expect(await collect()).toEqual(cold);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('advisor ordinal migration retires old IDs without withdrawing a retained advisor on cold or warm collection', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'token-tracker-advisor-ordinal-cache-'));
+  const cacheDirectory = join(home, 'cache');
+  const claude = join(home, '.claude', 'projects', 'app');
+  const mainId = 'claude:message:message:request';
+  const advisorId = (index: number) =>
+    `claude:advisor:${createHash('sha256')
+      .update(JSON.stringify([mainId, index]))
+      .digest('hex')}`;
+  try {
+    await mkdir(claude, { recursive: true });
+    await writeFile(
+      join(claude, 'session.jsonl'),
+      JSON.stringify({
+        type: 'assistant',
+        sessionId: 'session',
+        timestamp: '2026-10-01T10:00:00Z',
+        requestId: 'request',
+        message: {
+          id: 'message',
+          model: 'claude-sonnet-4-6',
+          usage: {
+            input_tokens: 2,
+            output_tokens: 1,
+            iterations: [
+              { type: 'message', input_tokens: 2, output_tokens: 1 },
+              { type: 'advisor_message', model: 'claude-opus-4-6', input_tokens: 10, output_tokens: 2 },
+              { type: 'advisor_message', model: 'claude-haiku-4-5', input_tokens: 20, output_tokens: 4 },
+            ],
+          },
+        },
+      }) + '\n',
+    );
+    const collect = () =>
+      Effect.runPromise(
+        collectUsage({ home, cacheDirectory, codexDirs: [], piDirs: [], grokDirs: [] }).pipe(
+          Effect.provide(BunServices.layer),
+        ),
+      );
+    const cold = await collect();
+    expect(cold.events).toHaveLength(3);
+    expect(cold.events.reduce((sum, event) => sum + event.inputTokens + event.outputTokens, 0)).toBe(39);
+    expect(cold.retractedIds).toEqual([advisorId(2)]);
+    expect(cold.events.find((event) => event.id === advisorId(1))?.model).toBe('claude-haiku-4-5');
+    const previous = cold.events.map((event) => ({
+      ...event,
+      id:
+        event.model === 'claude-opus-4-6' ? advisorId(1) : event.model === 'claude-haiku-4-5' ? advisorId(2) : event.id,
+    }));
+    const checkpoint = {
+      version: 1 as const,
+      remote: 'https://test.example',
+      deviceId: 'test-advisor-ordinal',
+      syncedAt: '2026-10-01T10:01:00Z',
+      eventDigests: Object.fromEntries(previous.map((event) => [event.id, eventDigest(event)])),
+    };
+    expect(
+      changedRecords(cold.events, checkpoint)
+        .map(({ event }) => event.id)
+        .sort(),
+    ).toEqual([advisorId(0), advisorId(1)].sort());
     expect(await collect()).toEqual(cold);
   } finally {
     await rm(home, { recursive: true, force: true });
