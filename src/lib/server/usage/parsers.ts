@@ -532,6 +532,7 @@ export const parsePi = (contents: string, file: string) => parseContents(content
 
 export const filterClaudeReplays = (files: ParsedFile[]) => {
   const originals = new Map<string, Set<string>>();
+  const billedOriginals = new Set<string>();
   const replayKey = (entry: Candidate) => JSON.stringify([entry.nativeMessageId, entry.event.sessionId]);
   const rememberOriginal = (key: string, id: string) => {
     const identities = originals.get(key);
@@ -543,18 +544,22 @@ export const filterClaudeReplays = (files: ParsedFile[]) => {
       rememberOriginal(JSON.stringify([request.nativeMessageId, request.sessionId]), request.id);
     for (const entry of file.events) {
       if (entry.event.harness !== 'claude' || entry.sidechain || !entry.nativeMessageId) continue;
-      rememberOriginal(replayKey(entry), entry.parentEventId ?? entry.event.id);
+      const key = replayKey(entry);
+      rememberOriginal(key, entry.parentEventId ?? entry.event.id);
+      if (tokenTotal(entry.event) > 0) billedOriginals.add(key);
     }
   }
   for (const file of files) {
     const retracted = new Set(file.retractedIds);
     file.events = file.events.filter((entry) => {
       if (entry.event.harness !== 'claude' || !entry.sidechain || !entry.nativeMessageId) return true;
-      const identities = originals.get(replayKey(entry));
+      const key = replayKey(entry);
+      const identities = originals.get(key);
       // /btw can replay a parent message with a new request ID and inflated
       // cache counts. The original request is authoritative. Keep unmatched
       // child requests and ambiguous gateway IDs rather than guessing.
-      if (!identities || identities.size !== 1) return true;
+      // Empty ownership can prove ambiguity, but cannot replace completed usage.
+      if (!identities || identities.size !== 1 || !billedOriginals.has(key)) return true;
       if (!identities.has(entry.parentEventId ?? entry.event.id)) retracted.add(entry.event.id);
       return false;
     });

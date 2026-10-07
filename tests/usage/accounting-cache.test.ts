@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { BunServices } from '@effect/platform-bun';
 import { Effect } from 'effect';
 import { collectUsage } from '../../src/lib/server/usage';
+import { changedRecords, eventDigest } from '../../src/cli/checkpoint';
 
 test('cold, warm, and obsolete caches agree on canonical requests and replay withdrawals', async () => {
   const home = await mkdtemp(join(tmpdir(), 'token-tracker-accounting-cache-'));
@@ -153,6 +154,57 @@ test('cold and warm caches preserve asymmetric advisor ambiguity including empty
       },
     ]);
     expect(cached.every((value) => value.version === 4)).toBe(true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('empty-only ownership never withdraws previously acknowledged sidechain usage on cold or warm collection', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'token-tracker-empty-placeholder-cache-'));
+  const cacheDirectory = join(home, 'cache');
+  const claude = join(home, '.claude', 'projects', 'app');
+  const assistant = (requestId: string, isSidechain: boolean, empty = false) => ({
+    type: 'assistant',
+    sessionId: 'session',
+    timestamp: '2026-10-01T10:00:00Z',
+    requestId,
+    isSidechain,
+    message: {
+      id: 'shared-native-id',
+      model: 'claude-sonnet-4-6',
+      usage: {
+        input_tokens: empty ? 0 : 100,
+        output_tokens: empty ? 0 : 10,
+        iterations: empty
+          ? []
+          : [{ type: 'advisor_message', model: 'claude-opus-4-6', input_tokens: 50, output_tokens: 5 }],
+      },
+    },
+  });
+  try {
+    await mkdir(claude, { recursive: true });
+    await writeFile(join(claude, 'sidechain.jsonl'), JSON.stringify(assistant('completed', true)) + '\n');
+    const collect = () =>
+      Effect.runPromise(
+        collectUsage({ home, cacheDirectory, codexDirs: [], piDirs: [], grokDirs: [] }).pipe(
+          Effect.provide(BunServices.layer),
+        ),
+      );
+    const uploaded = await collect();
+    expect(uploaded.events).toHaveLength(2);
+    const checkpoint = {
+      version: 1 as const,
+      remote: 'https://test.example',
+      deviceId: 'test-placeholder',
+      syncedAt: '2026-10-01T10:01:00Z',
+      eventDigests: Object.fromEntries(uploaded.events.map((event) => [event.id, eventDigest(event)])),
+    };
+    await writeFile(join(claude, 'parent.jsonl'), JSON.stringify(assistant('placeholder', false, true)) + '\n');
+    const cold = await collect();
+    expect(cold.events).toEqual(uploaded.events);
+    expect(cold.retractedIds).toBeUndefined();
+    expect(changedRecords(cold.events, checkpoint)).toEqual([]);
+    expect(await collect()).toEqual(cold);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

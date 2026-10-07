@@ -318,4 +318,22 @@ describe('Claude request accounting', () => {
     expect(entries[0].event.id).toBe('claude:message:gateway:original');
     expect(child.retractedIds).toHaveLength(2);
   });
+
+  test.each([false, true])(
+    'an empty-only original preserves completed sidechain main and advisor usage (%s)',
+    (reverse) => {
+      const parent = parsed(
+        advisorRecord('gateway', 'placeholder', { includeAdvisor: false, mainInput: 0, mainOutput: 0, mainCache: 0 }),
+      );
+      const child = parsed(advisorRecord('gateway', 'completed', { sidechain: true }));
+      const files = reverse ? [child, parent] : [parent, child];
+      const entries = deduplicate(files);
+      expect(parent.events).toEqual([]);
+      expect(parent.emptyClaudeRequests).toHaveLength(1);
+      expect(entries).toHaveLength(2);
+      expect(entries.reduce((sum, entry) => sum + tokenTotal(entry.event), 0)).toBe(76);
+      expect(child.retractedIds).toBeUndefined();
+      expect(deduplicate(files)).toEqual(entries);
+    },
+  );
 });
