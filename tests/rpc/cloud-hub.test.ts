@@ -142,3 +142,59 @@ test('large sync batches upsert and withdraw records in bounded statements', asy
     await hub.handler.dispose();
   }
 });
+
+test('administrative imports authenticate, validate batches, and preserve connected collector credentials', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-cloud-import-'));
+  directories.push(directory);
+  const hub = serve(join(directory, 'hub.sqlite'));
+  const runtime = ManagedRuntime.make(rpcClientLayer(hub.endpoint));
+  const device = { id: 'imported-device', name: 'Imported device', platform: 'linux' };
+  try {
+    for (const request of [
+      { pairingSecret: 'incorrect-secret', batch: { device, events: [event] } },
+      { pairingSecret, batch: { device, events: [{ ...event, inputTokens: -1 }] } },
+    ]) {
+      const denied = await runtime.runPromiseExit(Effect.flatMap(UsageClient, (client) => client.ImportUsage(request)));
+      expect(denied._tag).toBe('Failure');
+      expect(await runtime.runPromise(Effect.flatMap(UsageClient, (client) => client.GetDevices()))).toEqual([]);
+    }
+    expect(
+      await runtime.runPromise(
+        Effect.flatMap(UsageClient, (client) =>
+          client.ImportUsage({ pairingSecret, batch: { device, events: [event] } }),
+        ),
+      ),
+    ).toMatchObject({ accepted: 1 });
+    const registration = await runtime.runPromise(
+      Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device })),
+    );
+    expect(
+      await runtime.runPromise(
+        Effect.flatMap(UsageClient, (client) =>
+          client.ImportUsage({ pairingSecret, batch: { device, events: [{ ...event, outputTokens: 75 }] } }),
+        ),
+      ),
+    ).toMatchObject({ updated: 1 });
+    expect(
+      await runtime.runPromise(
+        Effect.flatMap(UsageClient, (client) =>
+          client.SyncUsage({
+            deviceId: device.id,
+            token: registration.token,
+            batch: { device, events: [{ ...event, outputTokens: 80 }] },
+          }),
+        ),
+      ),
+    ).toMatchObject({ updated: 1 });
+    const badToken = await runtime.runPromiseExit(
+      Effect.flatMap(UsageClient, (client) =>
+        client.SyncUsage({ deviceId: device.id, token: 'incorrect-token', batch: { device, events: [] } }),
+      ),
+    );
+    expect(badToken._tag).toBe('Failure');
+  } finally {
+    await runtime.dispose();
+    await hub.server.stop(true);
+    await hub.handler.dispose();
+  }
+});

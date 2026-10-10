@@ -67,4 +67,9 @@ export const UsageRpc = RpcGroup.make(
     success: SyncAck,
     error: SyncFailure,
   }),
+  Rpc.make('ImportUsage', {
+    payload: { pairingSecret: Schema.String, batch: SyncBatch },
+    success: SyncAck,
+    error: SyncFailure,
+  }),
 );

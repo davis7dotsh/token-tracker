@@ -234,7 +234,11 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       return { device: registered, token };
     });
 
-    const syncUsage = Effect.fn('UsageStore.syncUsage')(function* (deviceId: string, token: string, batch: SyncBatch) {
+    const writeUsageBatch = Effect.fn('UsageStore.writeUsageBatch')(function* (
+      deviceId: string,
+      batch: SyncBatch,
+      authorization: { token: string } | { pairingSecret: string },
+    ) {
       yield* validateDevice(batch.device);
       if (batch.device.id !== deviceId)
         return yield* Effect.fail(new InvalidRequest({ message: 'The sync batch belongs to a different device.' }));
@@ -270,15 +274,25 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const result = yield* sql
         .withTransaction(
           Effect.gen(function* () {
-            const credentials = yield* sql<{
-              token_hash: string;
-            }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`;
-            if (!credentials[0] || !equalSecret(digest(token), credentials[0].token_hash)) {
-              return yield* Effect.fail(
-                new Unauthorized({
-                  message: 'This device is not connected, or its credential has expired. Connect it again.',
-                }),
-              );
+            if ('pairingSecret' in authorization) {
+              if (!equalSecret(authorization.pairingSecret, configuration.pairingSecret))
+                return yield* Effect.fail(new Unauthorized({ message: 'The pairing secret is incorrect.' }));
+              // Migration may create devices, but never rotates a connected
+              // collector's credential. New devices still pair normally later.
+              yield* sql`INSERT INTO devices (id, name, platform, token_hash)
+                VALUES (${deviceId}, ${batch.device.name}, ${batch.device.platform}, ${digest(randomBytes(32).toString('base64url'))})
+                ON CONFLICT (id) DO NOTHING`;
+            } else {
+              const credentials = yield* sql<{
+                token_hash: string;
+              }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`;
+              if (!credentials[0] || !equalSecret(digest(authorization.token), credentials[0].token_hash)) {
+                return yield* Effect.fail(
+                  new Unauthorized({
+                    message: 'This device is not connected, or its credential has expired. Connect it again.',
+                  }),
+                );
+              }
             }
             let accepted = 0;
             let updated = 0;
@@ -366,7 +380,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           }),
         )
         .pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
-      if (result.accepted || result.updated || result.deleted) revision++;
+      if ('pairingSecret' in authorization || result.accepted || result.updated || result.deleted) revision++;
       if (result.accepted || result.deleted) ownerRevision++;
       return result;
     });
@@ -594,7 +608,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     return {
       getDevices,
       registerDevice,
-      syncUsage,
+      syncUsage: (deviceId: string, token: string, batch: SyncBatch) => writeUsageBatch(deviceId, batch, { token }),
+      importUsage: (pairingSecret: string, batch: SyncBatch) =>
+        writeUsageBatch(batch.device.id, batch, { pairingSecret }),
       getUsage,
       getDimensions,
       getRevision: () => revision,

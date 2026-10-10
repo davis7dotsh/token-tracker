@@ -4,7 +4,7 @@ import { Effect, Layer, ManagedRuntime } from 'effect';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { makeDashboardClient } from '../../src/lib/client/rpc';
+import { makeDashboardClient, rpcClientLayer, UsageClient } from '../../src/lib/client/rpc';
 import { makeHubWebHandler, sqlHubServices } from '../../src/lib/server/rpc/hub';
 import { usageStoreLayer } from '../../src/lib/server/rpc/server';
 import { UsageStore } from '../../src/lib/server/rpc/store';
@@ -114,9 +114,28 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
         const sourcePricing = await Effect.runPromise(loadPricing(source));
         expect((await browser.getPricing()).info.rules).toEqual(sourcePricing.info.rules);
         expect((await browser.getUsage()).totals).toMatchObject({ tokens: 1_000_000, costUSD: 2 });
-        const repeated = await migrate(source, target);
-        expect(repeated.code, repeated.stderr).toBe(0);
-        expect((await browser.getUsage()).totals).toMatchObject({ tokens: 1_000_000, costUSD: 2 });
+        // A collector connects after the initial import. A later migration must
+        // preserve its token as well as the accounting totals.
+        const collector = ManagedRuntime.make(rpcClientLayer(`${target}/rpc`));
+        try {
+          const device = { id: 'source-device', name: 'Source device', platform: 'linux' };
+          const registration = await collector.runPromise(
+            Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device })),
+          );
+          const heartbeat = () =>
+            collector.runPromise(
+              Effect.flatMap(UsageClient, (client) =>
+                client.SyncUsage({ deviceId: device.id, token: registration.token, batch: { device, events: [] } }),
+              ),
+            );
+          expect(await heartbeat()).toMatchObject({ accepted: 0, updated: 0 });
+          const repeated = await migrate(source, target);
+          expect(repeated.code, repeated.stderr).toBe(0);
+          expect(await heartbeat()).toMatchObject({ accepted: 0, updated: 0 });
+          expect((await browser.getUsage()).totals).toMatchObject({ tokens: 1_000_000, costUSD: 2 });
+        } finally {
+          await collector.dispose();
+        }
       } else {
         expect(result.code).not.toBe(0);
         expect(result.stdout + result.stderr).toContain('PricingFailure');

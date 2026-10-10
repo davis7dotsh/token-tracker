@@ -42,9 +42,8 @@ const migrate = Effect.gen(function* () {
   let records = 0;
   for (const row of devices) {
     const device = { id: row.id, name: row.name, platform: row.platform };
-    const { token } = yield* client.RegisterDevice({ pairingSecret, device });
     const sync = (batch: Omit<SyncBatch, 'device'>) =>
-      client.SyncUsage({ deviceId: device.id, token, batch: { device, ...batch } });
+      client.ImportUsage({ pairingSecret, batch: { device, ...batch } });
     let after = 0;
     while (true) {
       const page = yield* sql<{ rowid: number; payload: string; pricing_snapshot: string }>`

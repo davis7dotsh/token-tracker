@@ -334,6 +334,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         }),
         RegisterDevice: ({ pairingSecret, device }) => store.registerDevice(pairingSecret, device),
         SyncUsage: ({ deviceId, token, batch }) => store.syncUsage(deviceId, token, batch),
+        ImportUsage: ({ pairingSecret, batch }) => store.importUsage(pairingSecret, batch),
       };
     }),
   );
