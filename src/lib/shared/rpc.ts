@@ -6,6 +6,8 @@ import { PricingFailure, PricingInfo, PricingPolicy, PricingRule } from './prici
 export const PricingSettings = Schema.Struct({
   info: PricingInfo,
   unresolved: Schema.Array(Schema.Struct({ model: Schema.String, tokens: Schema.Number, reason: Schema.String })),
+  // Public hubs require the pairing secret for pricing changes from the browser.
+  secretRequired: Schema.Boolean,
 });
 export type PricingSettings = typeof PricingSettings.Type;
 
@@ -36,9 +38,14 @@ export const UsageRpc = RpcGroup.make(
     error: Schema.Union([PricingFailure, UsageFailure]),
   }),
   Rpc.make('GetPricingPolicy', {
-    payload: { revision: Schema.optionalKey(Schema.String) },
+    payload: {
+      revision: Schema.optionalKey(Schema.String),
+      deviceId: Schema.optionalKey(Schema.String),
+      token: Schema.optionalKey(Schema.String),
+      pairingSecret: Schema.optionalKey(Schema.String),
+    },
     success: Schema.NullOr(PricingPolicy),
-    error: PricingFailure,
+    error: Schema.Union([PricingFailure, Unauthorized, StorageFailure]),
   }),
   Rpc.make('SetPricingRule', {
     payload: { rule: PricingRule, adminSecret: Schema.String },
@@ -62,6 +69,11 @@ export const UsageRpc = RpcGroup.make(
   }),
   Rpc.make('SyncUsage', {
     payload: { deviceId: Schema.String, token: Schema.String, batch: SyncBatch },
+    success: SyncAck,
+    error: SyncFailure,
+  }),
+  Rpc.make('ImportUsage', {
+    payload: { pairingSecret: Schema.String, batch: SyncBatch },
     success: SyncAck,
     error: SyncFailure,
   }),

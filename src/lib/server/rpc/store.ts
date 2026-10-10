@@ -1,10 +1,7 @@
-import { SqliteClient } from '@effect/sql-sqlite-bun';
-import { Cache, Context, Effect, Exit, Layer, Schema } from 'effect';
+import { Cache, Context, Effect, Exit, Schema } from 'effect';
 import { SqlClient } from 'effect/sql';
+import { Buffer } from 'node:buffer';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
 import {
   Device,
   Harness,
@@ -20,61 +17,18 @@ const storageFailure = () => new StorageFailure({ message: 'Could not access the
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const equalSecret = (left: string, right: string) =>
   timingSafeEqual(Buffer.from(digest(left)), Buffer.from(digest(right)));
+// Durable Object SQLite accepts at most 100 bound parameters per statement.
+// Bulk ID lists travel as one JSON parameter; upserts bind six values per row.
+const rowsPerUpsert = 16;
 
-export type ServerOptions = {
-  dashboardOrigin?: string;
-  readonly dataDirectory?: string;
-  readonly pairingSecret?: string;
-  readonly autoRefreshPricing?: boolean;
-};
-
+// The store runs on any Effect SqlClient with SQLite semantics: bun:sqlite on a
+// self-hosted hub, or the Cloudflare hub's Durable Object storage.
 export class ServerConfiguration extends Context.Service<
   ServerConfiguration,
   {
-    readonly databasePath: string;
     readonly pairingSecret: string;
   }
 >()('token-tracker/ServerConfiguration') {}
-
-export const configurationLayer = (options: ServerOptions = {}) =>
-  Layer.effect(
-    ServerConfiguration,
-    Effect.tryPromise({
-      try: async () => {
-        const directory =
-          options.dataDirectory ??
-          process.env.TOKEN_TRACKER_DATA_DIR ??
-          join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'token-tracker');
-        await mkdir(directory, { recursive: true, mode: 0o700 });
-        let pairingSecret = options.pairingSecret ?? process.env.TOKEN_TRACKER_PAIRING_SECRET;
-        if (!pairingSecret) {
-          const secretPath = join(directory, 'pairing-secret');
-          try {
-            pairingSecret = (await readFile(secretPath, 'utf8')).trim();
-          } catch (error) {
-            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
-          }
-          if (!pairingSecret) {
-            pairingSecret = randomBytes(32).toString('base64url');
-            try {
-              await writeFile(secretPath, `${pairingSecret}\n`, { flag: 'wx', mode: 0o600 });
-            } catch (error) {
-              if (error instanceof Error && 'code' in error && error.code === 'EEXIST')
-                pairingSecret = (await readFile(secretPath, 'utf8')).trim();
-              else throw error;
-            }
-          }
-        }
-        if (pairingSecret.length < 16) throw new Error('Pairing secret must be at least 16 characters.');
-        return { databasePath: join(directory, 'usage.sqlite'), pairingSecret };
-      },
-      catch: () =>
-        new StorageFailure({
-          message:
-            'Could not initialize dashboard storage. Check the data directory and pairing secret (at least 16 characters).',
-        }),
-    }),
-  );
 
 const validateDevice = (device: DeviceRegistration) => {
   if (
@@ -241,7 +195,6 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         }),
       )
       .pipe(Effect.mapError(storageFailure));
-    yield* Effect.tryPromise({ try: () => chmod(configuration.databasePath, 0o600), catch: storageFailure });
     let revision = 0;
     let ownerRevision = 0;
     let copiedRevision = -1;
@@ -281,13 +234,19 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       return { device: registered, token };
     });
 
-    const syncUsage = Effect.fn('UsageStore.syncUsage')(function* (deviceId: string, token: string, batch: SyncBatch) {
+    const writeUsageBatch = Effect.fn('UsageStore.writeUsageBatch')(function* (
+      deviceId: string,
+      batch: SyncBatch,
+      authorization: { token: string } | { pairingSecret: string },
+    ) {
       yield* validateDevice(batch.device);
       if (batch.device.id !== deviceId)
         return yield* Effect.fail(new InvalidRequest({ message: 'The sync batch belongs to a different device.' }));
       if (batch.events.length + (batch.deletedIds?.length ?? 0) > 10_000) {
         return yield* Effect.fail(new InvalidRequest({ message: 'A sync batch can contain at most 10,000 records.' }));
       }
+      if ('pairingSecret' in authorization && batch.deletedIds?.length)
+        return yield* Effect.fail(new InvalidRequest({ message: 'Migration imports cannot delete usage records.' }));
       for (const event of batch.events) {
         const amounts = [
           event.inputTokens,
@@ -317,15 +276,25 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const result = yield* sql
         .withTransaction(
           Effect.gen(function* () {
-            const credentials = yield* sql<{
-              token_hash: string;
-            }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`;
-            if (!credentials[0] || !equalSecret(digest(token), credentials[0].token_hash)) {
-              return yield* Effect.fail(
-                new Unauthorized({
-                  message: 'This device is not connected, or its credential has expired. Connect it again.',
-                }),
-              );
+            if ('pairingSecret' in authorization) {
+              if (!equalSecret(authorization.pairingSecret, configuration.pairingSecret))
+                return yield* Effect.fail(new Unauthorized({ message: 'The pairing secret is incorrect.' }));
+              // Migration may create devices, but never rotates a connected
+              // collector's credential. New devices still pair normally later.
+              yield* sql`INSERT INTO devices (id, name, platform, token_hash)
+                VALUES (${deviceId}, ${batch.device.name}, ${batch.device.platform}, ${digest(randomBytes(32).toString('base64url'))})
+                ON CONFLICT (id) DO NOTHING`;
+            } else {
+              const credentials = yield* sql<{
+                token_hash: string;
+              }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`;
+              if (!credentials[0] || !equalSecret(digest(authorization.token), credentials[0].token_hash)) {
+                return yield* Effect.fail(
+                  new Unauthorized({
+                    message: 'This device is not connected, or its credential has expired. Connect it again.',
+                  }),
+                );
+              }
             }
             let accepted = 0;
             let updated = 0;
@@ -333,8 +302,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
             const existingRows = batch.events.length
               ? yield* sql.unsafe<{ id: string; payload_hash: string; payload: string }>(
-                  `SELECT id, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (${batch.events.map(() => '?').join(', ')})`,
-                  [deviceId, ...batch.events.map((event) => event.id)],
+                  'SELECT id, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?))',
+                  [deviceId, JSON.stringify(batch.events.map((event) => event.id))],
                 )
               : [];
             const existing = yield* Effect.try({
@@ -354,6 +323,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             }[] = [];
             for (const event of batch.events) {
               const previous = existing.get(event.id);
+              // A source backup can be older than corrections already synced
+              // by collectors. Imports only fill missing record IDs.
+              if (previous && 'pairingSecret' in authorization) continue;
               const normalized = {
                 ...preserveSessionMetadata(event, previous?.event),
                 ...event,
@@ -378,8 +350,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               else updated += 1;
               existing.set(event.id, { hash: payloadHash, event: normalized });
             }
-            for (let offset = 0; offset < changedRows.length; offset += 256) {
-              const chunk = changedRows.slice(offset, offset + 256);
+            for (let offset = 0; offset < changedRows.length; offset += rowsPerUpsert) {
+              const chunk = changedRows.slice(offset, offset + rowsPerUpsert);
               yield* sql.unsafe(
                 `INSERT INTO usage_events (device_id, id, timestamp, payload, payload_hash, pricing_snapshot)
                 VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}
@@ -400,8 +372,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             for (let offset = 0; offset < deletedIds.length; offset += 256) {
               const ids = deletedIds.slice(offset, offset + 256);
               const rows = yield* sql.unsafe(
-                `DELETE FROM usage_events WHERE device_id = ? AND id IN (${ids.map(() => '?').join(', ')}) RETURNING id`,
-                [deviceId, ...ids],
+                'DELETE FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?)) RETURNING id',
+                [deviceId, JSON.stringify(ids)],
               );
               deleted += rows.length;
             }
@@ -413,7 +385,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           }),
         )
         .pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
-      if (result.accepted || result.updated || result.deleted) revision++;
+      if ('pairingSecret' in authorization || result.accepted || result.updated || result.deleted) revision++;
       if (result.accepted || result.deleted) ownerRevision++;
       return result;
     });
@@ -638,23 +610,24 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       equalSecret(secret, configuration.pairingSecret)
         ? Effect.void
         : Effect.fail(new Unauthorized({ message: 'Pricing changes require the dashboard or its pairing secret.' }));
+    const authorizeDevice = Effect.fn('UsageStore.authorizeDevice')(function* (deviceId: string, token: string) {
+      const credentials = yield* sql<{
+        token_hash: string;
+      }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`.pipe(Effect.mapError(storageFailure));
+      if (!credentials[0] || !equalSecret(digest(token), credentials[0].token_hash))
+        return yield* new Unauthorized({ message: 'A connected device credential is required.' });
+    });
     return {
       getDevices,
       registerDevice,
-      syncUsage,
+      syncUsage: (deviceId: string, token: string, batch: SyncBatch) => writeUsageBatch(deviceId, batch, { token }),
+      importUsage: (pairingSecret: string, batch: SyncBatch) =>
+        writeUsageBatch(batch.device.id, batch, { pairingSecret }),
       getUsage,
       getDimensions,
       getRevision: () => revision,
       authorizePricing,
-      pricingDirectory: dirname(configuration.databasePath),
+      authorizeDevice,
     };
   }),
 }) {}
-
-export const usageStoreLayer = (options: ServerOptions = {}) => {
-  const configuration = configurationLayer(options);
-  const database = Layer.unwrap(
-    Effect.map(ServerConfiguration, (config) => SqliteClient.layer({ filename: config.databasePath })),
-  );
-  return Layer.effect(UsageStore, UsageStore.make).pipe(Layer.provide(Layer.provideMerge(database, configuration)));
-};

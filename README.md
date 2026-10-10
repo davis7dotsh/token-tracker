@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, Pi, and [Grok Build](https://github.com/xai-org/grok-build). Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit dashboard and CLI share typed Effect RPC contracts. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, and [Grok Build](https://github.com/xai-org/grok-build). Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
 
 The dashboard runs on Nexus at [https://nexus.otter-hawksbill.ts.net:10007](https://nexus.otter-hawksbill.ts.net:10007), available on the same Tailscale network.
 
@@ -25,6 +25,56 @@ The dashboard includes harness/model/provider/device/project filters, token and 
 Runed's `useSearchParams` keeps the period, filters, chart settings, breakdown, and session search/sort/page in the URL. Copying a link or reloading restores the view; browser back/forward restores earlier selections. Chart and table controls work locally without reloading usage data.
 
 The theme defaults to System, with persistent Light and Dark overrides. Initial loading, refreshes, empty results, and connection failures have separate states; existing results remain visible during refreshes.
+
+## Deploy
+
+Alchemy manages both targets from this repository. `alchemy.local.ts` runs the hub on your own machine; `alchemy.run.ts` hosts a passcode-protected dashboard on Cloudflare. Alchemy state lives in `.alchemy/` (local) or your Cloudflare account (cloud) and is never committed.
+
+### Your own machine
+
+```sh
+bun run deploy:local
+```
+
+- Builds the dashboard, installs it with its production dependencies in `${XDG_DATA_HOME:-~/.local/share}/token-tracker-dashboard`, and runs it with a pinned Bun as a user service: `token-tracker-dashboard.service` on Linux (systemd) or `sh.davis.token-tracker-dashboard` on macOS (LaunchAgent). The deploy finishes once `/api/health` responds.
+- Serves `http://127.0.0.1:8787` by default. Set `HOST`, `PORT`, and `ORIGIN` when deploying; `ORIGIN` is the public URL when a proxy such as Tailscale Serve terminates HTTPS. Data, configuration, download, and log directory overrides set at deploy time (`TOKEN_TRACKER_DATA_DIR`, `TOKEN_TRACKER_CONFIG_DIR`, `TOKEN_TRACKER_DOWNLOAD_DIR`, `CLAUDE_CONFIG_DIR`, …) are passed to the service.
+- The hub collects this machine's logs directly and keeps usage, the pairing secret, and pricing in its private data directory, as described below.
+- Rerun `bun run deploy:local` after pulling changes; it rebuilds and restarts only when sources changed. The installed copy is independent of the checkout, so switching branches or deleting a worktree does not affect the running service.
+- `bun run destroy:local` stops and removes the service and the installed app. Usage data stays in the data directory.
+- On Linux, enable lingering (`loginctl enable-linger`) so user services keep running after logout.
+- To require dashboard login in local development or on an HTTPS self-hosted server (as on Nexus), set `TOKEN_TRACKER_DASHBOARD_PASSCODE` before starting or deploying it. Without this variable, access remains private to your local network or tailnet.
+- Other stages get separate services and install directories: `bun alchemy deploy --config alchemy.local.ts --stage test` installs `token-tracker-dashboard-test`.
+
+### Cloudflare
+
+```sh
+bun alchemy profile edit --add Cloudflare   # once: OAuth or an API token, saved to ~/.alchemy
+export TOKEN_TRACKER_PAIRING_SECRET="$(openssl rand -base64 32)"   # or put it in .env
+read -rs 'TOKEN_TRACKER_DASHBOARD_PASSCODE?Dashboard passcode: '; export TOKEN_TRACKER_DASHBOARD_PASSCODE
+bun run deploy:cloud
+```
+
+- Deploys the `prod` stage and prints the dashboard's `workers.dev` URL. The first deploy asks to create Alchemy's state store in your account.
+- Two Workers: `Dashboard` serves SvelteKit and forwards `/rpc` and `/api/health` through a service binding to `Hub`, an Effect Worker with no public URL. `Hub` routes every request to one SQLite-backed Durable Object, the single writer for usage, devices, and pricing.
+- `TOKEN_TRACKER_PAIRING_SECRET` (at least 16 characters) is read from your shell or `.env` at deploy time and bound as a Worker secret. Keep it: devices need it to pair, and pricing changes need it. Deploying with a different value rotates it.
+- `TOKEN_TRACKER_DASHBOARD_PASSCODE` is required, between 16 and 1024 characters. Set a private passphrase in your shell or the ignored `.env`; Alchemy binds it as a Worker secret. Deployment fails if it is missing, and the dashboard fails closed if its runtime binding is missing.
+- Enter the passcode at `/login`. The server issues a signed, HttpOnly, SameSite=Strict cookie lasting 30 days (Secure on HTTPS). Dashboard pages, usage, device lists, and pricing reads require that session. Sign out clears the cookie; changing the passcode invalidates all existing sessions. Cloudflare limits sign-in attempts to five per minute per IP.
+- The passcode grants dashboard viewing; pricing changes still require the separate pairing secret in the Model pricing dialog. It is never sent to collectors or included in a cookie.
+- The hosted hub has no machine of its own. Every computer, including the one you deploy from, pairs as a client with `bun run cli connect <dashboard-url>`.
+- Collectors use their device token, and migration uses the pairing secret, without browser cookies. Upgrade collectors to this version when enabling dashboard authentication: pricing-policy reads now send their device credentials. Unauthenticated RPC only exposes these credential-checked collector and administration methods, never dashboard usage or device reads. Public health probes return status only.
+- Package downloads (`/downloads/*`) are served only by self-hosted hubs.
+- `bun run dev:cloud` runs the same Workers and Durable Object locally in workerd at http://localhost:1337, without a Cloudflare account.
+- `bun run destroy:cloud` deletes both Workers and the Durable Object, including its usage history.
+
+Large histories exceed the Workers Free plan. A Free account has 5 GB of Durable Object storage in total, and a dashboard read over a million records takes several seconds of CPU. Use Workers Paid for a hub of that size.
+
+To move an existing hub's history into another hub, stop the old hub (or copy its data directory) and replay it:
+
+```sh
+TOKEN_TRACKER_PAIRING_SECRET='the-new-hub-secret' bun scripts/migrate-hub.ts ~/.local/share/token-tracker https://your-dashboard.workers.dev
+```
+
+The script copies devices, missing usage records with their pricing snapshots, source diagnostics, and pricing rules through the new hub's RPCs. The target must run a version that supports `ImportUsage`. It checks source pricing before copying: unreadable or invalid pricing state, different source/target catalog rates, and target pricing rules absent from the source stop the migration before writing to the target. Align the catalogs and reconcile target-only rules before retrying; the script does not delete target rules automatically. Rerunning preserves existing target records and credentials for collectors already connected to the target. Then reconnect each device to the new URL; its uploads match the migrated records instead of adding usage again. A self-hosted hub's own machine does not upload to itself, so connect that machine as a client too.
 
 ## Local usage checks
 
@@ -163,7 +213,7 @@ Open **Model pricing** beside the cost metric or in the footer. The small notifi
 
 The server stores rules and catalog data atomically in private `pricing-state.json` in its data directory. It checks for new catalog prices daily and retains the previous catalog and all rules if refreshing fails. **Refresh prices** requests an immediate update. Updated collectors preserve the original model ID, service tier, cache duration, and complete native Grok cost so historical usage can be repriced consistently on the hub; older synchronized records without enough metadata keep their reported costs until their machine resyncs with the updated collector. Token totals are unaffected by pricing changes.
 
-In this personal deployment, anyone who can access the dashboard through the tailnet can manage pricing. Browser writes require a same-origin request; direct RPC writes require the hub pairing secret. Hosted accounts will need owner roles before broader sharing.
+On a self-hosted hub, anyone who can access the dashboard through the tailnet can manage pricing. Browser writes require a same-origin request; direct RPC writes require the hub pairing secret. The public Cloudflare dashboard always requires the pairing secret. Hosted accounts will need owner roles before broader sharing.
 
 To update the initial bundled fallback for a distribution, rebuild after running:
 
@@ -173,31 +223,18 @@ bun run update:pricing
 
 ## Tailscale access
 
-Nexus runs the dashboard from `/home/davis/services/token-tracker` through the persistent `token-tracker.service` user service. Bun listens on `127.0.0.1:8787`; Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves Nexus's other HTTPS services untouched.
-
-The checked-in [Nexus systemd unit](deploy/nexus/token-tracker.service) pins the managed Bun runtime and private data/configuration directories. After preparing the build and migrating the hub state, install it on Nexus:
+Nexus runs the self-hosted dashboard. Bun listens on `127.0.0.1:8787`; Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves Nexus's other HTTPS services untouched. The public origin lets browser pricing edits pass the same-origin check:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-install -m 600 deploy/nexus/token-tracker.service ~/.config/systemd/user/token-tracker.service
-systemctl --user daemon-reload
-systemctl --user enable --now token-tracker.service
-```
-
-The production environment must set the public origin so browser pricing edits pass the same-origin check:
-
-```sh
-HOST=127.0.0.1 PORT=8787 ORIGIN=https://nexus.otter-hawksbill.ts.net:10007 bun run start
-```
-
-Configure the persistent HTTPS proxy and verify the dashboard:
-
-```sh
+ORIGIN=https://nexus.otter-hawksbill.ts.net:10007 \
+TOKEN_TRACKER_DOWNLOAD_DIR=/home/davis/services/token-tracker/artifacts/downloads \
+bun run deploy:local
 tailscale serve --bg --https=10007 http://127.0.0.1:8787
 tailscale serve status
-systemctl --user status token-tracker.service
 curl -fsS https://nexus.otter-hawksbill.ts.net:10007/api/health
 ```
+
+To switch Nexus from the previous hand-installed unit, stop it first (`systemctl --user disable --now token-tracker.service`), then deploy. Both use the same data directory, so no data moves.
 
 The hub's durable state is `usage.sqlite`, `pairing-secret`, and `pricing-state.json` in `${XDG_DATA_HOME:-~/.local/share}/token-tracker`, or `TOKEN_TRACKER_DATA_DIR` when configured. Keep an immutable migration backup separate from the live data directory. Stop the old hub before taking the final SQLite backup so no acknowledged uploads arrive after the snapshot; use SQLite's backup API or copy only after the database has closed, accounting for any WAL files.
 
@@ -239,5 +276,9 @@ Tests cover parser deduplication/compaction, cache and pricing accounting, filte
 - `src/lib/client/rpc.ts`: scoped RPC client shared by Svelte and the CLI.
 - `src/cli`: Effect commands, configuration, incremental sync, and scheduling.
 - `src/routes` and `src/lib/components`: SvelteKit dashboard.
+- `src/lib/server/host`: the `#hub` request handler for each host. Bun builds use `bun.ts`; the Cloudflare stack aliases `cloudflare.ts`.
+- `src/cloud`: the Cloudflare Hub Worker and its SQLite Durable Object.
+- `src/deploy`: the Alchemy resource that installs the self-hosted dashboard service.
+- `alchemy.local.ts` and `alchemy.run.ts`: the self-hosted and Cloudflare stacks.
 
 `POST /rpc` is the typed Effect RPC transport; `GET /api/health` reports health. CSV export is generated from displayed dashboard data in the browser.

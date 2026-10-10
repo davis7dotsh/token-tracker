@@ -1,4 +1,4 @@
-import { handleRpcRequest } from '#lib/server/rpc/server.ts';
+import { handleHubRequest } from '#hub';
 import type { RequestHandler } from './$types';
 
-export const POST: RequestHandler = ({ request }) => handleRpcRequest(request);
+export const POST: RequestHandler = (event) => handleHubRequest(event);

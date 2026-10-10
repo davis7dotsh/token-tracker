@@ -27,14 +27,14 @@ const run = Effect.fn('cli.scheduler.run')(function* (command: readonly string[]
     );
 });
 
-const systemdQuote = (value: string) =>
+export const systemdQuote = (value: string) =>
   `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$')}"`;
-const xml = (value: string) =>
+export const xml = (value: string) =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const absoluteSourcePath = (value: string) =>
   resolve(value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value);
-const launchdDomains = () => [`gui/${process.getuid?.() ?? 0}`, `user/${process.getuid?.() ?? 0}`];
-const scheduledEnvironment = (directory: string) => [
+export const launchdDomains = () => [`gui/${process.getuid?.() ?? 0}`, `user/${process.getuid?.() ?? 0}`];
+export const scheduledEnvironment = (directory: string) => [
   { name: 'TOKEN_TRACKER_CONFIG_DIR', value: directory },
   ...[
     'HOME',
