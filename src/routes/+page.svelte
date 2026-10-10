@@ -740,16 +740,7 @@
                       </a>{:else}<span
                         >{hasTitle ? session.projectName || projectName(session.project) : session.project}</span
                       >{/if}
-                  </div>
-                  <div class="session-footer">
-                    <span class="session-id" title={session.id}
-                      >{session.id.slice(0, 16)} · {deviceName(session.deviceId)}</span
-                    >{#if nativeUrl && threadUrl}<a
-                        href={threadUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        aria-label={`Open T3 Code thread in browser: ${name}`}>Web</a
-                      >{/if}
+                    <span class="session-device">- {deviceName(session.deviceId)}</span>
                   </div></td
                 ><td
                   ><span class="session-harness"

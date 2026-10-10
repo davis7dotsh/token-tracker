@@ -1043,7 +1043,6 @@ td:nth-child(2) {
   font-variant-numeric: tabular-nums;
 }
 .session-project,
-.session-id,
 .session-harness,
 .session-model {
   display: block;
@@ -1055,29 +1054,10 @@ td:nth-child(2) {
   font-size: 18px;
   font-weight: 500;
 }
-.session-id {
-  font-size: 12px;
-  color: var(--table-secondary);
-  margin-top: 2px;
-}
-.session-footer {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-.session-footer > .session-id {
-  min-width: 0;
-}
-.session-footer > a {
-  flex-shrink: 0;
-  color: var(--table-secondary);
-  font-size: 12px;
-  text-underline-offset: 3px;
-}
-.session-footer > a:hover {
-  color: var(--accent);
-}
 .session-context {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   height: 22px;
   margin-top: 3px;
   color: var(--table-secondary);
@@ -1086,6 +1066,14 @@ td:nth-child(2) {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.session-context > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-device {
+  flex-shrink: 0;
+}
 .session-project a,
 .session-context a {
   display: flex;
@@ -1093,6 +1081,7 @@ td:nth-child(2) {
   gap: 6px;
   width: fit-content;
   max-width: 100%;
+  min-width: 0;
   min-height: 22px;
   color: inherit;
   text-decoration: none;
