@@ -11,6 +11,7 @@ import {
   SourceStatus,
   UsageEvent,
   type DeviceRegistration,
+  type SessionMetadata,
   type SyncBatch,
 } from '../../shared/domain';
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
@@ -93,6 +94,34 @@ const eventJson = Schema.fromJsonString(UsageEvent);
 const sourcesJson = Schema.fromJsonString(Schema.Array(SourceStatus));
 const decodeEvent = Schema.decodeUnknownSync(eventJson);
 const decodeSources = Schema.decodeUnknownSync(sourcesJson);
+// Optional metadata can disappear temporarily when a collector cannot read
+// T3's database. Absence means unknown, rather than a request to erase it.
+const preserveSessionMetadata = (incoming: UsageEvent, previous?: SessionMetadata) => ({
+  sessionTitle: incoming.sessionTitle ?? previous?.sessionTitle,
+  projectName: incoming.projectName ?? previous?.projectName,
+  t3ThreadId:
+    incoming.t3ThreadId ??
+    (incoming.t3ThreadUrl === undefined || incoming.t3ThreadUrl === previous?.t3ThreadUrl
+      ? previous?.t3ThreadId
+      : undefined),
+  t3ThreadUrl:
+    incoming.t3ThreadUrl ??
+    (incoming.t3ThreadId === undefined || incoming.t3ThreadId === previous?.t3ThreadId
+      ? previous?.t3ThreadUrl
+      : undefined),
+});
+const preserveRepository = (incoming: UsageEvent, previous?: UsageEvent) =>
+  previous?.t3ThreadId &&
+  previous.repository &&
+  !previous.repository.startsWith('local:') &&
+  incoming.t3ThreadId === undefined &&
+  incoming.t3ThreadUrl === undefined &&
+  incoming.project === previous.project &&
+  incoming.harness === previous.harness &&
+  incoming.sessionId === previous.sessionId &&
+  (!incoming.repository || incoming.repository.startsWith('local:'))
+    ? previous.repository
+    : incoming.repository;
 const UsageDimension = Schema.Struct({
   deviceId: Schema.String,
   harness: Harness,
@@ -303,12 +332,18 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             let deleted = 0;
             const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
             const existingRows = batch.events.length
-              ? yield* sql.unsafe<{ id: string; payload_hash: string }>(
-                  `SELECT id, payload_hash FROM usage_events WHERE device_id = ? AND id IN (${batch.events.map(() => '?').join(', ')})`,
+              ? yield* sql.unsafe<{ id: string; payload_hash: string; payload: string }>(
+                  `SELECT id, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (${batch.events.map(() => '?').join(', ')})`,
                   [deviceId, ...batch.events.map((event) => event.id)],
                 )
               : [];
-            const existing = new Map(existingRows.map((row) => [row.id, row.payload_hash]));
+            const existing = yield* Effect.try({
+              try: () =>
+                new Map(
+                  existingRows.map((row) => [row.id, { hash: row.payload_hash, event: decodeEvent(row.payload) }]),
+                ),
+              catch: storageFailure,
+            });
             const changedRows: {
               device_id: string;
               id: string;
@@ -318,11 +353,19 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               pricing_snapshot: string;
             }[] = [];
             for (const event of batch.events) {
-              const normalized = { ...event, deviceId, costUsd: event.costKnown ? event.costUsd : 0 };
+              const previous = existing.get(event.id);
+              const normalized = {
+                ...preserveSessionMetadata(event, previous?.event),
+                ...event,
+                // A missing optional T3 binding is not evidence that an attached
+                // remote was removed. Explicit bindings and cwd remotes still win.
+                repository: preserveRepository(event, previous?.event),
+                deviceId,
+                costUsd: event.costKnown ? event.costUsd : 0,
+              };
               const payload = JSON.stringify(normalized);
               const payloadHash = digest(JSON.stringify([pricingSnapshot, payload]));
-              const previous = existing.get(event.id);
-              if (previous === payloadHash) continue;
+              if (previous?.hash === payloadHash) continue;
               changedRows.push({
                 device_id: deviceId,
                 id: event.id,
@@ -333,7 +376,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               });
               if (previous === undefined) accepted += 1;
               else updated += 1;
-              existing.set(event.id, payloadHash);
+              existing.set(event.id, { hash: payloadHash, event: normalized });
             }
             for (let offset = 0; offset < changedRows.length; offset += 256) {
               const chunk = changedRows.slice(offset, offset + 256);

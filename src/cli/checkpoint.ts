@@ -28,6 +28,19 @@ export const eventDigest = (event: UsageEvent) =>
         ...(event.requests === undefined && event.reportedCostUsd === undefined
           ? []
           : [{ requests: event.requests, reportedCostUsd: event.reportedCostUsd }]),
+        ...(event.sessionTitle === undefined &&
+        event.projectName === undefined &&
+        event.t3ThreadId === undefined &&
+        event.t3ThreadUrl === undefined
+          ? []
+          : [
+              {
+                sessionTitle: event.sessionTitle,
+                projectName: event.projectName,
+                t3ThreadId: event.t3ThreadId,
+                t3ThreadUrl: event.t3ThreadUrl,
+              },
+            ]),
       ]),
     )
     .digest('hex');

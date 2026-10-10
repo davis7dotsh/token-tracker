@@ -30,6 +30,29 @@ const empty: Checkpoint = {
 };
 
 describe('incremental sync checkpoints', () => {
+  test('session metadata refreshes upload existing records without changing legacy fingerprints', () => {
+    const original = event('old');
+    expect(eventDigest(original)).toBe('caeff00cab6c83509b9564517a23c1358f0dd9e0aa24b7874a88f0862869b53f');
+    const enriched = {
+      ...original,
+      sessionTitle: 'Improve session navigation',
+      projectName: 'Token tracker',
+      t3ThreadId: 'thread-1',
+      t3ThreadUrl: 'https://t3.example/thread/thread-1',
+    };
+    const checkpoint = acknowledgeEvents(empty, [enriched], '2026-10-10T00:00:00Z');
+    expect(changedEvents([enriched], checkpoint)).toEqual([]);
+    for (const correction of [
+      { ...enriched, sessionTitle: 'Rename the thread' },
+      { ...enriched, projectName: 'My token tracker' },
+      { ...enriched, t3ThreadId: 'thread-2' },
+      { ...enriched, t3ThreadUrl: 'https://mobile.example/thread/thread-1' },
+      original,
+    ]) {
+      expect(changedEvents([correction], checkpoint)).toEqual([correction]);
+    }
+  });
+
   test('aggregate accounting metadata uploads corrections without changing existing checkpoints', () => {
     const original = event('old');
     expect(eventDigest(original)).toBe('caeff00cab6c83509b9564517a23c1358f0dd9e0aa24b7874a88f0862869b53f');

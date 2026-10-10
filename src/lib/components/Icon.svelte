@@ -17,6 +17,8 @@
     info: 'M12 11v6m0-10v.2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
     terminal: 'm5 7 5 5-5 5m8 0h6',
     network: 'M8 3h8v6H8ZM2 16h8v5H2Zm12 0h8v5h-8ZM12 9v4M6 16v-3h12v3',
+    external: 'M14 3h7v7m0-7L10 14M10 3H3v18h18v-7',
+    repository: 'M6 3h14v18H6a3 3 0 0 1 0-6h14M6 3a3 3 0 0 0-3 3v12m5 0h8M8 7h8',
   };
 </script>
 
