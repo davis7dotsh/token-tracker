@@ -22,6 +22,9 @@ export const handle: Handle = async ({ event, resolve }) => {
   // The host sends requests without a session to a separate collector RPC
   // group. It exposes authenticated uploads, never dashboard reads.
   if (event.route.id === '/rpc') return resolve(event);
+  // Package installers cannot send a dashboard session. The hub restricts
+  // downloads to its explicit CLI artifact allowlist.
+  if (event.route.id === '/downloads/[file]' && ['GET', 'HEAD'].includes(event.request.method)) return resolve(event);
   if (!event.locals.dashboardAuthenticated) {
     if (event.url.pathname === '/api/health') {
       const response = await resolve(event);
