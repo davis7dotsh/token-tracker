@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BunServices } from '@effect/platform-bun';
 import { Effect, FileSystem } from 'effect';
+import { createServer } from 'vite';
 import { collectUsage } from '../../src/lib/server/usage';
 import { readT3Metadata } from '../../src/lib/server/usage/t3';
+import { runT3DatabaseProcess } from '../../src/lib/server/usage/t3-process';
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -76,6 +78,34 @@ const read = (home: string, options: { dataDirectory?: string; url?: string } = 
   Effect.runPromise(readT3Metadata({ home, ...options }).pipe(Effect.provide(BunServices.layer)));
 
 describe('T3 session metadata', () => {
+  test('the Vite dev server reader retains its SQLite dependency in the isolated subprocess', async () => {
+    const { database, dataDirectory } = await fixture();
+    bind(database);
+    database.close();
+    const server = await createServer({
+      configFile: false,
+      server: { middlewareMode: true, hmr: false, watch: null },
+    });
+    try {
+      const { queryT3Databases } = (await server.ssrLoadModule(
+        '/src/lib/server/usage/t3-database.ts',
+      )) as typeof import('../../src/lib/server/usage/t3-database');
+      const metadata = await Effect.runPromise(
+        runT3DatabaseProcess(queryT3Databases, {
+          filenames: [join(dataDirectory, 'statev2.sqlite')],
+          environmentId: 'environment:enceladus',
+          baseUrl: 'https://app.t3.codes',
+        }),
+      );
+      expect(metadata.get('claude:test-session')?.sessionTitle).toBe('Make sessions useful');
+      expect(metadata.get('claude:test-session')?.t3ThreadUrl).toBe(
+        'https://app.t3.codes/environment%3Aenceladus/thread%3Aoriginal',
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
   test('uses native harness IDs, exact drivers, and environment-scoped web URLs without reading conversations', async () => {
     const { home, database, dataDirectory } = await fixture();
     bind(database);

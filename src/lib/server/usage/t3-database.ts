@@ -6,7 +6,11 @@ export type T3DatabaseInput = { filenames: string[]; environmentId?: string; bas
 // Keep all runtime dependencies inside this function: its source is embedded
 // in a child Bun process, including in the minified standalone CLI.
 export const queryT3Databases = async (input: T3DatabaseInput) => {
-  const { Database } = await import('bun:sqlite');
+  // Vite rewrites dynamic imports to helpers outside this function. Resolve
+  // SQLite inside the child so the embedded source also works in dev mode.
+  const { Database } = process.getBuiltinModule('node:module').createRequire(process.execPath)(
+    'bun:sqlite',
+  ) as typeof import('bun:sqlite');
   const text = (value: unknown, maximum = 1024) =>
     typeof value === 'string' && value.trim().length > 0 && value.length <= maximum ? value.trim() : undefined;
   const harness = (driver: unknown) => {
