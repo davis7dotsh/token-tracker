@@ -15,6 +15,7 @@ import { estimateCost, resolveDisplayModel } from './pricing';
 import { loadPricing } from './pricing-runtime';
 import { makeRepositoryResolver } from './repository';
 import { collectGrokFiles } from './grok';
+import { readT3Metadata, t3MetadataKey } from './t3';
 
 export { buildDashboard, provider, validateTimezone } from './dashboard';
 export { canonicalRepository, resolveRepository } from './repository';
@@ -28,6 +29,8 @@ export type CollectionOptions = {
   grokDirs?: readonly string[];
   deviceId?: string;
   pricingPolicy?: PricingPolicy;
+  t3DataDirectory?: string;
+  t3Url?: string;
   // Only background collection writes this optional metadata cache. Manual
   // checks omit it and remain entirely read-only.
   cacheDirectory?: string;
@@ -213,20 +216,51 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     if (!repositories.has(entry.event.project))
       repositories.set(entry.event.project, yield* resolveRepository(entry.event.project));
   }
+  // T3 titles and thread bindings can change without touching usage logs. Read
+  // them after the parser cache on every collection so warm syncs refresh them.
+  const t3Metadata = yield* readT3Metadata({ home, dataDirectory: options.t3DataDirectory, url: options.t3Url });
+  const sessionRepositories = new Map<string, string>();
+  const attemptedSessionRepositories = new Set<string>();
+  for (const entry of entries) {
+    const key = t3MetadataKey(entry.event);
+    const repository = repositories.get(entry.event.project);
+    const metadata = t3Metadata.get(key);
+    if (!metadata || attemptedSessionRepositories.has(key) || (repository && !repository.startsWith('local:')))
+      continue;
+    attemptedSessionRepositories.add(key);
+    for (const cwd of metadata.repositoryPaths) {
+      if (!repositories.has(cwd)) repositories.set(cwd, yield* resolveRepository(cwd));
+      const attached = repositories.get(cwd);
+      if (attached && !attached.startsWith('local:')) {
+        sessionRepositories.set(key, attached);
+        break;
+      }
+    }
+  }
   const unknownModels = new Set<string>();
   const events: UsageEvent[] = entries
     .map((entry) => {
       const cost = estimateCost(entry.event, entry.cacheWrite1h, entry.tier, pricingPolicy);
       if (!cost.costKnown) unknownModels.add(entry.event.model);
       sources[entry.source].events++;
+      const key = t3MetadataKey(entry.event);
+      const metadata = t3Metadata.get(key);
+      const repository = repositories.get(entry.event.project);
       return {
         ...entry.event,
+        ...(metadata?.sessionTitle ? { sessionTitle: metadata.sessionTitle } : {}),
+        ...(metadata?.projectName ? { projectName: metadata.projectName } : {}),
+        ...(metadata?.t3ThreadId ? { t3ThreadId: metadata.t3ThreadId } : {}),
+        ...(metadata?.t3ThreadUrl !== undefined ? { t3ThreadUrl: metadata.t3ThreadUrl } : {}),
         ...cost,
         rawModel: entry.event.model,
         model: resolveDisplayModel(entry.event.model, pricingPolicy),
         serviceTier: entry.tier,
         cacheWrite1hTokens: entry.cacheWrite1h,
-        repository: repositories.get(entry.event.project) ?? null,
+        repository:
+          repository && !repository.startsWith('local:')
+            ? repository
+            : (sessionRepositories.get(key) ?? repository ?? null),
         ...(options.deviceId ? { deviceId: options.deviceId } : {}),
       };
     })
