@@ -110,6 +110,18 @@ const preserveSessionMetadata = (incoming: UsageEvent, previous?: SessionMetadat
       ? previous?.t3ThreadUrl
       : undefined),
 });
+const preserveRepository = (incoming: UsageEvent, previous?: UsageEvent) =>
+  previous?.t3ThreadId &&
+  previous.repository &&
+  !previous.repository.startsWith('local:') &&
+  incoming.t3ThreadId === undefined &&
+  incoming.t3ThreadUrl === undefined &&
+  incoming.project === previous.project &&
+  incoming.harness === previous.harness &&
+  incoming.sessionId === previous.sessionId &&
+  (!incoming.repository || incoming.repository.startsWith('local:'))
+    ? previous.repository
+    : incoming.repository;
 const UsageDimension = Schema.Struct({
   deviceId: Schema.String,
   harness: Harness,
@@ -345,6 +357,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               const normalized = {
                 ...preserveSessionMetadata(event, previous?.event),
                 ...event,
+                // A missing optional T3 binding is not evidence that an attached
+                // remote was removed. Explicit bindings and cwd remotes still win.
+                repository: preserveRepository(event, previous?.event),
                 deviceId,
                 costUsd: event.costKnown ? event.costUsd : 0,
               };

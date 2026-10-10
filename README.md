@@ -139,7 +139,9 @@ Sessions created in T3 Code display their thread title and attached project, wit
 - Set `TOKEN_TRACKER_T3_URL` to your T3 web base URL if you use a private address instead of `https://app.t3.codes`.
 - Upgrade the collector on each device and run `token-tracker sync` to backfill available historical sessions. Title and project edits refresh on later collections even when the usage logs have not changed. Old clients and stored records remain readable; missing, incompatible, or unreadable T3 metadata leaves accounting intact.
 
-The hub keeps previously synced titles and links when optional metadata is unavailable. Confirmed T3 thread deletions clear their conversation links; migrated legacy records cannot restore them.
+The hub keeps previously synced titles, thread links, and attached remote repositories when optional T3 metadata is unavailable. A scratch-directory fallback cannot overwrite a saved remote without a current thread binding; confirmed bindings and newly resolved cwd remotes still update repository attribution. Confirmed T3 thread deletions clear their conversation links; migrated legacy records cannot restore them.
+
+SQLite metadata reads run in an isolated Bun process; the one-second collection deadline kills and waits for that process to exit, so a slow query cannot block the dashboard event loop.
 
 Only thread IDs, titles, project names, and generated links accompany accounting uploads. T3 conversations, tool output, and credentials are not queried or uploaded. Search includes thread titles, project names, paths, repository identities, and thread IDs; CSV exports include the thread and repository links.
 

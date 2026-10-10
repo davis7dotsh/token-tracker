@@ -88,6 +88,25 @@ test('legacy uploads gain session titles and T3 links through metadata-only RPC 
     const corrected = await browser.getUsage();
     expect(corrected.sessions[0]).toMatchObject({ ...metadata, sessionTitle: 'Renamed thread' });
     expect(corrected.totals).toMatchObject({ tokens: 205, sessions: 1 });
+    // Scratch cwd fallbacks must not erase the saved attached repository when
+    // an optional binding is temporarily absent, including older-client uploads.
+    for (const repository of [null, 'local:/work/app']) {
+      expect(await upload({ ...localEvent, outputTokens: 90, repository })).toMatchObject({ updated: 1 });
+      expect(await upload({ ...localEvent, outputTokens: 90, repository })).toMatchObject({ updated: 0 });
+      const filtered = await browser.getUsage({ projects: ['github.com/ben/app'] });
+      expect(filtered.sessions[0]?.repository).toBe(localEvent.repository);
+      expect(filtered.totals).toMatchObject({ tokens: 215, sessions: 1 });
+      // A readable binding can confirm removal of an attached remote.
+      expect(await upload({ ...localEvent, outputTokens: 90, repository, t3ThreadId: 'thread-1' })).toMatchObject({
+        updated: 1,
+      });
+      expect((await browser.getUsage()).sessions[0]?.repository).toBe(repository);
+      await upload({ ...localEvent, outputTokens: 80, ...metadata, sessionTitle: 'Renamed thread' });
+    }
+    // A newly resolved cwd remote is authoritative even without T3 metadata.
+    await upload({ ...localEvent, outputTokens: 80, repository: 'github.com/ben/moved' });
+    expect((await browser.getUsage()).sessions[0]?.repository).toBe('github.com/ben/moved');
+    await upload({ ...localEvent, outputTokens: 80, ...metadata, sessionTitle: 'Renamed thread' });
     expect(await upload({ ...localEvent, outputTokens: 80, t3ThreadId: 'thread-2' })).toMatchObject({
       accepted: 0,
       updated: 1,

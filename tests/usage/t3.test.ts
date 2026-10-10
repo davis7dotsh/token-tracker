@@ -286,6 +286,17 @@ describe('T3 session metadata', () => {
       "UPDATE orchestration_v2_projection_threads SET title = 'Updated thread title'; UPDATE projection_projects SET title = 'Renamed project'",
     );
     const warm = await collect();
+    database.exec('BEGIN EXCLUSIVE');
+    try {
+      const unavailable = await collect();
+      // The sync store must treat this fallback as an unavailable binding,
+      // preserving its previously saved attached remote (covered over RPC).
+      expect(unavailable.events[0]).toMatchObject({ repository: null, project: scratch });
+      expect(unavailable.events[0].t3ThreadId).toBeUndefined();
+      expect(unavailable.events[0].inputTokens).toBe(first.events[0].inputTokens);
+    } finally {
+      database.exec('ROLLBACK');
+    }
     database.close();
     expect(rawReads).toBe(1);
     expect(warm.events[0]).toEqual({
