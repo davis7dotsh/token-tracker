@@ -5,8 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDashboardClient, rpcClientLayer, UsageClient } from '../../src/lib/client/rpc';
-import { LocalUsage, makeRpcWebHandler } from '../../src/lib/server/rpc/server';
-import { UsageStore, usageStoreLayer } from '../../src/lib/server/rpc/store';
+import { LocalUsage, makeRpcWebHandler, usageStoreLayer } from '../../src/lib/server/rpc/server';
+import { UsageStore } from '../../src/lib/server/rpc/store';
 import { buildDashboard } from '../../src/lib/server/usage/dashboard';
 import { CollectionError, type UsageEvent, type DeviceRegistration } from '../../src/lib/shared/domain';
 

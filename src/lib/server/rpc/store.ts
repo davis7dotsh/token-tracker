@@ -1,10 +1,7 @@
-import { SqliteClient } from '@effect/sql-sqlite-bun';
-import { Cache, Context, Effect, Exit, Layer, Schema } from 'effect';
+import { Cache, Context, Effect, Exit, Schema } from 'effect';
 import { SqlClient } from 'effect/sql';
+import { Buffer } from 'node:buffer';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
 import {
   Device,
   Harness,
@@ -19,61 +16,18 @@ const storageFailure = () => new StorageFailure({ message: 'Could not access the
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const equalSecret = (left: string, right: string) =>
   timingSafeEqual(Buffer.from(digest(left)), Buffer.from(digest(right)));
+// Durable Object SQLite accepts at most 100 bound parameters per statement.
+// Bulk ID lists travel as one JSON parameter; upserts bind six values per row.
+const rowsPerUpsert = 16;
 
-export type ServerOptions = {
-  dashboardOrigin?: string;
-  readonly dataDirectory?: string;
-  readonly pairingSecret?: string;
-  readonly autoRefreshPricing?: boolean;
-};
-
+// The store runs on any Effect SqlClient with SQLite semantics: bun:sqlite on a
+// self-hosted hub, or the Cloudflare hub's Durable Object storage.
 export class ServerConfiguration extends Context.Service<
   ServerConfiguration,
   {
-    readonly databasePath: string;
     readonly pairingSecret: string;
   }
 >()('token-tracker/ServerConfiguration') {}
-
-export const configurationLayer = (options: ServerOptions = {}) =>
-  Layer.effect(
-    ServerConfiguration,
-    Effect.tryPromise({
-      try: async () => {
-        const directory =
-          options.dataDirectory ??
-          process.env.TOKEN_TRACKER_DATA_DIR ??
-          join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'token-tracker');
-        await mkdir(directory, { recursive: true, mode: 0o700 });
-        let pairingSecret = options.pairingSecret ?? process.env.TOKEN_TRACKER_PAIRING_SECRET;
-        if (!pairingSecret) {
-          const secretPath = join(directory, 'pairing-secret');
-          try {
-            pairingSecret = (await readFile(secretPath, 'utf8')).trim();
-          } catch (error) {
-            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
-          }
-          if (!pairingSecret) {
-            pairingSecret = randomBytes(32).toString('base64url');
-            try {
-              await writeFile(secretPath, `${pairingSecret}\n`, { flag: 'wx', mode: 0o600 });
-            } catch (error) {
-              if (error instanceof Error && 'code' in error && error.code === 'EEXIST')
-                pairingSecret = (await readFile(secretPath, 'utf8')).trim();
-              else throw error;
-            }
-          }
-        }
-        if (pairingSecret.length < 16) throw new Error('Pairing secret must be at least 16 characters.');
-        return { databasePath: join(directory, 'usage.sqlite'), pairingSecret };
-      },
-      catch: () =>
-        new StorageFailure({
-          message:
-            'Could not initialize dashboard storage. Check the data directory and pairing secret (at least 16 characters).',
-        }),
-    }),
-  );
 
 const validateDevice = (device: DeviceRegistration) => {
   if (
@@ -212,7 +166,6 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         }),
       )
       .pipe(Effect.mapError(storageFailure));
-    yield* Effect.tryPromise({ try: () => chmod(configuration.databasePath, 0o600), catch: storageFailure });
     let revision = 0;
     let ownerRevision = 0;
     let copiedRevision = -1;
@@ -304,8 +257,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
             const existingRows = batch.events.length
               ? yield* sql.unsafe<{ id: string; payload_hash: string }>(
-                  `SELECT id, payload_hash FROM usage_events WHERE device_id = ? AND id IN (${batch.events.map(() => '?').join(', ')})`,
-                  [deviceId, ...batch.events.map((event) => event.id)],
+                  'SELECT id, payload_hash FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?))',
+                  [deviceId, JSON.stringify(batch.events.map((event) => event.id))],
                 )
               : [];
             const existing = new Map(existingRows.map((row) => [row.id, row.payload_hash]));
@@ -335,8 +288,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               else updated += 1;
               existing.set(event.id, payloadHash);
             }
-            for (let offset = 0; offset < changedRows.length; offset += 256) {
-              const chunk = changedRows.slice(offset, offset + 256);
+            for (let offset = 0; offset < changedRows.length; offset += rowsPerUpsert) {
+              const chunk = changedRows.slice(offset, offset + rowsPerUpsert);
               yield* sql.unsafe(
                 `INSERT INTO usage_events (device_id, id, timestamp, payload, payload_hash, pricing_snapshot)
                 VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}
@@ -357,8 +310,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             for (let offset = 0; offset < deletedIds.length; offset += 256) {
               const ids = deletedIds.slice(offset, offset + 256);
               const rows = yield* sql.unsafe(
-                `DELETE FROM usage_events WHERE device_id = ? AND id IN (${ids.map(() => '?').join(', ')}) RETURNING id`,
-                [deviceId, ...ids],
+                'DELETE FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?)) RETURNING id',
+                [deviceId, JSON.stringify(ids)],
               );
               deleted += rows.length;
             }
@@ -603,15 +556,6 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       getDimensions,
       getRevision: () => revision,
       authorizePricing,
-      pricingDirectory: dirname(configuration.databasePath),
     };
   }),
 }) {}
-
-export const usageStoreLayer = (options: ServerOptions = {}) => {
-  const configuration = configurationLayer(options);
-  const database = Layer.unwrap(
-    Effect.map(ServerConfiguration, (config) => SqliteClient.layer({ filename: config.databasePath })),
-  );
-  return Layer.effect(UsageStore, UsageStore.make).pipe(Layer.provide(Layer.provideMerge(database, configuration)));
-};

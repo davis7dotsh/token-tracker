@@ -20,7 +20,9 @@
   let settings = $state.raw<{
     info: PricingInfo;
     unresolved: readonly { model: string; tokens: number; reason: string }[];
+    secretRequired: boolean;
   }>();
+  let adminSecret = $state('');
   let loading = $state(false);
   let busy = $state('');
   let error = $state('');
@@ -228,7 +230,7 @@
     loadFailed = false;
     success = '';
     try {
-      const info = await client.setPricingRule(rule);
+      const info = await client.setPricingRule(rule, adminSecret);
       if (version === mutationVersion) pricingChanged(info, 'Saved', editor);
     } catch (failure) {
       if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
@@ -247,7 +249,7 @@
     loadFailed = false;
     success = '';
     try {
-      const info = await client.deletePricingRule(currentRule.model);
+      const info = await client.deletePricingRule(currentRule.model, adminSecret);
       if (version === mutationVersion) pricingChanged(info, 'Reset to catalog pricing', editor, true);
     } catch (failure) {
       if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
@@ -266,7 +268,7 @@
     loadFailed = false;
     success = '';
     try {
-      const refreshed = await client.refreshPricing();
+      const refreshed = await client.refreshPricing(adminSecret);
       if (version === mutationVersion) {
         pricingChanged(refreshed, 'Catalog updated', editor);
         if (editor === editorVersion && dialog.open && refreshed.refreshError) error = refreshed.refreshError;
@@ -470,6 +472,15 @@
     {#if loadFailed}<button class="text-button" disabled={Boolean(busy)} onclick={() => void load()}>Retry</button>{/if}
   </div>
   <div class="pricing-dialog-footer">
-    <span>Changes apply across this dashboard.</span><button class="button" onclick={close}>Done</button>
+    {#if settings?.secretRequired}<input
+        class="pricing-secret"
+        type="password"
+        aria-label="Pairing secret"
+        bind:value={adminSecret}
+        disabled={Boolean(busy)}
+        placeholder="Pairing secret"
+        autocomplete="current-password"
+      />{:else}<span>Changes apply across this dashboard.</span>{/if}<button class="button" onclick={close}>Done</button
+    >
   </div>
 </dialog>

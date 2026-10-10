@@ -3,7 +3,8 @@ import { Effect, ManagedRuntime } from 'effect';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { UsageStore, usageStoreLayer } from '../../src/lib/server/rpc/store';
+import { UsageStore } from '../../src/lib/server/rpc/store';
+import { usageStoreLayer } from '../../src/lib/server/rpc/server';
 import type { UsageEvent } from '../../src/lib/shared/domain';
 
 const directories: string[] = [];

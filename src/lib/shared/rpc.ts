@@ -6,6 +6,8 @@ import { PricingFailure, PricingInfo, PricingPolicy, PricingRule } from './prici
 export const PricingSettings = Schema.Struct({
   info: PricingInfo,
   unresolved: Schema.Array(Schema.Struct({ model: Schema.String, tokens: Schema.Number, reason: Schema.String })),
+  // Public hubs require the pairing secret for pricing changes from the browser.
+  secretRequired: Schema.Boolean,
 });
 export type PricingSettings = typeof PricingSettings.Type;
 
