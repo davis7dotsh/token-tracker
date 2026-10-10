@@ -12,7 +12,13 @@
     usageQueryFromParams,
   } from '#lib/client/dashboard-url.ts';
   import { makeDashboardClient } from '#lib/client/rpc.ts';
-  import { projectLabel, repositoryWebUrl, safeWebUrl, sessionDisplayName } from '#lib/client/session-links.ts';
+  import {
+    nativeThreadUrl,
+    projectLabel,
+    repositoryWebUrl,
+    safeWebUrl,
+    sessionDisplayName,
+  } from '#lib/client/session-links.ts';
   import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
   import { UsageQuery, type Breakdown, type DashboardResponse, type Device } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
@@ -320,6 +326,7 @@
         'project_name',
         't3_thread_id',
         't3_thread_url',
+        't3_native_thread_url',
         'repository_url',
       ],
       ...data.sessions.map((session) => [
@@ -337,6 +344,7 @@
         session.projectName ?? '',
         session.t3ThreadId ?? '',
         safeWebUrl(session.t3ThreadUrl) ?? '',
+        nativeThreadUrl(session) ?? '',
         repositoryWebUrl(session.repository) ?? '',
       ]),
     ];
@@ -699,16 +707,17 @@
           ><tbody
             >{#each sessions as session (`${session.deviceId}:${session.harness}:${session.id}`)}
               {@const threadUrl = safeWebUrl(session.t3ThreadUrl)}
+              {@const nativeUrl = nativeThreadUrl(session)}
               {@const repoUrl = repositoryWebUrl(session.repository)}
               {@const name = sessionDisplayName(session)}
               {@const hasTitle = Boolean(session.sessionTitle || session.projectName)}
-              {@const primaryUrl = threadUrl ?? (hasTitle ? undefined : repoUrl)}
+              {@const primaryUrl = nativeUrl ?? threadUrl ?? (hasTitle ? undefined : repoUrl)}
               <tr
                 ><td
                   ><div class="session-project" title={name}>
                     {#if primaryUrl}<a
                         href={primaryUrl}
-                        target="_blank"
+                        target={nativeUrl ? undefined : '_blank'}
                         rel="noopener noreferrer"
                         aria-label={`${threadUrl ? 'Open T3 Code thread' : 'Open repository'}: ${name}`}
                       >
@@ -732,9 +741,16 @@
                         >{hasTitle ? session.projectName || projectName(session.project) : session.project}</span
                       >{/if}
                   </div>
-                  <span class="session-id" title={session.id}
-                    >{session.id.slice(0, 16)} · {deviceName(session.deviceId)}</span
-                  ></td
+                  <div class="session-footer">
+                    <span class="session-id" title={session.id}
+                      >{session.id.slice(0, 16)} · {deviceName(session.deviceId)}</span
+                    >{#if nativeUrl && threadUrl}<a
+                        href={threadUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Open T3 Code thread in browser: ${name}`}>Web</a
+                      >{/if}
+                  </div></td
                 ><td
                   ><span class="session-harness"
                     ><i

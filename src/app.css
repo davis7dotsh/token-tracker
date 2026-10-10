@@ -1060,6 +1060,23 @@ td:nth-child(2) {
   color: var(--table-secondary);
   margin-top: 2px;
 }
+.session-footer {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.session-footer > .session-id {
+  min-width: 0;
+}
+.session-footer > a {
+  flex-shrink: 0;
+  color: var(--table-secondary);
+  font-size: 12px;
+  text-underline-offset: 3px;
+}
+.session-footer > a:hover {
+  color: var(--accent);
+}
 .session-context {
   height: 22px;
   margin-top: 3px;
