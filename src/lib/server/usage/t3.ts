@@ -95,6 +95,7 @@ const readDatabase = (
       const key = `${provider}:${nativeId}`;
       // A newer V2 binding wins over migrated legacy runtime metadata.
       if (metadata.has(key)) return;
+      if (row.deletedAt !== null && row.deletedAt !== undefined) deletedThreadIds.add(threadId);
       if (deletedThreadIds.has(threadId)) {
         // An explicit empty URL clears a previously uploaded link. Omitting
         // metadata would preserve it during the store's transient-error merge.
@@ -159,16 +160,18 @@ const readDatabase = (
     // If the bounded tombstone read fills up, legacy links are optional and
     // cannot safely be restored from an incomplete deletion index.
     if (deletedThreadIds.size < maximumRows && has('projection_threads', ['thread_id', 'project_id', 'title'])) {
-      const deleted = columns.get('projection_threads')?.has('deleted_at') ? 'AND t.deleted_at IS NULL' : '';
+      const deleted = columns.get('projection_threads')?.has('deleted_at')
+        ? 't.deleted_at AS deletedAt'
+        : 'NULL AS deletedAt';
       const worktree = columns.get('projection_threads')?.has('worktree_path') ? 't.worktree_path' : 'NULL';
-      const common = `t.thread_id AS threadId, t.title AS title, ${projectFields}, ${worktree} AS worktreePath`;
+      const common = `t.thread_id AS threadId, t.title AS title, ${deleted}, ${projectFields}, ${worktree} AS worktreePath`;
       if (has('provider_session_runtime', ['thread_id', 'provider_name', 'resume_cursor_json'])) {
         for (const row of database
           .query<Record<string, unknown>, []>(`
             SELECT COALESCE(json_extract(r.resume_cursor_json, '$.threadId'), json_extract(r.resume_cursor_json, '$.sessionId')) AS nativeId,
               r.provider_name AS driver, ${common}
             FROM provider_session_runtime r JOIN projection_threads t ON t.thread_id = r.thread_id ${projectJoin}
-            WHERE json_valid(r.resume_cursor_json) ${deleted} LIMIT ${maximumRows}
+            WHERE json_valid(r.resume_cursor_json) LIMIT ${maximumRows}
           `)
           .all())
           insert(row);
@@ -180,7 +183,7 @@ const readDatabase = (
           .query<Record<string, unknown>, []>(`
             SELECT COALESCE(s.provider_thread_id, s.provider_session_id) AS nativeId, s.provider_name AS driver, ${common}
             FROM projection_thread_sessions s JOIN projection_threads t ON t.thread_id = s.thread_id ${projectJoin}
-            WHERE COALESCE(s.provider_thread_id, s.provider_session_id) IS NOT NULL ${deleted} LIMIT ${maximumRows}
+            WHERE COALESCE(s.provider_thread_id, s.provider_session_id) IS NOT NULL LIMIT ${maximumRows}
           `)
           .all())
           insert(row);

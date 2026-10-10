@@ -199,6 +199,36 @@ describe('T3 session metadata', () => {
     },
   );
 
+  test.each(['statev2.sqlite', 'state.sqlite'])(
+    'legacy-only deletion clears previously discovered links in %s',
+    async (filename) => {
+      const { home, database, dataDirectory } = await fixture();
+      const legacy = filename === 'statev2.sqlite' ? database : new Database(join(dataDirectory, filename));
+      legacy.exec(`
+        CREATE TABLE projection_threads (thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, deleted_at TEXT);
+        CREATE TABLE provider_session_runtime (thread_id TEXT, provider_name TEXT, resume_cursor_json TEXT);
+        CREATE TABLE projection_thread_sessions (thread_id TEXT, provider_name TEXT, provider_thread_id TEXT, provider_session_id TEXT);
+        INSERT INTO projection_threads VALUES ('legacy', 'project', 'Legacy title', NULL);
+        INSERT INTO provider_session_runtime VALUES ('legacy', 'codex', '{"threadId":"legacy-session"}');
+        INSERT INTO projection_thread_sessions VALUES ('legacy', 'claude', NULL, 'legacy-secondary');
+      `);
+      const before = await read(home);
+      expect(before.get('codex:legacy-session')?.t3ThreadUrl).toBe(
+        'https://app.t3.codes/environment%3Aenceladus/legacy',
+      );
+      expect(before.get('claude:legacy-secondary')?.t3ThreadUrl).toBe(
+        'https://app.t3.codes/environment%3Aenceladus/legacy',
+      );
+      legacy.exec("UPDATE projection_threads SET deleted_at = '2026-10-10'");
+      if (legacy !== database) legacy.close();
+      database.close();
+      const after = await read(home);
+      for (const key of ['codex:legacy-session', 'claude:legacy-secondary']) {
+        expect(after.get(key)).toEqual({ t3ThreadId: 'legacy', t3ThreadUrl: '', repositoryPaths: [] });
+      }
+    },
+  );
+
   test('warm collection refreshes titles and resolves attached Git repos while preserving cwd and accounting', async () => {
     const { home, database } = await fixture();
     const scratch = join(home, '.t3', 'scratch', 'unhelpful-project-name');

@@ -105,6 +105,15 @@ test('legacy uploads gain session titles and T3 links through metadata-only RPC 
     const changedUrl = (await browser.getUsage()).sessions[0];
     expect(changedUrl?.t3ThreadId).toBeUndefined();
     expect(changedUrl?.t3ThreadUrl).toBe('https://t3.example/thread/thread-3');
+    expect(await upload({ ...localEvent, outputTokens: 80, t3ThreadId: 'thread-3', t3ThreadUrl: '' })).toMatchObject({
+      accepted: 0,
+      updated: 1,
+    });
+    expect(await upload({ ...localEvent, outputTokens: 80 })).toMatchObject({ accepted: 0, updated: 0 });
+    const deletedThread = (await browser.getUsage()).sessions[0];
+    expect(deletedThread?.sessionTitle).toBe('Renamed thread');
+    expect(deletedThread?.t3ThreadId).toBe('thread-3');
+    expect(deletedThread?.t3ThreadUrl).toBeUndefined();
   } finally {
     await browser.dispose();
     await runtime.dispose();
