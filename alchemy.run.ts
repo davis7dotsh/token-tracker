@@ -1,6 +1,6 @@
 import * as Alchemy from 'alchemy';
 import * as Cloudflare from 'alchemy/Cloudflare';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 import Hub from './src/cloud/hub.ts';
 
 // The public dashboard: SvelteKit on Workers, forwarding RPC and uploads to the
@@ -17,7 +17,11 @@ export default Alchemy.Stack(
   'TokenTracker',
   {
     providers: Cloudflare.providers(),
-    state: Cloudflare.state(),
+    // Deploys share state through the account's Cloudflare state store.
+    // `alchemy dev` emulates everything locally and keeps its state in .alchemy/.
+    state: Layer.unwrap(
+      Effect.map(Alchemy.AlchemyContext, ({ dev }) => (dev ? Alchemy.localState() : Cloudflare.state())),
+    ),
   },
   Effect.gen(function* () {
     const dashboard = yield* Dashboard;
