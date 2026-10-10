@@ -6,7 +6,7 @@ import { cp, mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { systemdQuote, xml } from '../cli/scheduler';
+import { launchdDomains, systemdQuote, xml } from '../cli/scheduler';
 
 // A self-hosted dashboard installed as a user service: a copy of the
 // adapter-node build with its production dependencies, run by Bun under
@@ -56,7 +56,25 @@ const systemdUnit = (name: string) =>
   join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${name}.service`);
 const launchdLabel = (name: string) => `sh.davis.${name}`;
 const launchdPlistPath = (name: string) => join(homedir(), 'Library', 'LaunchAgents', `${launchdLabel(name)}.plist`);
-const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
+const launchctl = (args: readonly string[]) => run('launchctl', args).pipe(Effect.asVoid);
+
+export const unloadDashboardLaunchAgent = (plist: string, execute = launchctl) =>
+  Effect.forEach(launchdDomains(), (domain) => execute(['bootout', domain, plist]).pipe(Effect.ignore), {
+    discard: true,
+  });
+
+export const loadDashboardLaunchAgent = Effect.fn('DashboardService.loadLaunchAgent')(function* (
+  plist: string,
+  execute: typeof launchctl = launchctl,
+) {
+  const [guiDomain, userDomain] = launchdDomains();
+  const domain = yield* execute(['print', guiDomain]).pipe(
+    Effect.as(guiDomain),
+    Effect.catch(() => Effect.succeed(userDomain)),
+  );
+  yield* unloadDashboardLaunchAgent(plist, execute);
+  yield* execute(['bootstrap', domain, plist]);
+});
 
 const serviceEnvironment = (props: DashboardServiceProps) => ({
   ...props.environment,
@@ -91,6 +109,7 @@ export const dashboardSystemdUnit = (props: DashboardServiceProps) =>
 export const dashboardLaunchdPlist = (props: DashboardServiceProps) =>
   `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n` +
   `<plist version="1.0"><dict>\n<key>Label</key><string>${xml(launchdLabel(props.name))}</string>\n` +
+  `<key>LimitLoadToSessionType</key><array><string>Aqua</string><string>Background</string></array>\n` +
   `<key>ProgramArguments</key><array>${command(props)
     .map((value) => `<string>${xml(value)}</string>`)
     .join('')}</array>\n` +
@@ -153,8 +172,7 @@ const start = Effect.fn('DashboardService.start')(function* (props: DashboardSer
     await mkdir(join(plist, '..'), { recursive: true });
     await writeFile(plist, dashboardLaunchdPlist(props), { mode: 0o600 });
   });
-  yield* run('launchctl', ['bootout', launchdDomain(), plist]).pipe(Effect.ignore);
-  yield* run('launchctl', ['bootstrap', launchdDomain(), plist]);
+  yield* loadDashboardLaunchAgent(plist);
   return { manager: kind, unit: launchdLabel(props.name) };
 });
 
@@ -166,7 +184,7 @@ const stop = Effect.fn('DashboardService.stop')(function* (props: DashboardServi
     yield* run('systemctl', ['--user', 'daemon-reload']);
   } else {
     const plist = launchdPlistPath(props.name);
-    yield* run('launchctl', ['bootout', launchdDomain(), plist]).pipe(Effect.ignore);
+    yield* unloadDashboardLaunchAgent(plist);
     yield* io('Could not remove the LaunchAgent.', () => rm(plist, { force: true }));
   }
 });

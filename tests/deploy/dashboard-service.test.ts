@@ -1,5 +1,14 @@
 import { expect, test } from 'bun:test';
-import { dashboardLaunchdPlist, dashboardSystemdUnit, localUrl } from '../../src/deploy/dashboard-service';
+import { Effect } from 'effect';
+import { launchdDomains } from '../../src/cli/scheduler';
+import {
+  dashboardLaunchdPlist,
+  dashboardSystemdUnit,
+  loadDashboardLaunchAgent,
+  localUrl,
+  ServiceError,
+  unloadDashboardLaunchAgent,
+} from '../../src/deploy/dashboard-service';
 
 const props = {
   name: 'token-tracker-dashboard',
@@ -29,6 +38,42 @@ test('the local dashboard runs its installed build with a pinned Bun on Linux an
   expect(plist).toContain('<key>Label</key><string>sh.davis.token-tracker-dashboard</string>');
   expect(plist).toContain('<key>HOST</key><string>127.0.0.1</string>');
   expect(plist).toContain('<key>KeepAlive</key><true/>');
+  expect(plist).toContain(
+    '<key>LimitLoadToSessionType</key><array><string>Aqua</string><string>Background</string></array>',
+  );
+});
+
+for (const guiAvailable of [true, false]) {
+  test(`dashboard launchd ${guiAvailable ? 'desktop' : 'headless'} start and removal use the available session`, async () => {
+    const [guiDomain, userDomain] = launchdDomains();
+    const plist = '/tmp/token-tracker-dashboard.plist';
+    const loaded = new Set(
+      guiAvailable ? [`${guiDomain}:${plist}`, `${userDomain}:${plist}`] : [`${userDomain}:${plist}`],
+    );
+    const execute = (args: readonly string[]) =>
+      Effect.gen(function* () {
+        const [operation, domain, file] = args;
+        if (domain === guiDomain && !guiAvailable)
+          return yield* new ServiceError({ message: 'The GUI domain does not exist.' });
+        if (operation === 'bootout') loaded.delete(`${domain}:${file}`);
+        if (operation === 'bootstrap') {
+          if (domain !== (guiAvailable ? guiDomain : userDomain))
+            return yield* new ServiceError({ message: 'Cannot bootstrap in an unavailable domain.' });
+          loaded.add(`${domain}:${file}`);
+        }
+      });
+    await Effect.runPromise(loadDashboardLaunchAgent(plist, execute));
+    expect([...loaded]).toEqual([`${guiAvailable ? guiDomain : userDomain}:${plist}`]);
+    await Effect.runPromise(unloadDashboardLaunchAgent(plist, execute));
+    expect([...loaded]).toEqual([]);
+  });
+}
+
+test('a headless launchd bootstrap failure is reported rather than swallowed', async () => {
+  const execute = (args: readonly string[]) =>
+    args[0] === 'bootout' ? Effect.void : Effect.fail(new ServiceError({ message: 'launchctl failed' }));
+  const result = await Effect.runPromiseExit(loadDashboardLaunchAgent('/tmp/dashboard.plist', execute));
+  expect(result._tag).toBe('Failure');
 });
 
 test('IPv6 loopback and wildcard health URLs reach the running service', async () => {
