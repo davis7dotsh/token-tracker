@@ -610,6 +610,13 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       equalSecret(secret, configuration.pairingSecret)
         ? Effect.void
         : Effect.fail(new Unauthorized({ message: 'Pricing changes require the dashboard or its pairing secret.' }));
+    const authorizeDevice = Effect.fn('UsageStore.authorizeDevice')(function* (deviceId: string, token: string) {
+      const credentials = yield* sql<{
+        token_hash: string;
+      }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`.pipe(Effect.mapError(storageFailure));
+      if (!credentials[0] || !equalSecret(digest(token), credentials[0].token_hash))
+        return yield* new Unauthorized({ message: 'A connected device credential is required.' });
+    });
     return {
       getDevices,
       registerDevice,
@@ -620,6 +627,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       getDimensions,
       getRevision: () => revision,
       authorizePricing,
+      authorizeDevice,
     };
   }),
 }) {}

@@ -69,6 +69,10 @@ const uniqueEvents = (events: readonly UsageEvent[], localDeviceId: string, quer
 };
 
 const dashboardProofHeader = 'x-token-tracker-pricing-access';
+const pricingPolicyProofHeader = 'x-token-tracker-pricing-policy-access';
+// Same wire protocol and URL for existing uploads, but a separate group keeps
+// anonymous requests from invoking dashboard reads, including batched reads.
+const CollectorRpc = UsageRpc.omit('GetUsage', 'GetDevices', 'GetPricing');
 
 export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
   UsageRpc.toLayer(
@@ -310,7 +314,17 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
             error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
           ),
         ),
-        GetPricingPolicy: Effect.fn('rpc.GetPricingPolicy')(function* ({ revision }) {
+        GetPricingPolicy: Effect.fn('rpc.GetPricingPolicy')(function* (
+          { revision, deviceId, token, pairingSecret },
+          { headers },
+        ) {
+          // Require credentials unless the handler granted dashboard access.
+          // RPC messages can override HTTP headers, so removing a proof must
+          // fail closed rather than bypass this check.
+          if (headers[pricingPolicyProofHeader] !== browserProof) {
+            if (pairingSecret !== undefined) yield* store.authorizePricing(pairingSecret);
+            else yield* store.authorizeDevice(deviceId ?? '', token ?? '');
+          }
           const state = yield* pricing.load;
           return revision === state.policy.revision ? null : state.policy;
         }),
@@ -347,8 +361,13 @@ export const makeHubWebHandler = <E>(
   routes: Layer.Layer<never, never, HttpRouter.HttpRouter> = Layer.empty,
 ) => {
   const browserProof = randomBytes(32).toString('hex');
+  const handlers = rpcHandlersLayer(browserProof, options).pipe(Layer.provide(services));
   const rpc = RpcServer.layerHttp({ group: UsageRpc, path: '/rpc', protocol: 'http' }).pipe(
-    Layer.provide(rpcHandlersLayer(browserProof, options).pipe(Layer.provide(services))),
+    Layer.provide(handlers),
+    Layer.provide(RpcSerialization.layerNdjson),
+  );
+  const collectorRpc = RpcServer.layerHttp({ group: CollectorRpc, path: '/collector', protocol: 'http' }).pipe(
+    Layer.provide(handlers),
     Layer.provide(RpcSerialization.layerNdjson),
   );
   const health = HttpRouter.add(
@@ -364,20 +383,26 @@ export const makeHubWebHandler = <E>(
       ),
     ),
   ).pipe(HttpRouter.provideRequest(services));
-  const web = HttpRouter.toWebHandler(Layer.mergeAll(rpc, health, routes), { disableLogger: true });
+  const web = HttpRouter.toWebHandler(Layer.mergeAll(rpc, collectorRpc, health, routes), { disableLogger: true });
   return {
     ...web,
-    handler: (request: Request) => {
+    handler: (request: Request, collectorOnly = false) => {
       // Trust only a genuine same-origin browser POST; never return the pairing
       // secret or let an RPC payload supply its own browser authorization proof.
       const headers = new Headers(request.headers);
       headers.delete(dashboardProofHeader);
+      headers.delete(pricingPolicyProofHeader);
+      const url = new URL(request.url);
+      if (collectorOnly && request.method === 'POST') url.pathname = '/collector';
+      if (url.pathname === '/rpc') headers.set(pricingPolicyProofHeader, browserProof);
       const origin = headers.get('origin');
       if (origin && origin !== (options.expectedOrigin ?? new URL(request.url).origin)) {
         return Promise.resolve(new Response('Cross-origin requests are not allowed.', { status: 403 }));
       }
-      if (origin) headers.set(dashboardProofHeader, browserProof);
-      return web.handler(new Request(request, { headers }));
+      if (origin && url.pathname === '/rpc') headers.set(dashboardProofHeader, browserProof);
+      return web.handler(
+        new Request(url, { method: request.method, headers, body: request.body, signal: request.signal }),
+      );
     },
   };
 };

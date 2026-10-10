@@ -31,6 +31,7 @@ export default Alchemy.Stack(
       'XDG_CACHE_HOME',
       'TOKEN_TRACKER_DOWNLOAD_DIR',
       'TOKEN_TRACKER_PAIRING_SECRET',
+      'TOKEN_TRACKER_DASHBOARD_PASSCODE',
       'TOKEN_TRACKER_T3_DATA_DIR',
       'TOKEN_TRACKER_T3_URL',
     ].flatMap((key) => {

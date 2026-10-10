@@ -38,9 +38,14 @@ export const UsageRpc = RpcGroup.make(
     error: Schema.Union([PricingFailure, UsageFailure]),
   }),
   Rpc.make('GetPricingPolicy', {
-    payload: { revision: Schema.optionalKey(Schema.String) },
+    payload: {
+      revision: Schema.optionalKey(Schema.String),
+      deviceId: Schema.optionalKey(Schema.String),
+      token: Schema.optionalKey(Schema.String),
+      pairingSecret: Schema.optionalKey(Schema.String),
+    },
     success: Schema.NullOr(PricingPolicy),
-    error: PricingFailure,
+    error: Schema.Union([PricingFailure, Unauthorized, StorageFailure]),
   }),
   Rpc.make('SetPricingRule', {
     payload: { rule: PricingRule, adminSecret: Schema.String },

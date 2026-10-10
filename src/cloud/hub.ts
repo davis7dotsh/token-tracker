@@ -40,8 +40,8 @@ export class Hub extends Cloudflare.DurableObject<Hub>()(
       const secret = yield* pairingSecret.pipe(Effect.orDie);
       const hub = makeHubWebHandler(
         sqlHubServices(Redacted.value(secret)).pipe(Layer.provide(durableObjectSql(state.raw.storage))),
-        // The dashboard is a public page: anyone can read it, so pricing
-        // changes always require the pairing secret.
+        // Dashboard sessions gate reads; pricing administration still uses
+        // the separate pairing secret. Collectors never gain dashboard access.
         { trustBrowser: false, autoRefreshPricing: true },
       );
       return {

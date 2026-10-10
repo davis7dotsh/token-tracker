@@ -28,7 +28,7 @@ The theme defaults to System, with persistent Light and Dark overrides. Initial 
 
 ## Deploy
 
-Alchemy manages both targets from this repository. `alchemy.local.ts` runs the hub on your own machine; `alchemy.run.ts` hosts a public dashboard on Cloudflare. Alchemy state lives in `.alchemy/` (local) or your Cloudflare account (cloud) and is never committed.
+Alchemy manages both targets from this repository. `alchemy.local.ts` runs the hub on your own machine; `alchemy.run.ts` hosts a passcode-protected dashboard on Cloudflare. Alchemy state lives in `.alchemy/` (local) or your Cloudflare account (cloud) and is never committed.
 
 ### Your own machine
 
@@ -42,6 +42,7 @@ bun run deploy:local
 - Rerun `bun run deploy:local` after pulling changes; it rebuilds and restarts only when sources changed. The installed copy is independent of the checkout, so switching branches or deleting a worktree does not affect the running service.
 - `bun run destroy:local` stops and removes the service and the installed app. Usage data stays in the data directory.
 - On Linux, enable lingering (`loginctl enable-linger`) so user services keep running after logout.
+- To require dashboard login in local development or on an HTTPS self-hosted server (as on Nexus), set `TOKEN_TRACKER_DASHBOARD_PASSCODE` before starting or deploying it. Without this variable, access remains private to your local network or tailnet.
 - Other stages get separate services and install directories: `bun alchemy deploy --config alchemy.local.ts --stage test` installs `token-tracker-dashboard-test`.
 
 ### Cloudflare
@@ -49,14 +50,18 @@ bun run deploy:local
 ```sh
 bun alchemy profile edit --add Cloudflare   # once: OAuth or an API token, saved to ~/.alchemy
 export TOKEN_TRACKER_PAIRING_SECRET="$(openssl rand -base64 32)"   # or put it in .env
+read -rs 'TOKEN_TRACKER_DASHBOARD_PASSCODE?Dashboard passcode: '; export TOKEN_TRACKER_DASHBOARD_PASSCODE
 bun run deploy:cloud
 ```
 
 - Deploys the `prod` stage and prints the dashboard's `workers.dev` URL. The first deploy asks to create Alchemy's state store in your account.
 - Two Workers: `Dashboard` serves SvelteKit and forwards `/rpc` and `/api/health` through a service binding to `Hub`, an Effect Worker with no public URL. `Hub` routes every request to one SQLite-backed Durable Object, the single writer for usage, devices, and pricing.
 - `TOKEN_TRACKER_PAIRING_SECRET` (at least 16 characters) is read from your shell or `.env` at deploy time and bound as a Worker secret. Keep it: devices need it to pair, and pricing changes need it. Deploying with a different value rotates it.
-- The page is public. Anyone with the URL can see the dashboard, including device names, project paths, and repository names. Pricing changes require the pairing secret, which the Model pricing dialog asks for.
+- `TOKEN_TRACKER_DASHBOARD_PASSCODE` is required, between 16 and 1024 characters. Set a private passphrase in your shell or the ignored `.env`; Alchemy binds it as a Worker secret. Deployment fails if it is missing, and the dashboard fails closed if its runtime binding is missing.
+- Enter the passcode at `/login`. The server issues a signed, HttpOnly, SameSite=Strict cookie lasting 30 days (Secure on HTTPS). Dashboard pages, usage, device lists, and pricing reads require that session. Sign out clears the cookie; changing the passcode invalidates all existing sessions. Cloudflare limits sign-in attempts to five per minute per IP.
+- The passcode grants dashboard viewing; pricing changes still require the separate pairing secret in the Model pricing dialog. It is never sent to collectors or included in a cookie.
 - The hosted hub has no machine of its own. Every computer, including the one you deploy from, pairs as a client with `bun run cli connect <dashboard-url>`.
+- Collectors use their device token, and migration uses the pairing secret, without browser cookies. Upgrade collectors to this version when enabling dashboard authentication: pricing-policy reads now send their device credentials. Unauthenticated RPC only exposes these credential-checked collector and administration methods, never dashboard usage or device reads. Public health probes return status only.
 - Package downloads (`/downloads/*`) are served only by self-hosted hubs.
 - `bun run dev:cloud` runs the same Workers and Durable Object locally in workerd at http://localhost:1337, without a Cloudflare account.
 - `bun run destroy:cloud` deletes both Workers and the Durable Object, including its usage history.

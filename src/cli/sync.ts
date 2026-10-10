@@ -117,7 +117,11 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
     const client = yield* UsageClient;
     const localPricing = yield* loadPricing();
     const centralPolicy = yield* client
-      .GetPricingPolicy({ revision: localPricing.policy.revision })
+      .GetPricingPolicy({
+        revision: localPricing.policy.revision,
+        deviceId: connection.device.id,
+        token: connection.token,
+      })
       .pipe(Effect.timeout('30 seconds'));
     const pricing = centralPolicy
       ? yield* installPricingPolicy(centralPolicy, undefined, localPricing.policy.revision)

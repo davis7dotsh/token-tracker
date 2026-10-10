@@ -36,7 +36,7 @@ const migrate = Effect.gen(function* () {
   // Preflight pricing before mutating the target. Dashboard reads reprice
   // imported history against the target catalog, so its rates must match.
   const pricing = yield* loadPricing(source, { strict: true });
-  const targetPricing = yield* client.GetPricingPolicy({});
+  const targetPricing = yield* client.GetPricingPolicy({ pairingSecret });
   if (!targetPricing || !isDeepStrictEqual(pricing.policy.catalog.models, targetPricing.catalog.models))
     return yield* new MigrationFailure({
       message: 'Source and target pricing catalogs have different rates. Align the catalogs before migrating.',

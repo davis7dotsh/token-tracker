@@ -152,10 +152,10 @@ export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = loca
 
 let server: ReturnType<typeof makeRpcWebHandler> | undefined;
 
-export const handleRpcRequest = (request: Request) => {
+export const handleRpcRequest = (request: Request, collectorOnly = false) => {
   if (request.signal.aborted) return Promise.resolve(new Response(null, { status: 499 }));
   server ??= makeRpcWebHandler();
-  return server.handler(request).then((response) => {
+  return server.handler(request, collectorOnly).then((response) => {
     response.headers.set('cache-control', 'no-store');
     return response;
   });

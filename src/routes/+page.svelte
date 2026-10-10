@@ -803,6 +803,9 @@
     <footer>
       <span><Icon name="terminal" size={15} />Local logs & connected devices</span>
       <div class="footer-actions">
+        {#if page.data.passcodeEnabled}<form method="POST" action="/logout">
+            <button type="submit">Sign out</button>
+          </form>{/if}
         <button onclick={() => pricingDialog.show()}>Model pricing<Icon name="arrow" size={14} /></button><button
           onclick={() => sourcesDialog.showModal()}>Data sources<Icon name="arrow" size={14} /></button
         >
