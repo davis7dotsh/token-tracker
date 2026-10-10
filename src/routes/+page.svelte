@@ -709,6 +709,7 @@
               {@const threadUrl = safeWebUrl(session.t3ThreadUrl)}
               {@const nativeUrl = nativeThreadUrl(session)}
               {@const repoUrl = repositoryWebUrl(session.repository)}
+              {@const pathName = session.project.split(/[\\/]/).filter(Boolean).at(-1) ?? session.project}
               {@const name = sessionDisplayName(session)}
               {@const hasTitle = Boolean(session.sessionTitle || session.projectName)}
               {@const primaryUrl = nativeUrl ?? threadUrl ?? (hasTitle ? undefined : repoUrl)}
@@ -737,8 +738,7 @@
                         <Icon name="repository" size={14} /><span
                           >{projectName(session.repository ?? session.project)}</span
                         >
-                      </a>{:else}<span
-                        >{hasTitle ? session.projectName || projectName(session.project) : session.project}</span
+                      </a>{:else}<span>{hasTitle ? session.projectName || projectName(session.project) : pathName}</span
                       >{/if}
                     <span class="session-device">- {deviceName(session.deviceId)}</span>
                   </div></td
