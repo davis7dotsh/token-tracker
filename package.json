@@ -16,7 +16,8 @@
   ],
   "type": "module",
   "imports": {
-    "#lib/*": "./src/lib/*"
+    "#lib/*": "./src/lib/*",
+    "#hub": "./src/lib/server/host/bun.ts"
   },
   "scripts": {
     "dev": "bun --bun vp dev --host 0.0.0.0",
