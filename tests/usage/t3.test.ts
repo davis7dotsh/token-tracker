@@ -166,38 +166,56 @@ describe('T3 session metadata', () => {
     expect(metadata.get('claude:test-session')?.sessionTitle).toBe('Make sessions useful');
   });
 
-  test.each(['same database', 'legacy state.sqlite'])(
-    'V2 tombstones suppress stale thread links from %s',
-    async (location) => {
-      const { home, database, dataDirectory } = await fixture();
-      bind(database, { deletedAt: '2026-10-10' });
-      const legacy = location === 'same database' ? database : new Database(join(dataDirectory, 'state.sqlite'));
-      legacy.exec(`
+  test.each([
+    ['same database', 0],
+    ['legacy state.sqlite', 0],
+    ['same database', 19_999],
+    ['legacy state.sqlite', 19_999],
+  ] as const)('V2 tombstones clear stale links from %s with %d additional deletions', async (location, additional) => {
+    const { home, database, dataDirectory } = await fixture();
+    bind(database, { deletedAt: '2026-10-10' });
+    if (additional)
+      database
+        .query(`
+        WITH RECURSIVE n(x) AS (VALUES (1) UNION ALL SELECT x + 1 FROM n WHERE x < ?)
+        INSERT INTO orchestration_v2_projection_threads
+        SELECT 'deleted-' || x, 'project', 'Deleted thread', '2026-10-10', '{}' FROM n
+      `)
+        .run(additional);
+    const legacy = location === 'same database' ? database : new Database(join(dataDirectory, 'state.sqlite'));
+    legacy.exec(`
         CREATE TABLE projection_threads (thread_id TEXT PRIMARY KEY, project_id TEXT, title TEXT, deleted_at TEXT);
         CREATE TABLE provider_session_runtime (thread_id TEXT, provider_name TEXT, resume_cursor_json TEXT);
         CREATE TABLE projection_thread_sessions (thread_id TEXT, provider_name TEXT, provider_thread_id TEXT, provider_session_id TEXT);
         INSERT INTO projection_threads VALUES ('thread:original', 'project', 'Stale active title', NULL);
         INSERT INTO projection_threads VALUES ('thread:still-live', 'project', 'Still live title', NULL);
+        INSERT INTO projection_threads VALUES ('legacy:deleted', 'project', 'Deleted legacy title', '2026-10-10');
         INSERT INTO provider_session_runtime VALUES ('thread:original', 'claude', '{"sessionId":"test-session"}');
         INSERT INTO provider_session_runtime VALUES ('thread:still-live', 'codex', '{"threadId":"live-session"}');
+        INSERT INTO provider_session_runtime VALUES ('legacy:deleted', 'codex', '{"threadId":"legacy-deleted-session"}');
         INSERT INTO projection_thread_sessions VALUES ('thread:original', 'codex', 'deleted-secondary-session', NULL);
       `);
-      if (legacy !== database) legacy.close();
-      database.close();
-      const metadata = await read(home);
-      expect(metadata.get('claude:test-session')).toEqual({
-        t3ThreadId: 'thread:original',
-        t3ThreadUrl: '',
-        repositoryPaths: [],
-      });
-      expect(metadata.get('codex:deleted-secondary-session')).toEqual({
-        t3ThreadId: 'thread:original',
-        t3ThreadUrl: '',
-        repositoryPaths: [],
-      });
-      expect(metadata.get('codex:live-session')?.t3ThreadId).toBe('thread:still-live');
-    },
-  );
+    if (legacy !== database) legacy.close();
+    database.close();
+    const metadata = await read(home);
+    expect(metadata.get('claude:test-session')).toEqual({
+      t3ThreadId: 'thread:original',
+      t3ThreadUrl: '',
+      repositoryPaths: [],
+    });
+    expect(metadata.get('codex:deleted-secondary-session')).toEqual({
+      t3ThreadId: 'thread:original',
+      t3ThreadUrl: '',
+      repositoryPaths: [],
+    });
+    expect(metadata.get('codex:legacy-deleted-session')).toEqual({
+      t3ThreadId: 'legacy:deleted',
+      t3ThreadUrl: '',
+      repositoryPaths: [],
+    });
+    if (additional) expect(metadata.has('codex:live-session')).toBe(false);
+    else expect(metadata.get('codex:live-session')?.t3ThreadId).toBe('thread:still-live');
+  });
 
   test.each(['statev2.sqlite', 'state.sqlite'])(
     'legacy-only deletion clears previously discovered links in %s',

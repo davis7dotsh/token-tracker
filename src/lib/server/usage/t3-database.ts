@@ -85,7 +85,7 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
           if (threadId) deletedThreadIds.add(threadId);
         }
       }
-      const insert = (row: Record<string, unknown>) => {
+      const insert = (row: Record<string, unknown>, legacy = false) => {
         const provider = harness(row.driver);
         const nativeId = text(row.nativeId, 512);
         const threadId = text(row.threadId, 512);
@@ -100,6 +100,9 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
           metadata.set(key, { t3ThreadId: threadId, t3ThreadUrl: '', repositoryPaths: [] });
           return;
         }
+        // A full tombstone index may be incomplete. Keep known deletions
+        // clearing stored links, but never restore unverified legacy links.
+        if (legacy && deletedThreadIds.size >= maximumRows) return;
         const title = text(row.title);
         const projectName = text(row.projectName);
         const url = threadUrl(baseUrl, environmentId, threadId);
@@ -155,9 +158,9 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
           insert(row);
         }
       }
-      // If the bounded tombstone read fills up, legacy links are optional and
-      // cannot safely be restored from an incomplete deletion index.
-      if (deletedThreadIds.size < maximumRows && has('projection_threads', ['thread_id', 'project_id', 'title'])) {
+      if (has('projection_threads', ['thread_id', 'project_id', 'title'])) {
+        const tombstones = deletedThreadIds.size >= maximumRows ? JSON.stringify([...deletedThreadIds]) : null;
+        const legacyDeleted = columns.get('projection_threads')?.has('deleted_at') ? 't.deleted_at IS NOT NULL' : '0';
         const deleted = columns.get('projection_threads')?.has('deleted_at')
           ? 't.deleted_at AS deletedAt'
           : 'NULL AS deletedAt';
@@ -165,26 +168,30 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
         const common = `t.thread_id AS threadId, t.title AS title, ${deleted}, ${projectFields}, ${worktree} AS worktreePath`;
         if (has('provider_session_runtime', ['thread_id', 'provider_name', 'resume_cursor_json'])) {
           for (const row of database
-            .query<Record<string, unknown>, []>(`
+            .query<Record<string, unknown>, [string | null, string | null]>(`
             SELECT COALESCE(json_extract(r.resume_cursor_json, '$.threadId'), json_extract(r.resume_cursor_json, '$.sessionId')) AS nativeId,
               r.provider_name AS driver, ${common}
             FROM provider_session_runtime r JOIN projection_threads t ON t.thread_id = r.thread_id ${projectJoin}
-            WHERE json_valid(r.resume_cursor_json) LIMIT ${maximumRows}
+            WHERE json_valid(r.resume_cursor_json)
+              AND (? IS NULL OR t.thread_id IN (SELECT value FROM json_each(?)) OR ${legacyDeleted})
+            LIMIT ${maximumRows}
           `)
-            .all())
-            insert(row);
+            .all(tombstones, tombstones))
+            insert(row, true);
         }
         if (
           has('projection_thread_sessions', ['thread_id', 'provider_name', 'provider_thread_id', 'provider_session_id'])
         ) {
           for (const row of database
-            .query<Record<string, unknown>, []>(`
+            .query<Record<string, unknown>, [string | null, string | null]>(`
             SELECT COALESCE(s.provider_thread_id, s.provider_session_id) AS nativeId, s.provider_name AS driver, ${common}
             FROM projection_thread_sessions s JOIN projection_threads t ON t.thread_id = s.thread_id ${projectJoin}
-            WHERE COALESCE(s.provider_thread_id, s.provider_session_id) IS NOT NULL LIMIT ${maximumRows}
+            WHERE COALESCE(s.provider_thread_id, s.provider_session_id) IS NOT NULL
+              AND (? IS NULL OR t.thread_id IN (SELECT value FROM json_each(?)) OR ${legacyDeleted})
+            LIMIT ${maximumRows}
           `)
-            .all())
-            insert(row);
+            .all(tombstones, tombstones))
+            insert(row, true);
         }
       }
       return metadata;
@@ -196,7 +203,6 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
   const metadata = new Map<string, T3Metadata>();
   const deletedThreadIds = new Set<string>();
   for (const filename of input.filenames) {
-    if (deletedThreadIds.size >= maximumRows) break;
     try {
       const result = readDatabase(filename, input.environmentId, input.baseUrl, deletedThreadIds);
       for (const [key, value] of result) if (!metadata.has(key)) metadata.set(key, value);
