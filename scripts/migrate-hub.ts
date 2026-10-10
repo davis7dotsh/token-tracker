@@ -70,14 +70,19 @@ const migrate = Effect.gen(function* () {
     });
   }
   const pricing = yield* loadPricing(source);
-  for (const rule of pricing.info.rules)
-    yield* client
-      .SetPricingRule({ rule, adminSecret: pairingSecret })
-      .pipe(
-        Effect.catchTag('PricingFailure', (error) =>
-          Console.warn(`Skipped pricing rule for ${rule.model}: ${error.message}`),
-        ),
-      );
+  // Install every source override before aliases that depend on it, including
+  // alias chains whose model names sort before their targets. RPC failures must
+  // stop the migration rather than report missing rules as successfully copied.
+  const pending = new Map(pricing.info.rules.map((rule) => [rule.model, rule]));
+  while (pending.size) {
+    const ready = [...pending.values()].filter((rule) => rule.kind !== 'alias' || !pending.has(rule.target));
+    if (!ready.length)
+      return yield* new MigrationFailure({ message: 'Could not resolve the source pricing rule dependencies.' });
+    for (const rule of ready) {
+      yield* client.SetPricingRule({ rule, adminSecret: pairingSecret });
+      pending.delete(rule.model);
+    }
+  }
   yield* Console.log(
     `Copied ${devices.length} devices, ${records.toLocaleString('en-US')} records, and ${pricing.info.rules.length} pricing rules to ${targetArgument}.`,
   );

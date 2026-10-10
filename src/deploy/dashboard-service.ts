@@ -102,8 +102,10 @@ export const dashboardLaunchdPlist = (props: DashboardServiceProps) =>
   `<key>StandardOutPath</key><string>${xml(join(props.appDirectory, 'dashboard.log'))}</string>\n` +
   `<key>StandardErrorPath</key><string>${xml(join(props.appDirectory, 'dashboard.log'))}</string>\n</dict></plist>\n`;
 
-const localUrl = (props: DashboardServiceProps) =>
-  `http://${props.host === '0.0.0.0' || props.host === '::' ? '127.0.0.1' : props.host}:${props.port}`;
+export const localUrl = (props: DashboardServiceProps) => {
+  const host = props.host === '0.0.0.0' ? '127.0.0.1' : props.host === '::' ? '::1' : props.host;
+  return `http://${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${props.port}`;
+};
 
 // Replace the app atomically enough for a restart: the new build and its
 // production dependencies are complete before the service is restarted.
