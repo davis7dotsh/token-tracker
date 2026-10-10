@@ -47,7 +47,7 @@ const storedFingerprint = async (directory: string) => {
   if (file.size > BigInt(maximumStateBytes)) throw pricingFailure('The saved pricing catalog is too large.');
   return fingerprintFor(file);
 };
-const readStored = async (directory: string): Promise<StoredPricing> => {
+const readStored = async (directory: string, strict = false): Promise<StoredPricing> => {
   try {
     const fingerprint = await storedFingerprint(directory);
     const cached = storedByDirectory.get(directory);
@@ -67,6 +67,7 @@ const readStored = async (directory: string): Promise<StoredPricing> => {
       rememberStored(directory, null, stored);
       return stored;
     }
+    if (strict) throw pricingFailure('Could not read or validate the saved pricing state.');
     return unreadableStored();
   }
 };
@@ -96,14 +97,15 @@ const writeStored = async (directory: string, stored: StoredPricing) => {
 
 // Private `pricing-state.json` in the data directory, shared by the Bun hub,
 // scheduled sync, and read-only local checks.
-export const filePricingStorage = (directory?: string): PricingStorage => {
+export const filePricingStorage = (directory?: string, strict = false): PricingStorage => {
   const target = dataDirectory(directory);
-  return { key: target, read: () => readStored(target), write: (stored) => writeStored(target, stored) };
+  return { key: target, read: () => readStored(target, strict), write: (stored) => writeStored(target, stored) };
 };
 
 export const filePricing = (directory?: string) => makePricingRuntime(filePricingStorage(directory));
 
-export const loadPricing = (directory?: string) => filePricing(directory).load;
+export const loadPricing = (directory?: string, options: { strict?: boolean } = {}) =>
+  makePricingRuntime(filePricingStorage(directory, options.strict)).load;
 export const installPricingPolicy = (policy: PricingPolicy, directory?: string, expectedLocalRevision?: string) =>
   filePricing(directory).install(policy, expectedLocalRevision);
 export const setPricingRule = (rule: PricingRule, directory?: string) => filePricing(directory).setRule(rule);

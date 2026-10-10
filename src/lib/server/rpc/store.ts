@@ -245,6 +245,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       if (batch.events.length + (batch.deletedIds?.length ?? 0) > 10_000) {
         return yield* Effect.fail(new InvalidRequest({ message: 'A sync batch can contain at most 10,000 records.' }));
       }
+      if ('pairingSecret' in authorization && batch.deletedIds?.length)
+        return yield* Effect.fail(new InvalidRequest({ message: 'Migration imports cannot delete usage records.' }));
       for (const event of batch.events) {
         const amounts = [
           event.inputTokens,
@@ -321,6 +323,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             }[] = [];
             for (const event of batch.events) {
               const previous = existing.get(event.id);
+              // A source backup can be older than corrections already synced
+              // by collectors. Imports only fill missing record IDs.
+              if (previous && 'pairingSecret' in authorization) continue;
               const normalized = {
                 ...preserveSessionMetadata(event, previous?.event),
                 ...event,

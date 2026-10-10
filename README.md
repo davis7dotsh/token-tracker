@@ -69,7 +69,7 @@ To move an existing hub's history into another hub, stop the old hub (or copy it
 TOKEN_TRACKER_PAIRING_SECRET='the-new-hub-secret' bun scripts/migrate-hub.ts ~/.local/share/token-tracker https://your-dashboard.workers.dev
 ```
 
-The script copies devices, every stored record with its pricing snapshot, source diagnostics, and pricing rules through the new hub's RPCs. The target must run a version that supports `ImportUsage`. Rerunning preserves credentials for collectors already connected to the target. Then reconnect each device to the new URL; its uploads match the migrated records instead of adding usage again. A self-hosted hub's own machine does not upload to itself, so connect that machine as a client too.
+The script copies devices, missing usage records with their pricing snapshots, source diagnostics, and pricing rules through the new hub's RPCs. The target must run a version that supports `ImportUsage`. It checks source pricing before copying: unreadable or invalid pricing state and different source/target catalog rates stop the migration. Align the catalogs before retrying. Rerunning preserves existing target records and credentials for collectors already connected to the target. Then reconnect each device to the new URL; its uploads match the migrated records instead of adding usage again. A self-hosted hub's own machine does not upload to itself, so connect that machine as a client too.
 
 ## Local usage checks
 

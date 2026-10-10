@@ -83,7 +83,11 @@ test('a public SQL hub stores synced usage and pricing without a local device', 
         }) + '\n',
     });
     expect(await denied.text()).toContain('Unauthorized');
-    expect(browser.setPricingRule(rule, 'incorrect-secret')).rejects.toThrow('Pricing changes require');
+    const deniedWrite = await browser.setPricingRule(rule, 'incorrect-secret').then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(deniedWrite).toMatchObject({ message: expect.stringContaining('Pricing changes require') });
     await browser.setPricingRule(rule, pairingSecret);
     expect((await browser.getUsage()).totals.costUSD).toBe(0);
 
@@ -174,7 +178,7 @@ test('administrative imports authenticate, validate batches, and preserve connec
           client.ImportUsage({ pairingSecret, batch: { device, events: [{ ...event, outputTokens: 75 }] } }),
         ),
       ),
-    ).toMatchObject({ updated: 1 });
+    ).toMatchObject({ accepted: 0, updated: 0 });
     expect(
       await runtime.runPromise(
         Effect.flatMap(UsageClient, (client) =>

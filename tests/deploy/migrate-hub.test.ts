@@ -32,7 +32,13 @@ const migrate = async (source: string, target: string) => {
   }
 };
 
-for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
+for (const scenario of [
+  'alias chain',
+  'different catalog',
+  'invalid pricing state',
+  'unreadable pricing state',
+  'missing pricing state',
+] as const) {
   test(`migration handles ${scenario} without silently losing pricing rules`, async () => {
     const directory = await mkdtemp(join(tmpdir(), 'token-tracker-migration-'));
     const source = join(directory, 'source');
@@ -47,6 +53,26 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
     const server = Bun.serve({ port: 0, fetch: (request) => hub.handler(request) });
     const target = `http://127.0.0.1:${server.port}`;
     const browser = makeDashboardClient(`${target}/rpc`);
+    const device = { id: 'source-device', name: 'Source device', platform: 'linux' };
+    const event: UsageEvent = {
+      id: 'source-request',
+      timestamp: new Date().toISOString(),
+      harness: 'claude',
+      model: 'a-custom',
+      rawModel: 'a-custom',
+      project: '/work/app',
+      repository: null,
+      sessionId: 'source-session',
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      cacheWrite1hTokens: 0,
+      reasoningTokens: 0,
+      serviceTier: '',
+      costUsd: 2,
+      costKnown: true,
+    };
     try {
       // Initialize a real source database, even for the pricing-only failure case.
       await runtime.runPromise(Effect.flatMap(UsageStore, (store) => store.getDevices()));
@@ -59,26 +85,6 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
         );
         await Effect.runPromise(setPricingRule({ model: 'm-custom', kind: 'alias', target: 'z-custom' }, source));
         await Effect.runPromise(setPricingRule({ model: 'a-custom', kind: 'alias', target: 'm-custom' }, source));
-        const device = { id: 'source-device', name: 'Source device', platform: 'linux' };
-        const event: UsageEvent = {
-          id: 'source-request',
-          timestamp: new Date().toISOString(),
-          harness: 'claude',
-          model: 'a-custom',
-          rawModel: 'a-custom',
-          project: '/work/app',
-          repository: null,
-          sessionId: 'source-session',
-          inputTokens: 1_000_000,
-          outputTokens: 0,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          cacheWrite1hTokens: 0,
-          reasoningTokens: 0,
-          serviceTier: '',
-          costUsd: 2,
-          costKnown: true,
-        };
         const registration = await runtime.runPromise(
           Effect.flatMap(UsageStore, (store) => store.registerDevice(pairingSecret, device)),
         );
@@ -87,7 +93,7 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
             store.syncUsage(device.id, registration.token, { device, events: [event] }),
           ),
         );
-      } else {
+      } else if (scenario === 'different catalog') {
         const stored = defaultStored();
         await writeFile(
           join(source, 'pricing-state.json'),
@@ -104,6 +110,14 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
           }),
         );
         expect((await Effect.runPromise(loadPricing(source))).info.rules).toHaveLength(1);
+      } else if (scenario === 'invalid pricing state') {
+        await writeFile(join(source, 'pricing-state.json'), '{invalid');
+      } else if (scenario === 'unreadable pricing state') {
+        await mkdir(join(source, 'pricing-state.json'));
+      }
+      if (scenario !== 'alias chain' && scenario !== 'missing pricing state') {
+        // A pricing preflight failure must not even register this source device.
+        await runtime.runPromise(Effect.flatMap(UsageStore, (store) => store.registerDevice(pairingSecret, device)));
       }
       // Close the source hub before executing the documented migration command.
       await runtime.dispose();
@@ -118,7 +132,6 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
         // preserve its token as well as the accounting totals.
         const collector = ManagedRuntime.make(rpcClientLayer(`${target}/rpc`));
         try {
-          const device = { id: 'source-device', name: 'Source device', platform: 'linux' };
           const registration = await collector.runPromise(
             Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device })),
           );
@@ -129,18 +142,41 @@ for (const scenario of ['alias chain', 'unavailable catalog target'] as const) {
               ),
             );
           expect(await heartbeat()).toMatchObject({ accepted: 0, updated: 0 });
+          expect(
+            await collector.runPromise(
+              Effect.flatMap(UsageClient, (client) =>
+                client.SyncUsage({
+                  deviceId: device.id,
+                  token: registration.token,
+                  batch: {
+                    device,
+                    events: [{ ...event, inputTokens: 2_000_000, costUsd: 4, sessionTitle: 'Corrected target' }],
+                  },
+                }),
+              ),
+            ),
+          ).toMatchObject({ updated: 1 });
           const repeated = await migrate(source, target);
           expect(repeated.code, repeated.stderr).toBe(0);
           expect(await heartbeat()).toMatchObject({ accepted: 0, updated: 0 });
-          expect((await browser.getUsage()).totals).toMatchObject({ tokens: 1_000_000, costUSD: 2 });
+          const retained = await browser.getUsage();
+          expect(retained.totals).toMatchObject({ tokens: 2_000_000, costUSD: 4 });
+          expect(retained.sessions[0]?.sessionTitle).toBe('Corrected target');
         } finally {
           await collector.dispose();
         }
+      } else if (scenario === 'missing pricing state') {
+        expect(result.code, result.stderr).toBe(0);
+        expect(result.stdout).toContain('0 pricing rules');
+        expect(await Bun.file(join(source, 'pricing-state.json')).exists()).toBe(false);
       } else {
         expect(result.code).not.toBe(0);
-        expect(result.stdout + result.stderr).toContain('PricingFailure');
+        expect(result.stdout + result.stderr).toContain(
+          scenario === 'different catalog' ? 'different rates' : 'saved pricing state',
+        );
         expect(result.stdout).not.toContain('Copied 0 devices');
         expect((await browser.getPricing()).info.rules).toEqual([]);
+        expect(await browser.getDevices()).toEqual([]);
       }
     } finally {
       await runtime.dispose();

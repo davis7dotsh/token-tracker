@@ -27,12 +27,16 @@ export default Alchemy.Stack(
       outdir: 'build',
       memo: { include: ['src/**', 'static/**', 'package.json', 'bun.lock', 'patches/**', 'vite.config.ts'] },
     });
-    const passthrough = ['XDG_CACHE_HOME', 'TOKEN_TRACKER_DOWNLOAD_DIR', 'TOKEN_TRACKER_PAIRING_SECRET'].flatMap(
-      (key) => {
-        const value = process.env[key];
-        return value ? [[key, value] as const] : [];
-      },
-    );
+    const passthrough = [
+      'XDG_CACHE_HOME',
+      'TOKEN_TRACKER_DOWNLOAD_DIR',
+      'TOKEN_TRACKER_PAIRING_SECRET',
+      'TOKEN_TRACKER_T3_DATA_DIR',
+      'TOKEN_TRACKER_T3_URL',
+    ].flatMap((key) => {
+      const value = process.env[key];
+      return value ? [[key, value] as const] : [];
+    });
     const service = yield* DashboardService('Dashboard', {
       name,
       build: build.outdir,

@@ -3,6 +3,7 @@ import { SqliteClient } from '@effect/sql-sqlite-bun';
 import { Console, Data, Effect, Schema } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { UsageClient, rpcClientLayer } from '../src/lib/client/rpc';
 import { loadPricing } from '../src/lib/server/usage/pricing-runtime';
 import { SourceStatus, UsageEvent, type SyncBatch } from '../src/lib/shared/domain';
@@ -32,6 +33,14 @@ const migrate = Effect.gen(function* () {
   const source = resolve(sourceArgument);
   const sql = yield* SqlClient.SqlClient;
   const client = yield* UsageClient;
+  // Preflight pricing before mutating the target. Dashboard reads reprice
+  // imported history against the target catalog, so its rates must match.
+  const pricing = yield* loadPricing(source, { strict: true });
+  const targetPricing = yield* client.GetPricingPolicy({});
+  if (!targetPricing || !isDeepStrictEqual(pricing.policy.catalog.models, targetPricing.catalog.models))
+    return yield* new MigrationFailure({
+      message: 'Source and target pricing catalogs have different rates. Align the catalogs before migrating.',
+    });
   const devices = yield* sql<{
     id: string;
     name: string;
@@ -68,7 +77,6 @@ const migrate = Effect.gen(function* () {
       ...(row.pricing_updated_at ? { pricingUpdatedAt: row.pricing_updated_at } : {}),
     });
   }
-  const pricing = yield* loadPricing(source);
   // Install every source override before aliases that depend on it, including
   // alias chains whose model names sort before their targets. RPC failures must
   // stop the migration rather than report missing rules as successfully copied.
