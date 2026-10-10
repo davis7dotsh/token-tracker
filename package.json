@@ -35,8 +35,8 @@
     "cli": "bun src/cli/run.ts",
     "build:cli": "bun scripts/build-cli.ts",
     "update:pricing": "bun scripts/update-pricing.ts",
-    "lint": "vp lint --deny-warnings",
-    "lint:fix": "vp lint --fix --deny-warnings",
+    "lint": "svelte-kit sync && vp lint --deny-warnings",
+    "lint:fix": "svelte-kit sync && vp lint --fix --deny-warnings",
     "format": "vp fmt",
     "format:check": "vp fmt --check",
     "check:svelte": "svelte-check --tsgo --tsconfig ./tsconfig.json --fail-on-warnings"
