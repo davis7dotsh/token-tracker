@@ -12,6 +12,7 @@
     usageQueryFromParams,
   } from '#lib/client/dashboard-url.ts';
   import { makeDashboardClient } from '#lib/client/rpc.ts';
+  import { projectLabel, repositoryWebUrl, safeWebUrl, sessionDisplayName } from '#lib/client/session-links.ts';
   import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
   import { UsageQuery, type Breakdown, type DashboardResponse, type Device } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
@@ -131,7 +132,7 @@
     (data?.sessions ?? []).map((session) => ({
       session,
       search:
-        `${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''}`.toLowerCase(),
+        `${session.sessionTitle ?? ''} ${session.projectName ?? ''} ${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''} ${session.t3ThreadId ?? ''}`.toLowerCase(),
     })),
   );
   const sortedSessions = $derived(
@@ -209,15 +210,7 @@
     return deviceNames.get(id) ?? (id === 'local' ? (data?.machine ?? 'This machine') : id);
   }
   function projectName(value: string) {
-    return (
-      value
-        .replace(/^https?:\/\//, '')
-        .replace(/\.git$/, '')
-        .split(/[\\/]/)
-        .filter(Boolean)
-        .slice(-2)
-        .join('/') || value
-    );
+    return projectLabel(value);
   }
   function formatDate(value: string) {
     return date.format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
@@ -323,6 +316,11 @@
         'estimated_cost_usd',
         'unpriced_tokens',
         'last_active',
+        'session_title',
+        'project_name',
+        't3_thread_id',
+        't3_thread_url',
+        'repository_url',
       ],
       ...data.sessions.map((session) => [
         session.id,
@@ -335,6 +333,11 @@
         session.costUSD,
         session.unpricedTokens,
         session.lastActiveAt,
+        session.sessionTitle ?? '',
+        session.projectName ?? '',
+        session.t3ThreadId ?? '',
+        safeWebUrl(session.t3ThreadUrl) ?? '',
+        repositoryWebUrl(session.repository) ?? '',
       ]),
     ];
     const url = URL.createObjectURL(
@@ -694,11 +697,44 @@
               ></tr
             ></thead
           ><tbody
-            >{#each sessions as session (`${session.deviceId}:${session.harness}:${session.id}`)}<tr
+            >{#each sessions as session (`${session.deviceId}:${session.harness}:${session.id}`)}
+              {@const threadUrl = safeWebUrl(session.t3ThreadUrl)}
+              {@const repoUrl = repositoryWebUrl(session.repository)}
+              {@const name = sessionDisplayName(session)}
+              {@const hasTitle = Boolean(session.sessionTitle || session.projectName)}
+              {@const primaryUrl = threadUrl ?? (hasTitle ? undefined : repoUrl)}
+              <tr
                 ><td
-                  ><span class="session-project" title={session.repository ?? session.project}
-                    >{projectName(session.repository ?? session.project)}</span
-                  ><span class="session-id">{session.id.slice(0, 16)} · {deviceName(session.deviceId)}</span></td
+                  ><div class="session-project" title={name}>
+                    {#if primaryUrl}<a
+                        href={primaryUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`${threadUrl ? 'Open T3 Code thread' : 'Open repository'}: ${name}`}
+                      >
+                        <span>{name}</span><Icon name="external" size={14} />
+                      </a>{:else}<span>{name}</span>{/if}
+                  </div>
+                  <div
+                    class="session-context"
+                    title={hasTitle ? (session.repository ?? session.project) : session.project}
+                  >
+                    {#if (hasTitle || threadUrl) && repoUrl}<a
+                        href={repoUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`Open repository: ${projectName(session.repository ?? session.project)}`}
+                      >
+                        <Icon name="repository" size={14} /><span
+                          >{projectName(session.repository ?? session.project)}</span
+                        >
+                      </a>{:else}<span
+                        >{hasTitle ? session.projectName || projectName(session.project) : session.project}</span
+                      >{/if}
+                  </div>
+                  <span class="session-id" title={session.id}
+                    >{session.id.slice(0, 16)} · {deviceName(session.deviceId)}</span
+                  ></td
                 ><td
                   ><span class="session-harness"
                     ><i

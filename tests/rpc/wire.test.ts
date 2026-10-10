@@ -32,6 +32,87 @@ const localEvent: UsageEvent = {
 };
 const localData = { events: [localEvent], sources: [], warnings: [], pricingUpdatedAt: '2026-10-03T00:00:00.000Z' };
 
+test('legacy uploads gain session titles and T3 links through metadata-only RPC corrections', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-session-metadata-'));
+  directories.push(directory);
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, {
+      device: localDevice,
+      collect: Effect.succeed({ ...localData, events: [] }),
+    }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const endpoint = `http://127.0.0.1:${server.port}/rpc`;
+  const runtime = ManagedRuntime.make(rpcClientLayer(endpoint));
+  const browser = makeDashboardClient(endpoint);
+  const device = { id: 'thread-laptop', name: 'Thread laptop', platform: 'linux' };
+  try {
+    const registration = await runtime.runPromise(
+      Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device })),
+    );
+    const upload = (event: UsageEvent) =>
+      runtime.runPromise(
+        Effect.flatMap(UsageClient, (client) =>
+          client.SyncUsage({
+            deviceId: device.id,
+            token: registration.token,
+            batch: { device, events: [event] },
+          }),
+        ),
+      );
+    expect(await upload(localEvent)).toMatchObject({ accepted: 1, updated: 0 });
+    expect((await browser.getUsage()).sessions[0]?.sessionTitle).toBeUndefined();
+    const metadata = {
+      sessionTitle: 'Improve session navigation',
+      projectName: 'Token tracker',
+      t3ThreadId: 'thread-1',
+      t3ThreadUrl: 'https://t3.example/thread/thread-1',
+    };
+    const enriched = { ...localEvent, ...metadata };
+    expect(await upload(enriched)).toMatchObject({ accepted: 0, updated: 1 });
+    expect(await upload(enriched)).toMatchObject({ accepted: 0, updated: 0 });
+    const dashboard = await browser.getUsage();
+    expect(dashboard.sessions[0]).toMatchObject(metadata);
+    expect(dashboard.totals).toMatchObject({ tokens: 175, sessions: 1 });
+    expect(await upload({ ...enriched, sessionTitle: 'Renamed thread' })).toMatchObject({
+      accepted: 0,
+      updated: 1,
+    });
+    expect((await browser.getUsage()).sessions[0]?.sessionTitle).toBe('Renamed thread');
+    // Optional T3 metadata can be missing during a transient local DB failure
+    // or when an older collector sends a genuine accounting correction.
+    expect(await upload(localEvent)).toMatchObject({ accepted: 0, updated: 0 });
+    expect(await upload({ ...localEvent, outputTokens: 80 })).toMatchObject({ accepted: 0, updated: 1 });
+    expect(await upload({ ...localEvent, outputTokens: 80 })).toMatchObject({ accepted: 0, updated: 0 });
+    const corrected = await browser.getUsage();
+    expect(corrected.sessions[0]).toMatchObject({ ...metadata, sessionTitle: 'Renamed thread' });
+    expect(corrected.totals).toMatchObject({ tokens: 205, sessions: 1 });
+    expect(await upload({ ...localEvent, outputTokens: 80, t3ThreadId: 'thread-2' })).toMatchObject({
+      accepted: 0,
+      updated: 1,
+    });
+    const changedThread = (await browser.getUsage()).sessions[0];
+    expect(changedThread?.sessionTitle).toBe('Renamed thread');
+    expect(changedThread?.t3ThreadId).toBe('thread-2');
+    expect(changedThread?.t3ThreadUrl).toBeUndefined();
+    expect(
+      await upload({ ...localEvent, outputTokens: 80, t3ThreadUrl: 'https://t3.example/thread/thread-3' }),
+    ).toMatchObject({
+      accepted: 0,
+      updated: 1,
+    });
+    const changedUrl = (await browser.getUsage()).sessions[0];
+    expect(changedUrl?.t3ThreadId).toBeUndefined();
+    expect(changedUrl?.t3ThreadUrl).toBe('https://t3.example/thread/thread-3');
+  } finally {
+    await browser.dispose();
+    await runtime.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
 test('Grok aggregate usage preserves calls, native cost, copied-device accounting, and pricing resets over RPC', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-grok-'));
   directories.push(directory);

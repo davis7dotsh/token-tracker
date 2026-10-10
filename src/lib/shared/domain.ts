@@ -12,7 +12,16 @@ const Timestamp = Schema.String.check(
 
 // Only accounting and session metadata cross this boundary. Prompts and replies
 // are never retained by the collector or uploaded to another machine.
+export const SessionMetadata = Schema.Struct({
+  sessionTitle: Schema.optionalKey(Schema.String),
+  projectName: Schema.optionalKey(Schema.String),
+  t3ThreadId: Schema.optionalKey(Schema.String),
+  t3ThreadUrl: Schema.optionalKey(Schema.String),
+});
+export type SessionMetadata = typeof SessionMetadata.Type;
+
 export const UsageEvent = Schema.Struct({
+  ...SessionMetadata.fields,
   id: Schema.String.check(Schema.isNonEmpty()),
   timestamp: Timestamp,
   harness: Harness,
@@ -91,6 +100,7 @@ export const ChartSeries = Schema.Struct({
 });
 export type ChartSeries = typeof ChartSeries.Type;
 export const Session = Schema.Struct({
+  ...SessionMetadata.fields,
   id: Schema.String,
   harness: Harness,
   model: Schema.String,

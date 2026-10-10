@@ -1,10 +1,11 @@
 import { Temporal } from '@js-temporal/polyfill';
-import type { DashboardResponse, UsageEvent, UsageQuery, UsageResult } from '../../shared/domain';
+import type { DashboardResponse, SessionMetadata, UsageEvent, UsageQuery, UsageResult } from '../../shared/domain';
 import type { PricingPolicy } from '../../shared/pricing';
 import { provider } from '../../shared/provider';
 import { tokenTotal } from './parsers';
 import { bundledPolicy, tokenCostParts } from './pricing';
 export { provider } from '../../shared/provider';
+const sessionMetadataKeys = ['sessionTitle', 'projectName'] as const;
 export const validateTimezone = (zone: string) => {
   try {
     Temporal.Now.zonedDateTimeISO(zone);
@@ -218,6 +219,8 @@ export const buildDashboard = (
       lastActiveAt: string;
       models: Set<string>;
       providers: Set<string>;
+      metadata: { -readonly [Key in keyof SessionMetadata]: SessionMetadata[Key] };
+      metadataUpdatedAt: Map<keyof SessionMetadata, number>;
       aggregate: ReturnType<typeof accumulator>;
     }
   >();
@@ -279,6 +282,8 @@ export const buildDashboard = (
         lastActiveAt: event.timestamp,
         models: new Set(),
         providers: new Set(),
+        metadata: {},
+        metadataUpdatedAt: new Map(),
         aggregate: accumulator(),
       };
       sessions.set(key, session);
@@ -286,6 +291,28 @@ export const buildDashboard = (
     session.aggregate.add(event, key, tokens);
     session.models.add(event.model);
     session.providers.add(eventProvider);
+    // Older collectors can upload records without optional metadata. Keep each
+    // field's newest available value regardless of the accounting event order.
+    for (const field of sessionMetadataKeys) {
+      const value = event[field]?.trim();
+      const updatedAt = session.metadataUpdatedAt.get(field);
+      if (value && (updatedAt === undefined || millis >= updatedAt)) {
+        session.metadata[field] = value;
+        session.metadataUpdatedAt.set(field, millis);
+      }
+    }
+    // A thread ID and its URL describe one destination. Keep them together so
+    // partial metadata cannot accidentally link a newer ID to an older thread.
+    const threadId = event.t3ThreadId?.trim();
+    const threadUrl = event.t3ThreadUrl?.trim();
+    const threadUpdatedAt = session.metadataUpdatedAt.get('t3ThreadId');
+    if ((threadId || threadUrl) && (threadUpdatedAt === undefined || millis >= threadUpdatedAt)) {
+      delete session.metadata.t3ThreadId;
+      delete session.metadata.t3ThreadUrl;
+      if (threadId) session.metadata.t3ThreadId = threadId;
+      if (threadUrl) session.metadata.t3ThreadUrl = threadUrl;
+      session.metadataUpdatedAt.set('t3ThreadId', millis);
+    }
     if (event.timestamp < session.startedAt) session.startedAt = event.timestamp;
     if (event.timestamp > session.lastActiveAt) session.lastActiveAt = event.timestamp;
   }
@@ -349,11 +376,12 @@ export const buildDashboard = (
     devices: breakdown(deviceGroups),
     sessions: [...sessions.values()]
       .map((session) => ({
+        ...session.metadata,
         id: session.event.sessionId,
         harness: session.event.harness,
         model: [...session.models].sort().join(', '),
         provider: [...session.providers].sort().join(', '),
-        project: session.event.repository ?? session.event.project,
+        project: session.event.project,
         repository: session.event.repository,
         deviceId: session.event.deviceId ?? 'local',
         startedAt: session.startedAt,

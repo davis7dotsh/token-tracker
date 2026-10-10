@@ -430,6 +430,56 @@ describe('dashboard aggregation', () => {
     expect(response.projects).toHaveLength(1);
     expect(response.projects[0].tokens).toBe(34);
     expect(response.totals.sessions).toBe(2);
+    expect(response.sessions.find((session) => session.deviceId === 'linux')?.project).toBe('/work/app');
+    expect(response.sessions.find((session) => session.deviceId === 'mac')?.project).toBe('/Users/ben/app');
+    expect(response.sessions.every((session) => session.repository === 'github.com/davis7/app')).toBe(true);
     expect(buildDashboard(data, { devices: ['mac'] }, new Date('2026-10-03T12:00:00Z')).totals.tokens).toBe(17);
+  });
+  test('sessions use the latest available metadata while legacy records preserve accounting and project grouping', () => {
+    const data = result([
+      event({
+        id: 'new-title',
+        timestamp: '2026-10-03T11:00:00.000Z',
+        sessionTitle: 'Improve session navigation',
+        t3ThreadId: 'thread-1',
+        t3ThreadUrl: 'https://t3.example/thread/thread-1',
+      }),
+      event({
+        id: 'old-metadata',
+        sessionTitle: 'Original title',
+        projectName: 'Token tracker',
+        t3ThreadId: 'thread-1',
+        t3ThreadUrl: 'https://old.example/thread/thread-1',
+      }),
+      event({ id: 'legacy', timestamp: '2026-10-03T11:30:00.000Z', sessionTitle: '   ' }),
+      event({ id: 'legacy-session', sessionId: 'legacy-session' }),
+    ]);
+    const response = buildDashboard(data, { range: 'all' }, new Date('2026-10-03T12:00:00Z'));
+    const session = response.sessions.find((entry) => entry.id === 'one');
+    expect(session).toMatchObject({
+      sessionTitle: 'Improve session navigation',
+      projectName: 'Token tracker',
+      t3ThreadId: 'thread-1',
+      t3ThreadUrl: 'https://t3.example/thread/thread-1',
+      project: '/work/app',
+      tokens: 51,
+      requests: 3,
+    });
+    expect(response.totals).toMatchObject({ sessions: 2, tokens: 68 });
+    expect(response.projects).toHaveLength(1);
+    const legacy = response.sessions.find((entry) => entry.id === 'legacy-session');
+    expect(legacy?.sessionTitle).toBeUndefined();
+    expect(legacy?.t3ThreadUrl).toBeUndefined();
+    expect(Schema.decodeUnknownSync(DashboardResponse)(response).sessions).toEqual(response.sessions);
+  });
+
+  test('a changed thread ID does not retain the previous thread URL', () => {
+    const data = result([
+      event({ t3ThreadId: 'thread-1', t3ThreadUrl: 'https://t3.example/thread/thread-1' }),
+      event({ id: 'new-thread', timestamp: '2026-10-03T11:00:00.000Z', t3ThreadId: 'thread-2' }),
+    ]);
+    const session = buildDashboard(data, { range: 'all' }, new Date('2026-10-03T12:00:00Z')).sessions[0];
+    expect(session?.t3ThreadId).toBe('thread-2');
+    expect(session?.t3ThreadUrl).toBeUndefined();
   });
 });

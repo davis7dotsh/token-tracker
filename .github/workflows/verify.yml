@@ -1,0 +1,33 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: '24.21.0'
+          run-install: false
+      - run: bun install --frozen-lockfile
+      - run: bun run format
+      - run: bun run lint
+      - run: bun run format:check
+      - run: bun run check
+      - run: bun run test
+      - run: bun run build
+      - run: bun run build:cli
+      - run: git diff --exit-code && git diff --check
