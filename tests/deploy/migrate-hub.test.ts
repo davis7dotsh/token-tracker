@@ -35,6 +35,8 @@ const migrate = async (source: string, target: string) => {
 for (const scenario of [
   'alias chain',
   'different catalog',
+  'target-only rates',
+  'target-only alias',
   'invalid pricing state',
   'unreadable pricing state',
   'missing pricing state',
@@ -110,6 +112,23 @@ for (const scenario of [
           }),
         );
         expect((await Effect.runPromise(loadPricing(source))).info.rules).toHaveLength(1);
+      } else if (scenario === 'target-only rates' || scenario === 'target-only alias') {
+        await browser.setPricingRule(
+          { model: 'z-custom', kind: 'rates', rates: { inputPerMillion: 2, outputPerMillion: 2 } },
+          pairingSecret,
+        );
+        await Effect.runPromise(
+          setPricingRule(
+            { model: 'z-custom', kind: 'rates', rates: { inputPerMillion: 2, outputPerMillion: 2 } },
+            source,
+          ),
+        );
+        await browser.setPricingRule(
+          scenario === 'target-only rates'
+            ? { model: 'a-custom', kind: 'rates', rates: { inputPerMillion: 99, outputPerMillion: 99 } }
+            : { model: 'a-custom', kind: 'alias', target: 'z-custom' },
+          pairingSecret,
+        );
       } else if (scenario === 'invalid pricing state') {
         await writeFile(join(source, 'pricing-state.json'), '{invalid');
       } else if (scenario === 'unreadable pricing state') {
@@ -117,8 +136,16 @@ for (const scenario of [
       }
       if (scenario !== 'alias chain' && scenario !== 'missing pricing state') {
         // A pricing preflight failure must not even register this source device.
-        await runtime.runPromise(Effect.flatMap(UsageStore, (store) => store.registerDevice(pairingSecret, device)));
+        const registration = await runtime.runPromise(
+          Effect.flatMap(UsageStore, (store) => store.registerDevice(pairingSecret, device)),
+        );
+        await runtime.runPromise(
+          Effect.flatMap(UsageStore, (store) =>
+            store.syncUsage(device.id, registration.token, { device, events: [event] }),
+          ),
+        );
       }
+      const initialTargetRules = (await browser.getPricing()).info.rules;
       // Close the source hub before executing the documented migration command.
       await runtime.dispose();
       const result = await migrate(source, target);
@@ -172,11 +199,16 @@ for (const scenario of [
       } else {
         expect(result.code).not.toBe(0);
         expect(result.stdout + result.stderr).toContain(
-          scenario === 'different catalog' ? 'different rates' : 'saved pricing state',
+          scenario === 'different catalog'
+            ? 'different rates'
+            : scenario === 'target-only rates' || scenario === 'target-only alias'
+              ? 'pricing rules absent from the source: a-custom'
+              : 'saved pricing state',
         );
         expect(result.stdout).not.toContain('Copied 0 devices');
-        expect((await browser.getPricing()).info.rules).toEqual([]);
+        expect((await browser.getPricing()).info.rules).toEqual(initialTargetRules);
         expect(await browser.getDevices()).toEqual([]);
+        expect((await browser.getUsage()).totals.tokens).toBe(0);
       }
     } finally {
       await runtime.dispose();

@@ -41,6 +41,14 @@ const migrate = Effect.gen(function* () {
     return yield* new MigrationFailure({
       message: 'Source and target pricing catalogs have different rates. Align the catalogs before migrating.',
     });
+  const sourceModels = new Set(pricing.info.rules.map((rule) => rule.model));
+  const targetOnlyModels = targetPricing.rules
+    .filter((rule) => !sourceModels.has(rule.model))
+    .map((rule) => rule.model);
+  if (targetOnlyModels.length)
+    return yield* new MigrationFailure({
+      message: `Target has pricing rules absent from the source: ${targetOnlyModels.join(', ')}. Reconcile those rules before migrating.`,
+    });
   const devices = yield* sql<{
     id: string;
     name: string;
