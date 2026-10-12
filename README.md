@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, Pi, and [Grok Build](https://github.com/xai-org/grok-build). Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), and Muse. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
 
 The dashboard runs on Nexus at [https://nexus.otter-hawksbill.ts.net:10007](https://nexus.otter-hawksbill.ts.net:10007), available on the same Tailscale network.
 
@@ -29,6 +29,8 @@ The theme defaults to System, with persistent Light and Dark overrides. Initial 
 ## Deploy
 
 Alchemy manages both targets from this repository. `alchemy.local.ts` runs the hub on your own machine; `alchemy.run.ts` hosts a passcode-protected dashboard on Cloudflare. Alchemy state lives in `.alchemy/` (local) or your Cloudflare account (cloud) and is never committed.
+
+When upgrading an existing deployment, update the hub before its collectors. Releases that add a harness change every upgraded collector's sync payload, even on machines without logs for that harness, so all of an upgraded collector's syncs will fail and retry until the hub recognizes the new category; no records are lost. After a hub has stored records in a newer category, do not roll it back to a version that cannot read that category.
 
 ### Your own machine
 
@@ -170,12 +172,13 @@ The dashboard runs as a separate Bun server. Native `serve` launches the package
 
 ## Sources and calculations
 
-| Harness     | Default log locations                                                   | Override              |
-| ----------- | ----------------------------------------------------------------------- | --------------------- |
-| Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present  | `CLAUDE_CONFIG_DIR`   |
-| Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl` | `CODEX_HOME`          |
-| Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                       | `PI_CODING_AGENT_DIR` |
-| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback       | `GROK_HOME`           |
+| Harness     | Default log locations                                                         | Override              |
+| ----------- | ----------------------------------------------------------------------------- | --------------------- |
+| Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present        | `CLAUDE_CONFIG_DIR`   |
+| Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`       | `CODEX_HOME`          |
+| Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                             | `PI_CODING_AGENT_DIR` |
+| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback             | `GROK_HOME`           |
+| Muse        | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`) | `MUSE_HOME`           |
 
 Overrides accept comma-separated roots. Malformed records are skipped with diagnostics; incomplete JSONL records are reread on later checks. Collection does not follow arbitrary nested directory symlinks.
 
@@ -202,6 +205,8 @@ Claude streamed records and Codex response identities are deduplicated. Claude a
 Grok Build's input counters include cached tokens, so the collector separates cache reads/writes from uncached input before totaling usage. Reasoning is already included in output. A ledger row can represent several model calls; its request count preserves those calls rather than counting the row as a single request. Grok costs use complete positive native USD accounting by default. These aggregate rows do not expose each call's context size, so automatic catalog estimates are not applied. Explicit saved pricing rules can override native costs; resetting a rule restores the original reported cost without requiring another device sync. Without an explicit pricing rule, absent or partial native costs remain unpriced. Subscription sessions may omit native costs, which do not represent subscription charges.
 
 Inherited Grok fork turns retain their original session ownership and are counted once. Parent turns already include subagent usage, so child sessions are excluded; missing readable parent accounting produces a partial-source warning. Subagent totals can lag until the parent writes its next durable turn.
+
+Muse writes one `session.jsonl` event log per session under its XDG data directory (`$XDG_DATA_HOME/muse/sessions`, defaulting to `~/.local/share/muse/sessions` on Linux and macOS); `MUSE_HOME` can point to the Muse data directory or directly to its `sessions` directory. The collector counts each session stream's `model_completed` records once. The paired `goal_usage_attribution` provider rows repeat the same counters without a model or cache split, so they are not added again. Muse input counters include cached tokens, so cache reads/writes are separated from uncached input before totaling, and reasoning is already included in output. Nested subagent and reminder sessions keep their own session IDs and inherit the enclosing session's project when they do not record a workspace. Approval-review judge streams are excluded because they record a synthetic sequence clock instead of wall time, so their usage cannot be dated. Model IDs are preserved exactly as logged; catalog pricing applies when an ID is available in the pricing catalog, while other IDs remain unpriced until a pricing rule is saved.
 
 Costs are **API-equivalent costs**, using native Grok accounting as described above and estimates from a cached LiteLLM catalog and saved model rules for other harnesses. The bundled snapshot in `src/lib/server/usage/pricing.json` is the initial catalog fallback. These costs are not subscription charges or invoices. Supported cache TTL, service-tier, and context-length rates are accounted for. Unknown models or unavailable costs retain their tokens with cost reported as unpriced.
 

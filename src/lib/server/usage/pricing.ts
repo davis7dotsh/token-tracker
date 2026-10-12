@@ -14,7 +14,7 @@ const catalogPrice = (model: string, policy: PricingPolicy) => {
     Object.hasOwn(policy.catalog.models, name) ? policy.catalog.models[name] : undefined;
   const direct = lookup(model);
   if (direct) return direct;
-  for (const prefix of ['openai/', 'anthropic/', 'xai/']) {
+  for (const prefix of ['openai/', 'anthropic/', 'xai/', 'meta/']) {
     const namespaced = lookup(prefix + model);
     if (namespaced) return namespaced;
     if (model.startsWith(prefix) && lookup(model.slice(prefix.length))) return lookup(model.slice(prefix.length));

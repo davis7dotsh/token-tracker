@@ -47,7 +47,7 @@ const families = [
   ['deepseek', ['deepseek-']],
   ['alibaba', ['qwen']],
   ['mistral', ['mistral-', 'mixtral-', 'codestral-', 'magistral-', 'ministral-', 'devstral-']],
-  ['meta', ['llama-', 'llama2-', 'llama3-', 'llama4-']],
+  ['meta', ['llama-', 'llama2-', 'llama3-', 'llama4-', 'muse-']],
   ['moonshot', ['kimi-', 'moonshot-']],
   ['zai', ['glm-']],
   ['cohere', ['command-r', 'command-a']],

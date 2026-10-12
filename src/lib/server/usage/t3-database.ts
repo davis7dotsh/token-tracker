@@ -15,7 +15,7 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
     typeof value === 'string' && value.trim().length > 0 && value.length <= maximum ? value.trim() : undefined;
   const harness = (driver: unknown) => {
     if (driver === 'claudeAgent' || driver === 'claude') return 'claude';
-    if (driver === 'codex' || driver === 'grok' || driver === 'pi') return driver;
+    if (driver === 'codex' || driver === 'grok' || driver === 'pi' || driver === 'muse') return driver;
     return undefined;
   };
   // This is the shared web/mobile route, including the environment that owns the
