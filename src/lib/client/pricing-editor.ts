@@ -10,13 +10,19 @@ const subsequence = (needle: string, haystack: string) => {
 // Loose catalog search for the alias picker: separator- and order-insensitive
 // token matching with a subsequence fallback. Exact/prefix matches rank first,
 // then clean slugs ahead of namespaced `provider/model` duplicates.
-export const rankCatalogMatches = (models: readonly string[], query: string, limit = 60) => {
+export const rankCatalogMatches = (
+  models: readonly string[],
+  query: string,
+  limit = 60,
+  include: (name: string) => boolean = () => true,
+) => {
   const search = query.trim().toLowerCase();
   const plainSearch = plain(search);
   const tokens = search.split(/[^a-z0-9.]+/).filter(Boolean);
   const namespacedLast = !search.includes('/');
   const ranked: { name: string; rank: readonly [number, number, number, number] }[] = [];
   for (const name of models) {
+    if (!include(name)) continue;
     const lower = name.toLowerCase();
     const base = lower.slice(lower.lastIndexOf('/') + 1);
     const plainName = plain(lower);

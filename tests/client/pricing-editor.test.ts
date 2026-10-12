@@ -123,6 +123,14 @@ describe('pricing alias editor validation', () => {
     expect(rankCatalogMatches(models, 'orb', 2)).toEqual(['orbit-alpha', 'orbit-alpha-extended']);
   });
 
+  test('catalog eligibility is applied before ranking limits', () => {
+    const invalid = Array.from({ length: 61 }, (_, index) => `orbit-${String(index).padStart(2, '0')}`);
+    const models = [...invalid, 'vendor/orbit-valid'];
+    expect(rankCatalogMatches(models, 'orbit', 8, (name) => name === 'vendor/orbit-valid')).toEqual([
+      'vendor/orbit-valid',
+    ]);
+  });
+
   test('accepts 200-character targets and rejects longer targets before submitting', () => {
     const limit = 'm'.repeat(200);
     const overLimit = 'm'.repeat(201);

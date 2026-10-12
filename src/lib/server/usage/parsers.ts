@@ -43,7 +43,13 @@ export const tokenTotal = (event: UsageEvent) =>
   event.inputTokens + event.outputTokens + event.cacheReadTokens + event.cacheWriteTokens;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const fallbackId = (harness: string, session: string, timestamp: string, ordinal: unknown, line: number) =>
-  `${harness}:metadata:${hash(JSON.stringify([session, timestamp, hasNumber(ordinal) ? ordinal : line]))}`;
+  `${harness}:metadata:${hash(
+    JSON.stringify([
+      session,
+      timestamp,
+      hasNumber(ordinal) || (typeof ordinal === 'string' && ordinal) ? ordinal : line,
+    ]),
+  )}`;
 
 const isoTimestamp = (millis: number) => {
   const date = new Date(millis);
@@ -562,12 +568,15 @@ export const museParser = (file: string) => {
   const parsed: ParsedFile = { events: [], malformed: 0, ...musePathIds(file), forkedAt: '' };
   let cwd = '';
   let model = 'unknown';
-  const visit = (record: Metadata, line: number): boolean => {
+  const visit = (record: Metadata, line: number, childPath = ''): boolean => {
     // Retained frames wrap their child records as JSON strings.
     if (Array.isArray(record.children)) {
-      for (const child of record.children) {
-        const json = text(object(child).record_json);
+      for (const [index, child] of record.children.entries()) {
+        const childRecord = object(child);
+        const json = text(childRecord.record_json);
         if (!json) continue;
+        const childOrdinal = hasNumber(childRecord.child_index) ? childRecord.child_index : index;
+        const nextChildPath = childPath ? `${childPath}:${childOrdinal}` : `${childOrdinal}`;
         let inner: unknown;
         try {
           inner = JSON.parse(json);
@@ -575,7 +584,7 @@ export const museParser = (file: string) => {
           parsed.malformed++;
           continue;
         }
-        if (!isObject(inner) || !visit(inner, line)) parsed.malformed++;
+        if (!isObject(inner) || !visit(inner, line, nextChildPath)) parsed.malformed++;
       }
       return true;
     }
@@ -620,9 +629,10 @@ export const museParser = (file: string) => {
     entry.reasoningTokens = Math.min(entry.outputTokens, number(usage.reasoning_tokens));
     if (!tokenTotal(entry)) return true;
     const nativeId = text(payload.source_run_record_id) || text(record.id);
+    const fallbackOrdinal = hasNumber(record.sequence) || !childPath ? record.sequence : `${line}:${childPath}`;
     entry.id = nativeId
       ? `muse:record:${nativeId}`
-      : fallbackId('muse', parsed.sessionId, stamp, record.sequence, line);
+      : fallbackId('muse', parsed.sessionId, stamp, fallbackOrdinal, line);
     parsed.events.push(candidate(entry));
     return true;
   };

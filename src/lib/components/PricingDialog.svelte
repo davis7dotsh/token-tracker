@@ -55,9 +55,7 @@
   const validateAlias = $derived(settings ? createAliasValidation(settings.info) : undefined);
   const aliasIssue = $derived(validateAlias?.(model, target));
   const catalogMatches = $derived(
-    rankCatalogMatches(settings?.info.models ?? [], target)
-      .filter((name) => validateAlias?.(model, name) === undefined)
-      .slice(0, 8),
+    rankCatalogMatches(settings?.info.models ?? [], target, 8, (name) => validateAlias?.(model, name) === undefined),
   );
   const highlightedIndex = $derived(Math.min(targetHighlight, Math.max(catalogMatches.length - 1, 0)));
   const validRates = $derived(

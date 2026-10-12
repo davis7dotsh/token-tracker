@@ -189,6 +189,34 @@ describe('Muse accounting', () => {
     expect(entries[0].event.id).toBe('muse:record:run-record-1');
   });
 
+  test('retained frame completions without native IDs keep distinct fallback identities', () => {
+    const anonymous = (outputTokens: number) =>
+      envelope('session-1', '2026-10-11T06:40:02.811Z', 'runtime.session', {
+        kind: 'run',
+        run_id: 'run-1',
+        event: {
+          kind: 'model_completed',
+          model: 'fixture-model',
+          usage: { ...usage, output_tokens: outputTokens },
+        },
+      });
+    const framed = parseMuse(
+      contents([
+        {
+          retained_frame: 'transaction',
+          children: [
+            { child_index: 0, record_json: JSON.stringify(anonymous(40)) },
+            { child_index: 1, record_json: JSON.stringify(anonymous(50)) },
+          ],
+        },
+      ]),
+      sessionFile('session-1'),
+    );
+    expect(framed.events).toHaveLength(2);
+    expect(new Set(framed.events.map(({ event }) => event.id)).size).toBe(2);
+    expect(deduplicate([framed])).toHaveLength(2);
+  });
+
   test('child sessions inherit the enclosing project', () => {
     const parent = parseMuse(
       contents([
