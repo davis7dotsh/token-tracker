@@ -45,6 +45,10 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const fallbackId = (harness: string, session: string, timestamp: string, ordinal: unknown, line: number) =>
   `${harness}:metadata:${hash(JSON.stringify([session, timestamp, hasNumber(ordinal) ? ordinal : line]))}`;
 
+const isoTimestamp = (millis: number) => {
+  const date = new Date(millis);
+  return Number.isFinite(millis) && millis > 0 && Number.isFinite(date.getTime()) ? date.toISOString() : '';
+};
 const timestamp = (value: unknown) => {
   const millis =
     typeof value === 'number'
@@ -54,7 +58,7 @@ const timestamp = (value: unknown) => {
       : typeof value === 'string'
         ? Date.parse(value.trim())
         : NaN;
-  return Number.isFinite(millis) && millis > 0 ? new Date(millis).toISOString() : '';
+  return isoTimestamp(millis);
 };
 const eventBase = (
   harness: typeof Harness.Type,
@@ -538,7 +542,7 @@ export const piParser = (file: string) => {
 const museTimestamp = (value: unknown) => {
   if (!hasNumber(value)) return timestamp(value);
   const millis = value > 1e17 ? value / 1e6 : value > 1e14 ? value / 1000 : value > 1e11 ? value : value * 1000;
-  return Number.isFinite(millis) && millis > 0 ? new Date(millis).toISOString() : '';
+  return isoTimestamp(millis);
 };
 // Session logs live at <date>/<session>/session.jsonl, with child sessions in
 // grouped subdirectories such as <session>/subagent/<child>/session.jsonl.
@@ -769,6 +773,10 @@ const applyMuseParentProjects = (files: ParsedFile[]) => {
       (file.workspaceRoot ? projectName(file.workspaceRoot) : undefined);
     if (known && !projects.has(file.sessionId)) projects.set(file.sessionId, known);
   }
+  // Metadata-only intermediate sessions may have neither events nor a
+  // workspace, but their session links still connect descendants.
+  for (const file of files)
+    if (file.sessionId && file.parentId && !parents.has(file.sessionId)) parents.set(file.sessionId, file.parentId);
   for (const file of sessions) {
     let project = projects.get(file.sessionId);
     const visited = new Set<string>([file.sessionId]);

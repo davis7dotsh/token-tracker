@@ -440,7 +440,8 @@
                       onmousedown={(event) => {
                         event.preventDefault();
                         pickTarget(name);
-                      }}>{name}</button
+                      }}
+                      onclick={() => pickTarget(name)}>{name}</button
                     >{/each}</span
                 >{/if}</span
             >

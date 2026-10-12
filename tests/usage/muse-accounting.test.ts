@@ -152,6 +152,13 @@ describe('Muse accounting', () => {
     expect(parsed.malformed).toBe(1);
   });
 
+  test('out-of-range finite timestamps are malformed rather than throwing', () => {
+    const broken = completed('session-1', '2026-10-11T06:40:02.811Z', usage);
+    const parsed = parseMuse(`${contents([{ ...broken, recorded_at: 1e30 }])}\n`, sessionFile('session-1'));
+    expect(parsed.events).toEqual([]);
+    expect(parsed.malformed).toBe(1);
+  });
+
   test('nanosecond-scale timestamps normalize to the same instant', () => {
     const row = completed('session-1', '2026-10-11T06:40:02.811Z', usage);
     const parsed = parseMuse(
@@ -219,6 +226,24 @@ describe('Muse accounting', () => {
     expect(parent.events).toEqual([]);
     expect(parent.workspaceRoot).toBe('/work/app');
     const entries = deduplicate([child, parent]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].event.project).toBe('/work/app');
+  });
+
+  test('grandchild sessions resolve projects through metadata-only intermediate sessions', () => {
+    const parent = parseMuse(contents([metadata('session-1', '/work/app')]), sessionFile('session-1'));
+    const child = parseMuse(
+      contents([metadata('child-1')]),
+      '/home/user/.local/share/muse/sessions/2026/10/11/session-1/subagent/child-1/session.jsonl',
+    );
+    const grandchild = parseMuse(
+      contents([completed('grandchild-1', '2026-10-11T06:40:04.000Z', usage, 'grandchild-record')]),
+      '/home/user/.local/share/muse/sessions/2026/10/11/session-1/subagent/child-1/subagent/grandchild-1/session.jsonl',
+    );
+    expect(child.events).toEqual([]);
+    expect(child.workspaceRoot).toBeUndefined();
+    expect(grandchild.parentId).toBe('child-1');
+    const entries = deduplicate([grandchild, child, parent]);
     expect(entries).toHaveLength(1);
     expect(entries[0].event.project).toBe('/work/app');
   });
