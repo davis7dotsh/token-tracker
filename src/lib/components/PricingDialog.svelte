@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { createAliasValidation, rankCatalogMatches } from '#lib/client/pricing-editor.ts';
   import type { makeDashboardClient } from '#lib/client/rpc.ts';
   import type { UsageQuery } from '#lib/shared/domain.ts';
@@ -104,6 +104,14 @@
     targetOpen = false;
   }
 
+  function scrollHighlightedTarget() {
+    void tick().then(() => {
+      targetWrapper
+        ?.querySelector<HTMLElement>(`#pricing-catalog-option-${highlightedIndex}`)
+        ?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
   function targetKeyboard(event: KeyboardEvent) {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (!catalogMatches.length) return;
@@ -115,6 +123,7 @@
         const step = event.key === 'ArrowDown' ? 1 : -1;
         targetHighlight = (highlightedIndex + step + catalogMatches.length) % catalogMatches.length;
       }
+      scrollHighlightedTarget();
     } else if (event.key === 'Enter' && targetOpen && catalogMatches[highlightedIndex]) {
       event.preventDefault();
       pickTarget(catalogMatches[highlightedIndex]);
