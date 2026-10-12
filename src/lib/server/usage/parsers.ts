@@ -19,6 +19,7 @@ export type ParsedFile = {
   sessionId: string;
   parentId: string;
   forkedAt: string;
+  workspaceRoot?: string;
   compactionIds?: Set<string>;
   retractedIds?: string[];
   emptyClaudeRequests?: readonly { id: string; nativeMessageId: string; sessionId: string }[];
@@ -589,7 +590,10 @@ export const museParser = (file: string) => {
       payloadType === 'run.model.configured'
     ) {
       const info = object(payload.record);
-      if (text(info.workspace_root)) cwd = text(info.workspace_root);
+      if (text(info.workspace_root)) {
+        cwd = text(info.workspace_root);
+        parsed.workspaceRoot ??= cwd;
+      }
       if (text(info.model_id)) model = modelName(info.model_id);
       return true;
     }
@@ -753,12 +757,16 @@ export const filterCodexReplays = (files: ParsedFile[]) => {
 // Child Muse sessions (reminders, subagents) do not always repeat the
 // workspace metadata. Their usage belongs to the enclosing session's project.
 const applyMuseParentProjects = (files: ParsedFile[]) => {
-  const sessions = files.filter((file) => file.events.some(({ event }) => event.harness === 'muse'));
+  const sessions = files.filter(
+    (file) => file.workspaceRoot || file.events.some(({ event }) => event.harness === 'muse'),
+  );
   const projects = new Map<string, string>();
   const parents = new Map<string, string>();
   for (const file of sessions) {
     if (file.parentId) parents.set(file.sessionId, file.parentId);
-    const known = file.events.find(({ event }) => event.project !== 'Unknown project')?.event.project;
+    const known =
+      file.events.find(({ event }) => event.project !== 'Unknown project')?.event.project ??
+      (file.workspaceRoot ? projectName(file.workspaceRoot) : undefined);
     if (known && !projects.has(file.sessionId)) projects.set(file.sessionId, known);
   }
   for (const file of sessions) {

@@ -210,6 +210,19 @@ describe('Muse accounting', () => {
     expect(entries.find(({ event }) => event.sessionId === 'child-1')?.event.project).toBe('/work/app');
   });
 
+  test('metadata-only parent sessions pass their workspace to child sessions', () => {
+    const parent = parseMuse(contents([metadata('session-1', '/work/app')]), sessionFile('session-1'));
+    const child = parseMuse(
+      contents([completed('child-1', '2026-10-11T06:40:04.000Z', usage, 'child-record')]),
+      '/home/user/.local/share/muse/sessions/2026/10/11/session-1/subagent/child-1/session.jsonl',
+    );
+    expect(parent.events).toEqual([]);
+    expect(parent.workspaceRoot).toBe('/work/app');
+    const entries = deduplicate([child, parent]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].event.project).toBe('/work/app');
+  });
+
   test('family model IDs resolve to Meta and price through the catalog namespace', () => {
     expect(provider('muse-fixture-1.0')).toBe('meta');
     expect(provider('meta/muse-fixture-1.0')).toBe('meta');
@@ -290,5 +303,37 @@ describe('Muse collection', () => {
     expect(dashboard.harnesses).toEqual([expect.objectContaining({ name: 'muse', tokens: 2080, sessions: 2 })]);
     expect(dashboard.providers).toEqual([expect.objectContaining({ name: 'unknown', tokens: 2080 })]);
     expect(dashboard.totals).toMatchObject({ tokens: 2080, unpricedTokens: 2080, costUSD: 0 });
+  });
+
+  test('cached metadata-only parents still provide child projects on warm collection', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'token-tracker-muse-cache-'));
+    temporary.push(home);
+    const cacheDirectory = join(home, 'cache');
+    const write = async (relative: string, rows: readonly unknown[]) => {
+      const file = join(home, relative);
+      await mkdir(join(file, '..'), { recursive: true });
+      await writeFile(file, contents(rows));
+    };
+    await write('.local/share/muse/sessions/2026/10/11/session-1/session.jsonl', [metadata('session-1', '/work/app')]);
+    await write('.local/share/muse/sessions/2026/10/11/session-1/subagent/child-1/session.jsonl', [
+      completed('child-1', '2026-10-11T06:40:04.000Z', usage, 'child-record'),
+    ]);
+    const collect = () =>
+      Effect.runPromise(
+        collectUsage({
+          home,
+          cacheDirectory,
+          claudeDirs: [],
+          codexDirs: [],
+          piDirs: [],
+          grokDirs: [],
+          deviceId: 'muse-machine',
+        }).pipe(Effect.provide(BunServices.layer)),
+      );
+    const first = await collect();
+    const warm = await collect();
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0].project).toBe('/work/app');
+    expect(warm.events).toEqual(first.events);
   });
 });

@@ -9,7 +9,7 @@ import type { ParsedFile } from './parsers';
 // Its format is separate from pricing: every collection reapplies current rates
 // and aliases, even when the source file itself has not changed.
 const CachedFile = Schema.Struct({
-  version: Schema.Literal(4),
+  version: Schema.Literal(5),
   signature: Schema.String,
   file: Schema.Struct({
     events: Schema.Array(
@@ -28,6 +28,7 @@ const CachedFile = Schema.Struct({
     sessionId: Schema.String,
     parentId: Schema.String,
     forkedAt: Schema.String,
+    workspaceRoot: Schema.optionalKey(Schema.String),
     compactionIds: Schema.Array(Schema.String),
     retractedIds: Schema.Array(Schema.String),
     emptyClaudeRequests: Schema.optionalKey(
@@ -81,6 +82,7 @@ export const readParsedCache = Effect.fn('usage.readParsedCache')(function* (des
     sessionId: cached.sessionId,
     parentId: cached.parentId,
     forkedAt: cached.forkedAt,
+    ...(cached.workspaceRoot ? { workspaceRoot: cached.workspaceRoot } : {}),
     compactionIds: new Set(cached.compactionIds),
     retractedIds: [...cached.retractedIds],
     ...(cached.emptyClaudeRequests ? { emptyClaudeRequests: cached.emptyClaudeRequests } : {}),
@@ -95,7 +97,7 @@ export const writeParsedCache = Effect.fn('usage.writeParsedCache')(function* (
   const fs = yield* FileSystem.FileSystem;
   const temporary = `${destination}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const value = {
-    version: 4,
+    version: 5,
     signature,
     file: { ...file, compactionIds: [...(file.compactionIds ?? [])], retractedIds: file.retractedIds ?? [] },
   };
