@@ -24,5 +24,8 @@ export default defineConfig({
   },
   plugins: [sveltekit({ adapter: adapter(), compilerOptions: { experimental: { async: true } } })],
   ssr: { external: ['bun:sqlite'] },
-  server: { port: 5173, allowedHosts: ['enceladus.otter-hawksbill.ts.net'] },
+  // localhost and IP addresses are always allowed. Tailnet MagicDNS names are too.
+  // Add any other hostname here; `true` would disable the DNS-rebinding check.
+  server: { port: 5173, strictPort: true, allowedHosts: ['.ts.net'] },
+  preview: { allowedHosts: ['.ts.net'] },
 });

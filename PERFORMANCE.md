@@ -69,7 +69,7 @@ Wide cache misses still take seconds, and all-history responses remain large. Tw
 This command reads devices, the thirty-day dashboard twice, and pricing without changing data:
 
 ```sh
-bun run bench http://enceladus.otter-hawksbill.ts.net:8787
+bun run bench http://127.0.0.1:8787
 ```
 
 It prints duration and response size for each operation. Timing depends on active uploads, cache state, source-file changes, timezone, device hardware, and network latency. Audit fixtures and rollout evidence stay in the ignored `artifacts/performance/` directory; raw conversation content is not included in uploaded usage records.

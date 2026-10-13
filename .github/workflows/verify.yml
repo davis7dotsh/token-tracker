@@ -20,16 +20,25 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: voidzero-dev/setup-vp@v1
+      - uses: voidzero-dev/setup-vp@v1.21.2
         with:
           node-version: '24.21.0'
           run-install: false
-      - run: bun install --frozen-lockfile
-      - run: bun run format
-      - run: bun run lint
-      - run: bun run format:check
-      - run: bun run check
-      - run: bun run test
-      - run: bun run build
-      - run: bun run build:cli
-      - run: git diff --exit-code && git diff --check
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Format
+        run: bun run format
+      - name: Lint
+        run: bun run lint
+      - name: Check formatting
+        run: bun run format:check
+      - name: Typecheck
+        run: bun run check
+      - name: Test
+        run: bun run test
+      - name: Build dashboard
+        run: bun run build
+      - name: Build CLI
+        run: bun run build:cli
+      - name: Working tree stays clean
+        run: git diff --exit-code && git diff --check
