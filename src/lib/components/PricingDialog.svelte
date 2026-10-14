@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { createAliasValidation } from '#lib/client/pricing-editor.ts';
+  import { tick, untrack } from 'svelte';
+  import { createAliasValidation, rankCatalogMatches } from '#lib/client/pricing-editor.ts';
   import type { makeDashboardClient } from '#lib/client/rpc.ts';
   import type { UsageQuery } from '#lib/shared/domain.ts';
   import type { PricingInfo, PricingRule } from '#lib/shared/pricing.ts';
@@ -32,6 +32,9 @@
   let editing = $state(false);
   let kind = $state<PricingRule['kind']>('alias');
   let target = $state('');
+  let targetOpen = $state(false);
+  let targetHighlight = $state(0);
+  let targetWrapper = $state.raw<HTMLElement>();
   let nickname = $state('');
   let inputRate = $state<number | null | undefined>();
   let outputRate = $state<number | null | undefined>();
@@ -51,16 +54,10 @@
   const currentUnknown = $derived(unresolved.find((entry) => entry.model === model));
   const validateAlias = $derived(settings ? createAliasValidation(settings.info) : undefined);
   const aliasIssue = $derived(validateAlias?.(model, target));
-  const catalogEntries = $derived((settings?.info.models ?? []).map((name) => ({ name, search: name.toLowerCase() })));
-  const catalogMatches = $derived.by(() => {
-    const search = target.trim().toLowerCase();
-    const matches: string[] = [];
-    for (const entry of catalogEntries) {
-      if (entry.search.includes(search) && validateAlias?.(model, entry.name) === undefined) matches.push(entry.name);
-      if (matches.length === 60) break;
-    }
-    return matches;
-  });
+  const catalogMatches = $derived(
+    rankCatalogMatches(settings?.info.models ?? [], target, 8, (name) => validateAlias?.(model, name) === undefined),
+  );
+  const highlightedIndex = $derived(Math.min(targetHighlight, Math.max(catalogMatches.length - 1, 0)));
   const validRates = $derived(
     inputRate != null &&
       outputRate != null &&
@@ -86,8 +83,61 @@
     success = '';
   }
 
+  function openTarget() {
+    targetOpen = true;
+    targetHighlight = 0;
+  }
+
+  function pickTarget(name: string) {
+    target = name;
+    targetOpen = false;
+    targetHighlight = 0;
+    editDraft();
+  }
+
+  function targetOutside(event: PointerEvent) {
+    if (targetOpen && targetWrapper && !event.composedPath().includes(targetWrapper)) targetOpen = false;
+  }
+
+  function targetFocusOut(event: FocusEvent) {
+    if (targetWrapper && event.relatedTarget instanceof Node && targetWrapper.contains(event.relatedTarget)) return;
+    targetOpen = false;
+  }
+
+  function scrollHighlightedTarget() {
+    void tick().then(() => {
+      targetWrapper
+        ?.querySelector<HTMLElement>(`#pricing-catalog-option-${highlightedIndex}`)
+        ?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function targetKeyboard(event: KeyboardEvent) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      if (!catalogMatches.length) return;
+      event.preventDefault();
+      if (!targetOpen) {
+        targetOpen = true;
+        targetHighlight = event.key === 'ArrowDown' ? 0 : catalogMatches.length - 1;
+      } else {
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        targetHighlight = (highlightedIndex + step + catalogMatches.length) % catalogMatches.length;
+      }
+      scrollHighlightedTarget();
+    } else if (event.key === 'Enter' && targetOpen && catalogMatches[highlightedIndex]) {
+      event.preventDefault();
+      pickTarget(catalogMatches[highlightedIndex]);
+    } else if (event.key === 'Escape' && targetOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      targetOpen = false;
+    }
+  }
+
   function selectModel(value: string) {
     model = value;
+    targetOpen = false;
+    targetHighlight = 0;
     editing = true;
     editDraft();
     loadFailed = false;
@@ -281,6 +331,7 @@
   }
 </script>
 
+<svelte:window onpointerdown={targetOutside} />
 <dialog class="pricing-dialog" aria-labelledby="pricing-title" {@attach mountDialog} onclose={endEditing}>
   <div class="dialog-heading">
     <h2 id="pricing-title">Model pricing</h2>
@@ -355,23 +406,53 @@
             >{/each}
         </div>
         {#if kind === 'alias'}
-          <label class="pricing-field"
-            >Actual model<input
-              list="pricing-catalog"
-              aria-label="Actual model"
-              aria-invalid={Boolean(target.trim() && aliasIssue)}
-              aria-describedby="pricing-feedback"
-              bind:value={target}
-              maxlength="200"
-              required
-              disabled={Boolean(busy)}
-              placeholder="Search catalog models"
-              autocomplete="off"
-            /></label
-          >
-          <datalist id="pricing-catalog"
-            >{#each catalogMatches as name (name)}<option value={name}></option>{/each}</datalist
-          >
+          <div class="pricing-field">
+            <label for="pricing-target-model">Actual model</label>
+            <span class="pricing-target" bind:this={targetWrapper} onfocusout={targetFocusOut}
+              ><input
+                id="pricing-target-model"
+                role="combobox"
+                aria-label="Actual model"
+                aria-autocomplete="list"
+                aria-expanded={targetOpen && !busy && catalogMatches.length > 0}
+                aria-controls={targetOpen && !busy && catalogMatches.length ? 'pricing-catalog' : undefined}
+                aria-activedescendant={targetOpen && !busy && catalogMatches.length
+                  ? `pricing-catalog-option-${highlightedIndex}`
+                  : undefined}
+                aria-invalid={Boolean(target.trim() && aliasIssue)}
+                aria-describedby="pricing-feedback"
+                bind:value={target}
+                maxlength="200"
+                required
+                disabled={Boolean(busy)}
+                placeholder="Search catalog models"
+                autocomplete="off"
+                onfocus={openTarget}
+                onclick={openTarget}
+                oninput={openTarget}
+                onkeydown={targetKeyboard}
+              />{#if targetOpen && !busy && catalogMatches.length}<span
+                  class="pricing-target-list"
+                  id="pricing-catalog"
+                  role="listbox"
+                  aria-label="Catalog models"
+                  >{#each catalogMatches as name, index (name)}<button
+                      id={`pricing-catalog-option-${index}`}
+                      type="button"
+                      role="option"
+                      tabindex="-1"
+                      aria-selected={index === highlightedIndex}
+                      class={['pricing-target-option', index === highlightedIndex && 'highlighted']}
+                      onmouseenter={() => (targetHighlight = index)}
+                      onmousedown={(event) => {
+                        event.preventDefault();
+                        pickTarget(name);
+                      }}
+                      onclick={() => pickTarget(name)}>{name}</button
+                    >{/each}</span
+                >{/if}</span
+            >
+          </div>
           <p class="pricing-field-help">Uses this model’s rates and combines its usage in the dashboard.</p>
         {:else if kind === 'rates'}
           <label class="pricing-field"

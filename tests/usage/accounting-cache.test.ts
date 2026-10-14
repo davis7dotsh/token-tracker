@@ -89,7 +89,7 @@ test('cold, warm, and obsolete caches agree on canonical requests and replay wit
       await writeFile(file, JSON.stringify(value));
     }
     expect(await collect()).toEqual(cold);
-    for (const name of caches) expect(JSON.parse(await readFile(join(cacheDirectory, name), 'utf8')).version).toBe(4);
+    for (const name of caches) expect(JSON.parse(await readFile(join(cacheDirectory, name), 'utf8')).version).toBe(5);
     await rm(join(home, '.claude'), { recursive: true });
     await rm(join(home, '.pi'), { recursive: true });
     const missing = await collect();
@@ -154,7 +154,7 @@ test('cold and warm caches preserve asymmetric advisor ambiguity including empty
         sessionId: 'session',
       },
     ]);
-    expect(cached.every((value) => value.version === 4)).toBe(true);
+    expect(cached.every((value) => value.version === 5)).toBe(true);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

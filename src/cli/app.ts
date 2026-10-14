@@ -319,6 +319,6 @@ const serve = Command.make(
 ).pipe(Command.withDescription('Start the SvelteKit dashboard through Bun.'));
 
 export const cli = makeCheckCommand('token-tracker').pipe(
-  Command.withDescription('Token usage for Claude Code, Codex, Pi, and Grok Build.'),
+  Command.withDescription('Token usage for Claude Code, Codex, Pi, Grok Build, and Muse.'),
   Command.withSubcommands([check, connect, sync, status, disconnect, serve]),
 );

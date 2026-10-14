@@ -19,6 +19,7 @@ export type ParsedFile = {
   sessionId: string;
   parentId: string;
   forkedAt: string;
+  workspaceRoot?: string;
   compactionIds?: Set<string>;
   retractedIds?: string[];
   emptyClaudeRequests?: readonly { id: string; nativeMessageId: string; sessionId: string }[];
@@ -42,8 +43,18 @@ export const tokenTotal = (event: UsageEvent) =>
   event.inputTokens + event.outputTokens + event.cacheReadTokens + event.cacheWriteTokens;
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const fallbackId = (harness: string, session: string, timestamp: string, ordinal: unknown, line: number) =>
-  `${harness}:metadata:${hash(JSON.stringify([session, timestamp, hasNumber(ordinal) ? ordinal : line]))}`;
+  `${harness}:metadata:${hash(
+    JSON.stringify([
+      session,
+      timestamp,
+      hasNumber(ordinal) || (typeof ordinal === 'string' && ordinal) ? ordinal : line,
+    ]),
+  )}`;
 
+const isoTimestamp = (millis: number) => {
+  const date = new Date(millis);
+  return Number.isFinite(millis) && millis > 0 && Number.isFinite(date.getTime()) ? date.toISOString() : '';
+};
 const timestamp = (value: unknown) => {
   const millis =
     typeof value === 'number'
@@ -53,7 +64,7 @@ const timestamp = (value: unknown) => {
       : typeof value === 'string'
         ? Date.parse(value.trim())
         : NaN;
-  return Number.isFinite(millis) && millis > 0 ? new Date(millis).toISOString() : '';
+  return isoTimestamp(millis);
 };
 const eventBase = (
   harness: typeof Harness.Type,
@@ -531,6 +542,103 @@ export const piParser = (file: string) => {
   });
 };
 
+// Muse timestamps are microseconds since the Unix epoch, unlike the
+// millisecond/second values the shared helper accepts for other harnesses.
+// Nanosecond-scale values are also normalized defensively.
+const museTimestamp = (value: unknown) => {
+  if (!hasNumber(value)) return timestamp(value);
+  const millis = value > 1e17 ? value / 1e6 : value > 1e14 ? value / 1000 : value > 1e11 ? value : value * 1000;
+  return isoTimestamp(millis);
+};
+// Session logs live at <date>/<session>/session.jsonl, with child sessions in
+// grouped subdirectories such as <session>/subagent/<child>/session.jsonl.
+const musePathIds = (file: string) => {
+  const parts = file.split(/[\\/]/).filter(Boolean);
+  const groups = ['subagent', 'approval-review', 'workflows'];
+  const sessionId = fileSession(file) === 'session' ? (parts.at(-2) ?? 'unknown') : fileSession(file);
+  const parentId = groups.includes(parts.at(-3) ?? '')
+    ? (parts.at(-4) ?? '')
+    : groups.includes(parts.at(-2) ?? '')
+      ? (parts.at(-3) ?? '')
+      : '';
+  return { sessionId, parentId: parentId === sessionId ? '' : parentId };
+};
+
+export const museParser = (file: string) => {
+  const parsed: ParsedFile = { events: [], malformed: 0, ...musePathIds(file), forkedAt: '' };
+  let cwd = '';
+  let model = 'unknown';
+  const visit = (record: Metadata, line: number, childPath = ''): boolean => {
+    // Retained frames wrap their child records as JSON strings.
+    if (Array.isArray(record.children)) {
+      for (const [index, child] of record.children.entries()) {
+        const childRecord = object(child);
+        const json = text(childRecord.record_json);
+        if (!json) continue;
+        const childOrdinal = hasNumber(childRecord.child_index) ? childRecord.child_index : index;
+        const nextChildPath = childPath ? `${childPath}:${childOrdinal}` : `${childOrdinal}`;
+        let inner: unknown;
+        try {
+          inner = JSON.parse(json);
+        } catch {
+          parsed.malformed++;
+          continue;
+        }
+        if (!isObject(inner) || !visit(inner, line, nextChildPath)) parsed.malformed++;
+      }
+      return true;
+    }
+    const stream = object(record.stream);
+    const streamKind = text(stream.kind);
+    // Approval-review judge streams record a synthetic sequence clock rather
+    // than wall time, so their usage cannot be dated. Only session streams
+    // carry countable model usage.
+    if (streamKind && streamKind !== 'session') return true;
+    if (streamKind === 'session' && text(stream.id)) parsed.sessionId = text(stream.id);
+    const payload = object(record.payload);
+    const payloadType = text(record.payload_type);
+    if (
+      payloadType === 'runtime.session.metadata' ||
+      payloadType === 'session.workspace_branch.observed' ||
+      payloadType === 'run.model.configured'
+    ) {
+      const info = object(payload.record);
+      if (text(info.workspace_root)) {
+        cwd = text(info.workspace_root);
+        parsed.workspaceRoot ??= cwd;
+      }
+      if (text(info.model_id)) model = modelName(info.model_id);
+      return true;
+    }
+    const event = object(payload.event);
+    // goal_usage_attribution repeats each model_completed provider row (plus
+    // zero tool/reminder rows) without a model or cache split, so the richer
+    // model_completed record is the single accounting source.
+    if (event.kind !== 'model_completed' || !isObject(event.usage)) return true;
+    const stamp = museTimestamp(record.recorded_at);
+    if (!stamp) return false;
+    const usage = event.usage;
+    const entry = eventBase('muse', stamp, parsed.sessionId, text(event.model) || model, cwd);
+    // Muse input includes cached tokens, like Codex and Grok. Separate cache
+    // reads/writes from uncached input before totaling.
+    const input = number(usage.input_tokens);
+    entry.cacheReadTokens = Math.min(input, Math.max(number(usage.cache_read_tokens), number(usage.cached_tokens)));
+    entry.cacheWriteTokens = Math.min(input - entry.cacheReadTokens, number(usage.cache_write_tokens));
+    entry.inputTokens = input - entry.cacheReadTokens - entry.cacheWriteTokens;
+    entry.outputTokens = number(usage.output_tokens);
+    entry.reasoningTokens = Math.min(entry.outputTokens, number(usage.reasoning_tokens));
+    if (!tokenTotal(entry)) return true;
+    const nativeId = text(payload.source_run_record_id) || text(record.id);
+    const fallbackOrdinal = hasNumber(record.sequence) || !childPath ? record.sequence : `${line}:${childPath}`;
+    entry.id = nativeId
+      ? `muse:record:${nativeId}`
+      : fallbackId('muse', parsed.sessionId, stamp, fallbackOrdinal, line);
+    parsed.events.push(candidate(entry));
+    return true;
+  };
+  return recordParser(parsed, visit);
+};
+
 const parseContents = (contents: string, parser: ReturnType<typeof recordParser>) => {
   parser.push(contents);
   return parser.finish();
@@ -538,6 +646,7 @@ const parseContents = (contents: string, parser: ReturnType<typeof recordParser>
 export const parseClaude = (contents: string, file: string) => parseContents(contents, claudeParser(file));
 export const parseCodex = (contents: string, file: string) => parseContents(contents, codexParser(file));
 export const parsePi = (contents: string, file: string) => parseContents(contents, piParser(file));
+export const parseMuse = (contents: string, file: string) => parseContents(contents, museParser(file));
 
 export const filterClaudeReplays = (files: ParsedFile[]) => {
   const originals = new Map<string, Set<string>>();
@@ -659,10 +768,44 @@ export const filterCodexReplays = (files: ParsedFile[]) => {
   }
 };
 
+// Child Muse sessions (reminders, subagents) do not always repeat the
+// workspace metadata. Their usage belongs to the enclosing session's project.
+const applyMuseParentProjects = (files: ParsedFile[]) => {
+  const sessions = files.filter(
+    (file) => file.workspaceRoot || file.events.some(({ event }) => event.harness === 'muse'),
+  );
+  const projects = new Map<string, string>();
+  const parents = new Map<string, string>();
+  for (const file of sessions) {
+    if (file.parentId) parents.set(file.sessionId, file.parentId);
+    const known =
+      file.events.find(({ event }) => event.project !== 'Unknown project')?.event.project ??
+      (file.workspaceRoot ? projectName(file.workspaceRoot) : undefined);
+    if (known && !projects.has(file.sessionId)) projects.set(file.sessionId, known);
+  }
+  // Metadata-only intermediate sessions may have neither events nor a
+  // workspace, but their session links still connect descendants.
+  for (const file of files)
+    if (file.sessionId && file.parentId && !parents.has(file.sessionId)) parents.set(file.sessionId, file.parentId);
+  for (const file of sessions) {
+    let project = projects.get(file.sessionId);
+    const visited = new Set<string>([file.sessionId]);
+    let parent = parents.get(file.sessionId);
+    while (!project && parent && !visited.has(parent)) {
+      visited.add(parent);
+      project = projects.get(parent);
+      parent = parents.get(parent);
+    }
+    if (!project) continue;
+    for (const { event } of file.events) if (event.project === 'Unknown project') event.project = project;
+  }
+};
+
 export const deduplicate = (files: ParsedFile[]) => {
   filterClaudeReplays(files);
   filterCodexReplays(files);
   filterPiReplays(files);
+  applyMuseParentProjects(files);
   const entries = new Map<string, Candidate>();
   for (const file of files)
     for (const incoming of file.events) {

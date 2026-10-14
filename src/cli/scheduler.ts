@@ -45,10 +45,11 @@ export const scheduledEnvironment = (directory: string) => [
     'CODEX_HOME',
     'PI_CODING_AGENT_DIR',
     'GROK_HOME',
+    'MUSE_HOME',
   ].flatMap((name) => {
     const value = process.env[name];
     if (!value) return [];
-    const resolved = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'GROK_HOME'].includes(name)
+    const resolved = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'GROK_HOME', 'MUSE_HOME'].includes(name)
       ? value
           .split(',')
           .map((path) => path.trim())

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { createAliasValidation } from '../../src/lib/client/pricing-editor';
+import { createAliasValidation, rankCatalogMatches } from '../../src/lib/client/pricing-editor';
 import type { PricingRule } from '../../src/lib/shared/pricing';
 
 const catalogModels = ['gpt-6-astra', 'gpt-6-sol', 'openai/catalog-only', 'claude-fable-5'];
@@ -76,6 +76,9 @@ describe('pricing alias editor validation', () => {
     const validate = validation();
     expect(validate('new-proxy', 'catalog-only')).toBeUndefined();
     expect(validate('new-proxy', 'openai/gpt-6-astra')).toBeUndefined();
+    const metaValidate = createAliasValidation({ models: ['meta/orbit-fixture-1.0'], rules: [] });
+    expect(metaValidate('uncatalogued-fixture', 'orbit-fixture-1.0')).toBeUndefined();
+    expect(metaValidate('uncatalogued-fixture', 'meta/orbit-fixture-1.0')).toBeUndefined();
     expect(validate('new-proxy', 'claude-fable-5-20261005')).toBeUndefined();
     expect(validate('new-proxy', 'unrelated/gpt-6-astra')).toBeDefined();
     expect(validate('new-proxy', 'claude-fable-5-202610')).toBeDefined();
@@ -92,6 +95,40 @@ describe('pricing alias editor validation', () => {
     // whether these fallback names have catalog prices despite custom rules.
     expect(validate('new-proxy', 'openai/custom')).toBeUndefined();
     expect(validate('new-proxy', 'claude-private-20261005')).toBeUndefined();
+  });
+
+  test('fuzzy catalog search finds models across separators, token order, and typos', () => {
+    const models = ['meta/orbit-alpha-1.0', 'meta/orbit-beta-1.0', 'example-6'];
+    for (const query of ['orbit-alpha', 'orbit alpha', 'alpha orbit', 'orbitalpha', 'alpha', 'obtalpha']) {
+      expect(rankCatalogMatches(models, query)[0]).toBe('meta/orbit-alpha-1.0');
+    }
+    expect(rankCatalogMatches(models, 'not-a-model')).toEqual([]);
+  });
+
+  test('clean slugs rank ahead of namespaced duplicates, and prefix matches beat fuzzy ones', () => {
+    const models = [
+      'openrouter/vendor/orbit-alpha',
+      'azure/orbit-alpha',
+      'orbit-alpha',
+      'vendor/orbit-alpha',
+      'orbit-alpha-extended',
+    ];
+    expect(rankCatalogMatches(models, 'orbit')).toEqual([
+      'orbit-alpha',
+      'orbit-alpha-extended',
+      'azure/orbit-alpha',
+      'vendor/orbit-alpha',
+      'openrouter/vendor/orbit-alpha',
+    ]);
+    expect(rankCatalogMatches(models, 'orb', 2)).toEqual(['orbit-alpha', 'orbit-alpha-extended']);
+  });
+
+  test('catalog eligibility is applied before ranking limits', () => {
+    const invalid = Array.from({ length: 61 }, (_, index) => `orbit-${String(index).padStart(2, '0')}`);
+    const models = [...invalid, 'vendor/orbit-valid'];
+    expect(rankCatalogMatches(models, 'orbit', 8, (name) => name === 'vendor/orbit-valid')).toEqual([
+      'vendor/orbit-valid',
+    ]);
   });
 
   test('accepts 200-character targets and rejects longer targets before submitting', () => {

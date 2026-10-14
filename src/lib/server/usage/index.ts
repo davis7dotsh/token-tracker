@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { Effect, FileSystem, Path, Result, Stream } from 'effect';
 import { CollectionError, type SourceStatus, type UsageEvent, type UsageResult } from '../../shared/domain';
 import type { PricingPolicy } from '../../shared/pricing';
-import { deduplicate, claudeParser, codexParser, piParser, type ParsedFile } from './parsers';
+import { deduplicate, claudeParser, codexParser, museParser, piParser, type ParsedFile } from './parsers';
 import {
   fileSignature,
   parsedCachePath,
@@ -27,6 +27,7 @@ export type CollectionOptions = {
   codexDirs?: readonly string[];
   piDirs?: readonly string[];
   grokDirs?: readonly string[];
+  museDirs?: readonly string[];
   deviceId?: string;
   pricingPolicy?: PricingPolicy;
   t3DataDirectory?: string;
@@ -67,6 +68,11 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   const codexDirs = options.codexDirs ?? environmentDirs('CODEX_HOME') ?? [path.join(home, '.codex')];
   const piDirs = options.piDirs ?? environmentDirs('PI_CODING_AGENT_DIR') ?? [path.join(home, '.pi', 'agent')];
   const grokDirs = options.grokDirs ?? environmentDirs('GROK_HOME') ?? [path.join(home, '.grok')];
+  // Muse keeps session logs under the XDG data directory on every platform.
+  const museDirs = options.museDirs ??
+    environmentDirs('MUSE_HOME') ?? [
+      path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'muse'),
+    ];
   const sources: MutableSource[] = [];
   const seen = new Set<string>();
   const addSource = (harness: SourceStatus['harness'], root: string) => {
@@ -89,6 +95,8 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     addSource('pi', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
   for (const root of grokDirs)
     addSource('grok', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
+  for (const root of museDirs)
+    addSource('muse', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
   const cacheDirectory =
     options.cacheDirectory && (yield* prepareParsedCache(options.cacheDirectory)) ? options.cacheDirectory : undefined;
   const warnings: string[] = [];
@@ -157,7 +165,9 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
             ? claudeParser(file)
             : source.harness === 'codex'
               ? codexParser(file)
-              : piParser(file);
+              : source.harness === 'muse'
+                ? museParser(file)
+                : piParser(file);
         const decoder = new TextDecoder();
         const contents = yield* Effect.result(
           fs

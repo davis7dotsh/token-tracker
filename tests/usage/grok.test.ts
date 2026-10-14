@@ -474,6 +474,7 @@ describe('Grok Build accounting collection', () => {
         claudeDirs: [],
         codexDirs: [],
         piDirs: [],
+        museDirs: [],
         grokDirs: [fixture.root, secondRoot],
       }).pipe(Effect.provide(BunServices.layer)),
     );

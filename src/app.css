@@ -14,6 +14,7 @@
   --series-codex: #2084ce;
   --series-pi: #d94f91;
   --series-grok: #24875f;
+  --series-muse: #0f7d96;
   --series-gold: #ad7d15;
   --series-indigo: #6070cc;
   --series-violet: #9165c9;
@@ -40,6 +41,7 @@
   --series-codex: #4dabf7;
   --series-pi: #f472b6;
   --series-grok: #58c78f;
+  --series-muse: #63c7dd;
   --series-gold: #e8be59;
   --series-indigo: #8999f5;
   --series-violet: #b393f4;
@@ -1409,6 +1411,39 @@ dialog::backdrop {
 }
 .pricing-field input:disabled {
   opacity: 0.6;
+}
+.pricing-target {
+  position: relative;
+  display: block;
+}
+.pricing-target-list {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: block;
+  padding: 5px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: var(--shadow);
+}
+.pricing-target-option {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pricing-target-option.highlighted {
+  background: var(--soft);
 }
 .pricing-optional {
   margin-left: 4px;
