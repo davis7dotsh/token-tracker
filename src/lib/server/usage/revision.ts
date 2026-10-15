@@ -22,8 +22,13 @@ const fileInfo = async (file: string, follow = false) => {
     throw error;
   }
 };
-const inventory = async (root: string, grok: boolean) => {
+const inventory = async (root: string, grok: boolean, onUnavailable: () => void) => {
   const records: string[] = [];
+  const unavailable = (file: string, error: unknown) => {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'unknown';
+    records.push(`unreadable:${file}:${code}`);
+    onUnavailable();
+  };
   let physical: string;
   try {
     // Configured roots may be aliases. Nested symlinks are excluded just as
@@ -31,17 +36,24 @@ const inventory = async (root: string, grok: boolean) => {
     physical = await realpath(root);
   } catch (error) {
     if (missing(error)) return [`missing:${root}`];
-    throw error;
+    unavailable(root, error);
+    return records;
   }
   records.push(`root:${root}:${physical}`);
   const pending = [physical];
   while (pending.length) {
     const directory = pending.pop();
     if (!directory) break;
-    const info = await fileInfo(directory);
-    records.push(`directory:${directory}:${info ? fingerprint(info) : 'missing'}`);
-    if (!info?.isDirectory()) continue;
-    const entries = await readdir(directory, { withFileTypes: true });
+    let entries;
+    try {
+      const info = await fileInfo(directory);
+      records.push(`directory:${directory}:${info ? fingerprint(info) : 'missing'}`);
+      if (!info?.isDirectory()) continue;
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      unavailable(directory, error);
+      continue;
+    }
     for (const entry of entries) {
       const file = join(directory, entry.name);
       if (entry.isDirectory()) pending.push(file);
@@ -49,8 +61,12 @@ const inventory = async (root: string, grok: boolean) => {
         entry.isFile() &&
         (entry.name.toLowerCase().endsWith('.jsonl') || (grok && grokMetadata.has(entry.name)))
       ) {
-        const info = await fileInfo(file);
-        records.push(`file:${file}:${info ? fingerprint(info) : 'missing'}`);
+        try {
+          const info = await fileInfo(file);
+          records.push(`file:${file}:${info ? fingerprint(info) : 'missing'}`);
+        } catch (error) {
+          unavailable(file, error);
+        }
       }
     }
   }
@@ -64,13 +80,17 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
   Effect.fn('usage.revision')(function* (previous?: UsageResult) {
     const path = yield* Path.Path;
     const { home, sources } = yield* usageSourceRoots(options);
-    let optionalUnavailable = false;
+    let observationUnavailable = false;
     const records = yield* Effect.tryPromise({
       try: async () => {
         const inventoryRecords: string[] = [];
         for (const source of sources) {
           inventoryRecords.push(`source:${source.harness}:${source.path}`);
-          inventoryRecords.push(...(await inventory(source.path, source.harness === 'grok')));
+          inventoryRecords.push(
+            ...(await inventory(source.path, source.harness === 'grok', () => {
+              observationUnavailable = true;
+            })),
+          );
         }
         const configured = options.t3DataDirectory ?? process.env.TOKEN_TRACKER_T3_DATA_DIR;
         const root = configured?.trim() || path.join(home, '.t3', 'userdata');
@@ -96,7 +116,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
           } catch {
             // T3 labels are optional. Failed observation must retry without
             // preventing otherwise healthy token accounting from loading.
-            optionalUnavailable = true;
+            observationUnavailable = true;
             inventoryRecords.push(`t3-file:${file}:unavailable`);
           }
         }
@@ -114,7 +134,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
       if (Result.isFailure(resolver)) {
         if (skippedRepositoryPath(resolver.failure)) records.push('repository:skipped');
         else {
-          optionalUnavailable = true;
+          observationUnavailable = true;
           records.push('repository:unavailable');
         }
       }
@@ -126,7 +146,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
         if (Result.isFailure(parent)) {
           if (skippedRepositoryPath(parent.failure)) records.push(`repository:skipped:${dependency}`);
           else {
-            optionalUnavailable = true;
+            observationUnavailable = true;
             records.push(`repository:unavailable:${dependency}`);
           }
           continue;
@@ -139,7 +159,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
           }),
         );
         if (Result.isFailure(observed)) {
-          optionalUnavailable = true;
+          observationUnavailable = true;
           records.push(`repository:unavailable:${dependency}`);
           continue;
         }
@@ -156,7 +176,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
           if (Result.isFailure(target)) {
             if (skippedRepositoryPath(target.failure)) records.push(`repository-target:skipped:${dependency}`);
             else {
-              optionalUnavailable = true;
+              observationUnavailable = true;
               records.push(`repository-target:unavailable:${dependency}`);
             }
             continue;
@@ -168,7 +188,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
             }),
           );
           if (Result.isFailure(targetInfo)) {
-            optionalUnavailable = true;
+            observationUnavailable = true;
             records.push(`repository-target:unavailable:${dependency}`);
             continue;
           }
@@ -186,9 +206,9 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
     const hash = createHash('sha256');
     for (const record of records) hash.update(`${record.length}:${record}`);
     const signature = hash.digest('hex');
-    // A transient optional metadata/file read can fail without a stat change.
+    // A transient metadata/file read can fail without a stat change.
     // Such partial collections must retry rather than become timeless truth.
-    return optionalUnavailable || usageSnapshotIncomplete(previous)
+    return observationUnavailable || usageSnapshotIncomplete(previous)
       ? `${signature}:retry:${++retryRevision}`
       : signature;
   });

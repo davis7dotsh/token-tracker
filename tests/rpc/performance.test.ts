@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from 'bun:test';
+import { BunServices } from '@effect/platform-bun';
 import { Database } from 'bun:sqlite';
 import { Clock, Deferred, Effect, Layer, ManagedRuntime } from 'effect';
 import { Headers } from 'effect/http';
 import { Rpc, RpcMessage } from 'effect/rpc';
 import { TestClock } from 'effect/testing';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDashboardClient, rpcClientLayer, UsageClient } from '../../src/lib/client/rpc';
@@ -13,6 +14,9 @@ import { HubPricing, makeLocalUsageSnapshot, rpcHandlersLayer } from '../../src/
 import { defaultStored } from '../../src/lib/server/usage/pricing-store';
 import { UsageStore } from '../../src/lib/server/rpc/store';
 import { buildDashboard } from '../../src/lib/server/usage/dashboard';
+import { collectUsage } from '../../src/lib/server/usage';
+import { usageRevision } from '../../src/lib/server/usage/revision';
+import { bundledPolicy } from '../../src/lib/server/usage/pricing';
 import {
   CollectionError,
   type UsageEvent,
@@ -661,6 +665,108 @@ test('local snapshot generation stays stable for unchanged data and retries an i
   );
   expect(attempts).toBe(4);
 });
+
+test.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
+  'unreadable local directories retain healthy and uploaded usage and recover on the next request',
+  async () => {
+    const home = await temporary();
+    const claude = join(home, 'claude');
+    const root = join(claude, 'projects');
+    const healthy = join(root, 'healthy');
+    const denied = join(root, 'denied');
+    await mkdir(healthy, { recursive: true });
+    await mkdir(denied, { recursive: true });
+    const log = (id: string, tokens: number) =>
+      JSON.stringify({
+        type: 'assistant',
+        timestamp: '2026-10-15T10:00:00.000Z',
+        sessionId: id,
+        cwd: 'Unknown project',
+        message: { id, model: 'performance-unknown-model', usage: { input_tokens: tokens, output_tokens: 0 } },
+      }) + '\n';
+    await writeFile(join(healthy, 'usage.jsonl'), log('readable-local', 100));
+    const deniedFile = join(denied, 'usage.jsonl');
+    await writeFile(deniedFile, log('denied-local', 250));
+    const before = await stat(deniedFile, { bigint: true });
+    const options = {
+      home,
+      claudeDirs: [claude],
+      codexDirs: [],
+      piDirs: [],
+      grokDirs: [],
+      museDirs: [],
+      deviceId: localDevice.id,
+      t3DataDirectory: join(home, 'no-t3'),
+      pricingPolicy: bundledPolicy,
+    };
+    let collections = 0;
+    const collect = Effect.sync(() => {
+      collections++;
+    }).pipe(Effect.andThen(collectUsage(options)), Effect.provide(BunServices.layer));
+    const { runtime, getUsage } = await controlledHub(collect, (previous) =>
+      usageRevision(options)(previous).pipe(Effect.provide(BunServices.layer)),
+    );
+    await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T12:00:00.000Z')));
+    await runtime.runPromise(
+      Effect.gen(function* () {
+        const store = yield* UsageStore;
+        const registration = yield* store.registerDevice(pairingSecret, remoteDevice);
+        yield* store.syncUsage(remoteDevice.id, registration.token, {
+          device: remoteDevice,
+          events: [
+            event({
+              id: 'uploaded-readable',
+              sessionId: 'uploaded-readable',
+              timestamp: '2026-10-15T10:00:00.000Z',
+              inputTokens: 400,
+            }),
+          ],
+        });
+      }),
+    );
+    await chmod(denied, 0);
+    try {
+      const partial = await getUsage({ range: 'all' });
+      expect(partial.totals.tokens).toBe(500);
+      expect(partial.sessions.map((session) => session.id).sort()).toEqual(['readable-local', 'uploaded-readable']);
+      expect(partial.sources.some((source) => source.path === root && source.status === 'partial')).toBe(true);
+      expect(partial.warnings.some((warning) => warning.includes('1 directories could not be read.'))).toBe(true);
+      const partialCollections = collections;
+      expect((await getUsage({ range: 'all' })).totals.tokens).toBe(500);
+      expect(collections).toBeGreaterThan(partialCollections);
+    } finally {
+      await chmod(denied, 0o700);
+    }
+    const after = await stat(deniedFile, { bigint: true });
+    expect([after.ino, after.size, after.mtimeNs, after.ctimeNs]).toEqual([
+      before.ino,
+      before.size,
+      before.mtimeNs,
+      before.ctimeNs,
+    ]);
+    const recovered = await getUsage({ range: 'all' });
+    expect(recovered.totals.tokens).toBe(750);
+    expect(recovered.sources.some((source) => source.path === root && source.status === 'ready')).toBe(true);
+    expect(recovered.warnings.some((warning) => warning.includes('could not be read.'))).toBe(false);
+    const warmedCollections = collections;
+    expect((await getUsage({ range: 'all' })).sessions).toBe(recovered.sessions);
+    expect(collections).toBe(warmedCollections);
+
+    // An inaccessible configured root follows the same partial-collection
+    // policy as an unreadable child and never hides uploaded accounting.
+    await chmod(claude, 0);
+    try {
+      await runtime.runPromise(TestClock.adjust('6 seconds'));
+      const unavailable = await getUsage({ range: 'all' });
+      expect(unavailable.totals.tokens).toBe(400);
+      expect(unavailable.sources.some((source) => source.path === root && source.status === 'error')).toBe(true);
+      expect(unavailable.warnings.some((warning) => warning.includes('Usage directory could not be read.'))).toBe(true);
+    } finally {
+      await chmod(claude, 0o700);
+    }
+    expect((await getUsage({ range: 'all' })).totals.tokens).toBe(750);
+  },
+);
 
 test('local source races stabilize within two collections and unstable results revalidate on the next read', async () => {
   let attempts = 0;
