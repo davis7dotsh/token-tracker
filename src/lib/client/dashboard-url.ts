@@ -4,16 +4,24 @@ import type { UsageQuery } from '../shared/domain';
 export const filterKeys = ['harnesses', 'providers', 'models', 'devices', 'projects'] as const;
 export const breakdownGroups = ['harnesses', 'models', 'providers', 'devices', 'projects'] as const;
 export const chartGroups = ['harnesses', 'providers', 'models'] as const;
+const rangeValues = ['6m', '30d', '7d', 'today'] as const;
+export type DashboardRange = (typeof rangeValues)[number];
+export const dashboardRanges = [
+  { value: '6m', label: '6 months' },
+  { value: '30d', label: '1 month' },
+  { value: '7d', label: '1 week' },
+  { value: 'today', label: '1 day' },
+] as const satisfies readonly { value: DashboardRange; label: string }[];
 
 const literal = <const Value extends string>(value: unknown, values: readonly Value[], fallback: Value) =>
   values.find((entry) => entry === value) ?? fallback;
 const text = (value: unknown) => (typeof value === 'string' ? value : '');
-const validateDashboardParams = (input: unknown) => {
+const validateDashboardParams = (input: unknown, range: DashboardRange = '30d') => {
   const value = typeof input === 'object' && input !== null ? input : {};
   const field = (key: string) => (key in value ? Reflect.get(value, key) : undefined);
   const page = field('page');
   return {
-    range: literal(field('range'), ['6m', '30d', '7d', 'today'], '30d'),
+    range: literal(field('range'), rangeValues, range),
     harnesses: text(field('harnesses')),
     providers: text(field('providers')),
     models: text(field('models')),
@@ -33,15 +41,36 @@ type DashboardUrlState = ReturnType<typeof validateDashboardParams>;
 
 // Runed only needs Standard Schema's synchronous validation interface. Keep
 // URL parsing independent of the server's Effect schema/runtime bundle.
-export const dashboardUrlSchema: StandardSchemaV1<unknown, DashboardUrlState> = {
+// Its defaults are omitted from the URL, so the browser's chosen default must
+// be used by the schema while other selections stay explicit in shared links.
+export const dashboardUrlSchemaFor = (range: DashboardRange): StandardSchemaV1<unknown, DashboardUrlState> => ({
   '~standard': {
     version: 1 as const,
     vendor: 'token-tracker',
     validate: (input: unknown) =>
       typeof input !== 'object' || input === null || Array.isArray(input)
         ? { issues: [{ path: [], message: 'Expected object' }] }
-        : { value: validateDashboardParams(input) },
+        : { value: validateDashboardParams(input, range) },
   },
+});
+export const dashboardUrlSchema = dashboardUrlSchemaFor('30d');
+
+const defaultRangeKey = 'token-tracker-default-range';
+export const readDefaultRange = (): DashboardRange => {
+  if (typeof window === 'undefined') return '30d';
+  try {
+    const stored = localStorage.getItem(defaultRangeKey);
+    return rangeValues.find((range) => range === stored) ?? '30d';
+  } catch {
+    return '30d';
+  }
+};
+export const saveDefaultRange = (range: DashboardRange) => {
+  try {
+    localStorage.setItem(defaultRangeKey, range);
+  } catch {
+    /* The dashboard keeps its built-in default. */
+  }
 };
 
 export const decodeFilter = (value: string) => {

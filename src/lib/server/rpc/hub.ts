@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import type { Headers as EffectHeaders } from 'effect/http/Headers';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { RpcSerialization, RpcServer } from 'effect/rpc';
-import { UsageFailure, UsageRpc } from '../../shared/rpc';
+import { InvalidRequest, UsageFailure, UsageRpc } from '../../shared/rpc';
 import type { PricingPolicy } from '../../shared/pricing';
 import { UsageQuery, type CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
 import { tokenTotal } from '../usage/parsers';
@@ -70,8 +70,17 @@ const uniqueEvents = (events: readonly UsageEvent[], localDeviceId: string, quer
 const dashboardProofHeader = 'x-token-tracker-pricing-access';
 const pricingPolicyProofHeader = 'x-token-tracker-pricing-policy-access';
 // Same wire protocol and URL for existing uploads, but a separate group keeps
-// anonymous requests from invoking dashboard reads, including batched reads.
-const CollectorRpc = UsageRpc.omit('GetUsage', 'GetDevices', 'GetPricing');
+// anonymous requests from invoking dashboard reads, including batched reads,
+// and device administration.
+const CollectorRpc = UsageRpc.omit(
+  'GetUsage',
+  'GetDevices',
+  'GetPricing',
+  'GetAdminAccess',
+  'RenameDevice',
+  'RevokeDevice',
+  'RestoreDevice',
+);
 
 export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
   UsageRpc.toLayer(
@@ -88,10 +97,23 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           Effect.forkScoped,
         );
       }
-      const authorize = (secret: string, headers: EffectHeaders) =>
+      const authorize = (secret: string, headers: EffectHeaders, action?: string) =>
         options.trustBrowser && headers[dashboardProofHeader] === browserProof
           ? Effect.void
-          : store.authorizePricing(secret);
+          : store.authorizeAdmin(secret, action);
+      const isLocalDevice = (deviceId: string) =>
+        deviceId === 'local' || (localDeviceId !== '' && deviceId === localDeviceId);
+      const changeDevice = Effect.fn('rpc.changeDevice')(function* (
+        deviceId: string,
+        adminSecret: string,
+        headers: EffectHeaders,
+      ) {
+        yield* authorize(adminSecret, headers, 'Device changes');
+        if (isLocalDevice(deviceId))
+          return yield* new InvalidRequest({
+            message: 'This hub’s own machine cannot be renamed, revoked, or restored.',
+          });
+      });
       const effectiveQuery = (query: UsageQuery, policy: PricingPolicy): UsageQuery => ({
         ...query,
         models: query.models && [...new Set(query.models.map((model) => resolveDisplayModel(model, policy)))],
@@ -354,7 +376,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           // RPC messages can override HTTP headers, so removing a proof must
           // fail closed rather than bypass this check.
           if (headers[pricingPolicyProofHeader] !== browserProof) {
-            if (pairingSecret !== undefined) yield* store.authorizePricing(pairingSecret);
+            if (pairingSecret !== undefined) yield* store.authorizeAdmin(pairingSecret);
             else yield* store.authorizeDevice(deviceId ?? '', token ?? '');
           }
           const state = yield* pricing.load;
@@ -376,7 +398,24 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           const devices = yield* store.getDevices();
           const device = local.device;
           if (!device || devices.some((item) => item.id === device.id)) return devices;
-          return [{ ...device, lastSeen: new Date().toISOString(), eventCount: 0 }, ...devices];
+          return [
+            { ...device, lastSeen: new Date().toISOString(), eventCount: 0, revokedAt: null, needsReconnect: false },
+            ...devices,
+          ];
+        }),
+        GetAdminAccess: () =>
+          Effect.succeed({ secretRequired: !options.trustBrowser, localDeviceId: local.device?.id ?? null }),
+        RenameDevice: Effect.fn('rpc.RenameDevice')(function* ({ deviceId, name, adminSecret }, { headers }) {
+          yield* changeDevice(deviceId, adminSecret, headers);
+          return yield* store.renameDevice(deviceId, name);
+        }),
+        RevokeDevice: Effect.fn('rpc.RevokeDevice')(function* ({ deviceId, adminSecret }, { headers }) {
+          yield* changeDevice(deviceId, adminSecret, headers);
+          return yield* store.revokeDevice(deviceId);
+        }),
+        RestoreDevice: Effect.fn('rpc.RestoreDevice')(function* ({ deviceId, adminSecret }, { headers }) {
+          yield* changeDevice(deviceId, adminSecret, headers);
+          return yield* store.restoreDevice(deviceId);
         }),
         RegisterDevice: ({ pairingSecret, device }) => store.registerDevice(pairingSecret, device),
         SyncUsage: ({ deviceId, token, batch }) => store.syncUsage(deviceId, token, batch),

@@ -43,6 +43,7 @@ const readResult = (body: string, id: string) => {
 export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: number } = {}) => {
   const endpoint = typeof window === 'undefined' ? url : new URL(url, window.location.href).href;
   const timeout = Math.max(1, options.requestTimeoutMs ?? 10_000);
+  // Pricing settings scan usage for unpriced models, so they share the usage budget.
   const usageTimeout = Math.max(1, options.requestTimeoutMs ?? 30_000);
   const active = new Map<AbortController, Promise<unknown>>();
   let disposed = false;
@@ -100,7 +101,12 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
   return {
     getUsage: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetUsage', query, signal, usageTimeout),
     getDevices: (signal?: AbortSignal) => call('GetDevices', undefined, signal),
-    getPricing: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetPricing', query, signal),
+    getAdminAccess: (signal?: AbortSignal) => call('GetAdminAccess', undefined, signal),
+    renameDevice: (deviceId: string, name: string, adminSecret = '') =>
+      call('RenameDevice', { deviceId, name, adminSecret }),
+    revokeDevice: (deviceId: string, adminSecret = '') => call('RevokeDevice', { deviceId, adminSecret }),
+    restoreDevice: (deviceId: string, adminSecret = '') => call('RestoreDevice', { deviceId, adminSecret }),
+    getPricing: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetPricing', query, signal, usageTimeout),
     getPricingPolicy: (revision?: string) => call('GetPricingPolicy', revision === undefined ? {} : { revision }),
     setPricingRule: (rule: PricingRule, adminSecret = '') => call('SetPricingRule', { rule, adminSecret }),
     deletePricingRule: (model: string, adminSecret = '') => call('DeletePricingRule', { model, adminSecret }),

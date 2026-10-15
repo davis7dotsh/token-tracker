@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   dashboardUrlSchema,
+  dashboardUrlSchemaFor,
+  dashboardRanges,
   decodeFilter,
   encodeFilter,
   filterKeys,
@@ -43,6 +45,20 @@ describe('dashboard URL state', () => {
       timezone: 'America/Los_Angeles',
     });
     expect(filterKeys.every((key) => usageQueryFromParams(defaults, 'UTC')[key] === undefined)).toBe(true);
+  });
+
+  test.each(dashboardRanges.map(({ value }) => value))('browser default %s preserves explicit URL ranges', (value) => {
+    const schema = dashboardUrlSchemaFor(value);
+    const read = (input: Record<string, string>) => {
+      const result = schema['~standard'].validate(input);
+      if (result instanceof Promise || !('value' in result)) throw new Error('Expected synchronous validation.');
+      return result.value.range;
+    };
+    expect(read({})).toBe(value);
+    expect(read({ range: '30d' })).toBe('30d');
+    expect(read({ range: 'today' })).toBe('today');
+    expect(read({ range: 'invalid' })).toBe(value);
+    expect(validate({}).range).toBe('30d');
   });
 
   test('legacy all, none, and comma links keep their distinct filtering behavior', () => {

@@ -119,6 +119,77 @@ test('a public SQL hub stores synced usage and pricing without a local device', 
   }
 });
 
+test('a public hub requires the pairing secret to rename, revoke, or restore devices over RPC', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-cloud-devices-'));
+  directories.push(directory);
+  const hub = serve(join(directory, 'hub.sqlite'));
+  const runtime = ManagedRuntime.make(rpcClientLayer(hub.endpoint));
+  const browser = makeDashboardClient(hub.endpoint);
+  const device = { id: 'laptop', name: 'Laptop', platform: 'darwin' };
+  const rejection = (pending: Promise<unknown>) =>
+    pending.then(
+      () => null,
+      (error: unknown) => error,
+    );
+  try {
+    expect(await browser.getAdminAccess()).toEqual({ secretRequired: true, localDeviceId: null });
+    const registration = await runtime.runPromise(
+      Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device })),
+    );
+    const sync = () =>
+      runtime.runPromise(
+        Effect.flatMap(UsageClient, (client) =>
+          client.SyncUsage({ deviceId: device.id, token: registration.token, batch: { device, events: [event] } }),
+        ),
+      );
+    expect(await rejection(browser.renameDevice(device.id, 'Work laptop'))).toMatchObject({
+      message: expect.stringContaining('Device changes require'),
+    });
+    expect(await rejection(browser.revokeDevice(device.id, 'incorrect-secret'))).toMatchObject({
+      message: expect.stringContaining('Device changes require'),
+    });
+    expect(await browser.renameDevice(device.id, 'Work laptop', pairingSecret)).toMatchObject({ name: 'Work laptop' });
+    await sync();
+    expect((await browser.getDevices())[0]).toMatchObject({ name: 'Work laptop', eventCount: 1, revokedAt: null });
+
+    expect((await browser.revokeDevice(device.id, pairingSecret)).revokedAt).toEqual(expect.any(String));
+    expect(await rejection(sync())).toBeInstanceOf(Error);
+    expect((await browser.getUsage()).totals.tokens).toBe(175);
+
+    // Both RPC endpoints refuse to pair a revoked device, even with the secret.
+    const register = (endpoint: string) => {
+      const client = ManagedRuntime.make(rpcClientLayer(endpoint));
+      return client
+        .runPromiseExit(Effect.flatMap(UsageClient, (rpc) => rpc.RegisterDevice({ pairingSecret, device })))
+        .finally(() => client.dispose());
+    };
+    const collector = hub.endpoint.replace(/\/rpc$/, '/collector');
+    for (const endpoint of [hub.endpoint, collector]) {
+      const exit = await register(endpoint);
+      expect(exit._tag).toBe('Failure');
+      expect(JSON.stringify(exit)).toContain('revoked');
+    }
+
+    for (const secret of ['', 'incorrect-secret'])
+      expect(await rejection(browser.restoreDevice(device.id, secret))).toMatchObject({
+        message: expect.stringContaining('Device changes require'),
+      });
+    expect((await browser.getDevices())[0]?.revokedAt).toEqual(expect.any(String));
+    expect(await browser.restoreDevice(device.id, pairingSecret)).toMatchObject({
+      revokedAt: null,
+      needsReconnect: true,
+    });
+    expect(await rejection(sync())).toBeInstanceOf(Error);
+    const restored = await register(hub.endpoint);
+    expect(restored._tag).toBe('Success');
+  } finally {
+    await browser.dispose();
+    await runtime.dispose();
+    await hub.server.stop(true);
+    await hub.handler.dispose();
+  }
+});
+
 test('large sync batches upsert and withdraw records in bounded statements', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'token-tracker-cloud-batch-'));
   directories.push(directory);

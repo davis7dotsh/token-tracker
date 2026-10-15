@@ -6,13 +6,13 @@ This pass builds on the earlier audit below. It reduces browser code, dashboard 
 
 ### Browser loading
 
-Production Vite manifest dependency graphs include the SvelteKit shell, layout, fallback error component, and dashboard. Raw sizes measure code the browser parses; gzip sizes compress each script independently. Chart code starts loading alongside the first data request; pricing loads only when opened.
+Production Vite manifest dependency graphs include the SvelteKit shell, layout, fallback error component, and dashboard. Raw sizes measure code the browser parses; gzip sizes compress each script independently. Chart code starts loading alongside the first data request; pricing loads when its settings page is opened. The sizes below include the settings pages subsequently merged from `main`.
 
 | JavaScript phase                |  Before, raw / gzip |  After, raw / gzip | Raw reduction |
 | ------------------------------- | ------------------: | -----------------: | ------------: |
-| Initial hydration               | 395,842 / 137,303 B | 157,971 / 59,165 B |         60.1% |
-| Dashboard including chart       | 395,842 / 137,303 B | 223,883 / 82,467 B |         43.4% |
-| Including opened pricing editor | 395,842 / 137,303 B | 239,755 / 88,356 B |         39.4% |
+| Initial hydration               | 395,842 / 137,303 B | 160,285 / 61,031 B |         59.5% |
+| Dashboard including chart       | 395,842 / 137,303 B | 226,202 / 84,320 B |         42.9% |
+| Including opened pricing editor | 395,842 / 137,303 B | 244,203 / 91,403 B |         38.3% |
 
 The browser uses the existing unary Effect NDJSON protocol through native fetch, with RPC-derived input/output types and server-side schema validation/encoding. It checks response envelopes and retains authentication, exact endpoints, bounded deadlines, abort propagation, and disposal. CLI collectors keep their Effect client. URL state uses Runed's synchronous Standard Schema interface with the same normalization behavior, removing the remaining browser Effect imports.
 
@@ -56,7 +56,7 @@ Grok replay corrections now index complete turn results instead of scanning all 
 
 ### Verification and reproduction
 
-All 21 compared snapshot RPC responses match exactly, including 644,734 numeric values. An independent aggregate comparison also matched 630 outputs across all six ranges, five timezones (including Lord Howe and Kathmandu), exact timestamp edges, and forward/backward clock movements. The URL adapter matched 402 validation cases. Real HTTP tests cover the new transport and gzip; a compiled chart harness covers six mouse/touch/keyboard/unmount scenarios. The full repository suite passes 301 tests, plus formatting, lint, native TypeScript/Svelte checks, web build, CLI build, and whitespace checks.
+All 21 compared snapshot RPC responses match exactly, including 644,734 numeric values. An independent aggregate comparison also matched 630 outputs across all six ranges, five timezones (including Lord Howe and Kathmandu), exact timestamp edges, and forward/backward clock movements. The URL adapter matched 402 validation cases. Real HTTP tests cover the new transport and gzip; a compiled chart harness covers six mouse/touch/keyboard/unmount scenarios. After integrating settings and device management, the full repository suite passes 307 tests, plus formatting, lint, native TypeScript/Svelte checks, web build, CLI build, and whitespace checks.
 
 Run these after building to inspect script sizes and measure a reachable service:
 
@@ -66,7 +66,7 @@ bun run bench http://enceladus.otter-hawksbill.ts.net:8787 30d 5
 bun run bench http://enceladus.otter-hawksbill.ts.net:8787 all 5
 ```
 
-The RPC command reports the first read, individual repeats, median/p95, JSON-serialized result size, and whether totals changed between reads. Serialized result size excludes wire envelopes, compression, and HTTP headers. Authenticated deployments require a client with a valid dashboard session. The build command can accept another client output directory for before/after comparisons. Private snapshot data and detailed evidence stay under ignored `artifacts/performance/`.
+The RPC command reports the first read, individual repeats, median/p95, JSON-serialized result size, and whether totals changed between reads. Serialized result size excludes wire envelopes, compression, and HTTP headers. Authenticated deployments require a client with a valid dashboard session. The build command can accept another client output directory for before/after comparisons and reads its sibling server manifest to identify page and layout nodes. Private snapshot data and detailed evidence stay under ignored `artifacts/performance/`.
 
 ## Earlier October audit
 
