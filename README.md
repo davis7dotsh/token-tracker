@@ -2,23 +2,33 @@
 
 A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), and Muse. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
 
-The dashboard runs on Nexus at [https://nexus.otter-hawksbill.ts.net:10007](https://nexus.otter-hawksbill.ts.net:10007), available on the same Tailscale network.
+Run it on your own machine with the setup below. A private Tailscale example is further down. This repository has no license file yet.
 
 ## Setup
 
-Use [Vite+](https://viteplus.dev/guide/) with Node 24.21.0 or later and Bun 1.4.2 (selected by `packageManager`):
+Use [Vite+](https://viteplus.dev/guide/) with Node 24.21.0 or later and Bun 1.4.2 (selected by `packageManager`). Install the `vp` command once if it is not already on your `PATH`:
+
+```sh
+curl -fsSL https://vite.plus | bash
+```
+
+Open a new shell, then install and start the dev dashboard:
 
 ```sh
 vp install --frozen-lockfile
 bun run dev
 ```
 
-Open http://localhost:5173. For the production dashboard:
+`bun install --frozen-lockfile` is the same install when Bun 1.4.2 is already installed. Open http://localhost:5173. The dev server listens on every interface and keeps that port (`strictPort`). `localhost` and IP addresses work. Tailscale MagicDNS names (`*.ts.net`) work. Add any other hostname to `server.allowedHosts` in `vite.config.ts`.
+
+For the production dashboard:
 
 ```sh
 bun run build
 HOST=127.0.0.1 PORT=8787 bun run start
 ```
+
+Open http://127.0.0.1:8787. `GET /api/health` returns `{"status":"ok",...}` when the process is up. `HOST` and `PORT` choose the bind address; `127.0.0.1` is reachable only on that machine.
 
 The dashboard includes harness/model/provider/device/project filters, token and estimated-cost charts, session details, source diagnostics, and CSV export. The period selector switches between six months, 30 days, seven days, and today. Today shows hourly buckets in the browser's timezone, including daylight saving changes.
 
@@ -107,9 +117,11 @@ Use that secret on the client machine:
 
 ```sh
 export TOKEN_TRACKER_PAIRING_SECRET='the-secret-from-your-dashboard-machine'
-bun run cli connect https://nexus.otter-hawksbill.ts.net:10007
+bun run cli connect http://127.0.0.1:8787
 unset TOKEN_TRACKER_PAIRING_SECRET
 ```
+
+Use your dashboard URL. A tailnet address is `https://` when Tailscale Serve or another proxy terminates TLS.
 
 Alternatively pass `--pairing-secret <secret>`. `--name <name>` sets the device label, `--interval <minutes>` changes the schedule, and `--no-schedule` leaves scheduling to you.
 
@@ -149,20 +161,22 @@ bun run build:cli bun-darwin-x64
 bun run build:cli bun-darwin-arm64
 ```
 
-The npm `token-tracker` executable selects its bundled platform binary. This draft is private and has not been published to npm. After building the dashboard and platform binaries, `bun pm pack` creates a local tarball for npm/npx:
+From a checkout, `bun run cli` runs the TypeScript entry. The package `bin` is `cli.cjs`, which only launches a native binary under `dist/`. Until you build one, that launcher exits and tells you to run `bun run build:cli` or `bun run cli`. It does not claim the platform is unsupported when the binary is simply missing.
+
+The npm `token-tracker` executable selects its bundled platform binary. The package is marked private and has not been published to npm. After building the dashboard and platform binaries, `bun pm pack` creates a local tarball:
 
 ```sh
 npx --yes --package ./davis7-token-tracker-0.4.0.tgz token-tracker check --range 7d
 ```
 
-The dashboard also hosts the package for a quick check from another machine on the tailnet:
+A self-hosted hub can serve that tarball. Set `TOKEN_TRACKER_DOWNLOAD_DIR` to an absolute directory that contains `token-tracker-0.4.0.tgz`. The filename is an allowlist. A missing directory, a relative path, or any other name responds 404.
 
 ```sh
-bunx --package https://nexus.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
-npx --yes --allow-remote=root --package https://nexus.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+bunx --package http://127.0.0.1:8787/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+npx --yes --allow-remote=root --package http://127.0.0.1:8787/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
 ```
 
-The `--allow-remote=root` option permits this URL package on npm 12.
+The `--allow-remote=root` option permits this URL package on npm 12. Replace the host when the hub is not on loopback. The Cloudflare hub does not serve these downloads.
 
 The dashboard runs as a separate Bun server. Native `serve` launches the packaged SvelteKit build and requires Bun on `PATH`, or an explicit `BUN_EXEC_PATH`. It defaults to `127.0.0.1:8787`; `--host`, `--port`, and `--entry <build/index.js>` override those values.
 
@@ -228,39 +242,41 @@ bun run update:pricing
 
 ## Tailscale access
 
-Nexus runs the self-hosted dashboard. Bun listens on `127.0.0.1:8787`; Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves Nexus's other HTTPS services untouched. The public origin lets browser pricing edits pass the same-origin check:
+Keep a self-hosted dashboard on a tailnet by binding Bun to loopback and letting Tailscale Serve terminate HTTPS. Set `ORIGIN` to that HTTPS URL so browser pricing edits pass the same-origin check. `TOKEN_TRACKER_DOWNLOAD_DIR` must be absolute when you set it.
 
 ```sh
-ORIGIN=https://nexus.otter-hawksbill.ts.net:10007 \
-TOKEN_TRACKER_DOWNLOAD_DIR=/home/davis/services/token-tracker/artifacts/downloads \
+ORIGIN=https://your-machine.your-tailnet.ts.net:10007 \
+TOKEN_TRACKER_DOWNLOAD_DIR=/absolute/path/to/downloads \
 bun run deploy:local
 tailscale serve --bg --https=10007 http://127.0.0.1:8787
 tailscale serve status
-curl -fsS https://nexus.otter-hawksbill.ts.net:10007/api/health
+curl -fsS https://your-machine.your-tailnet.ts.net:10007/api/health
 ```
 
-To switch Nexus from the previous hand-installed unit, stop it first (`systemctl --user disable --now token-tracker.service`), then deploy. Both use the same data directory, so no data moves.
+Replace the hostname, Serve port, and download directory. `deploy:local` installs the user service described above. On Linux, enable lingering so the service keeps running after logout.
 
 The hub's durable state is `usage.sqlite`, `pairing-secret`, and `pricing-state.json` in `${XDG_DATA_HOME:-~/.local/share}/token-tracker`, or `TOKEN_TRACKER_DATA_DIR` when configured. Keep an immutable migration backup separate from the live data directory. Stop the old hub before taking the final SQLite backup so no acknowledged uploads arrive after the snapshot; use SQLite's backup API or copy only after the database has closed, accounting for any WAL files.
 
 When moving an existing hub, migrate its database, pairing secret, and pricing state together. Each client retains its own `device-id`, connection token, and checkpoint digests. Pause scheduled and interactive sync before atomically changing `connection.json.url`, `checkpoint.json.remote`, and matching `checkpoint-journal.jsonl` entries to the new canonical URL, then resume the existing schedule. Changing only the connection URL safely replays available history but loses incremental checkpoint matching; reconnecting also rotates that client's token.
 
-Keep Nexus's existing device identity distinct from Enceladus's; do not copy the old host's client configuration onto Nexus. The dashboard collects its host's own logs directly and excludes that same device's stored rows. Verify those logs cover its stored history before changing hosts. Enceladus continues as a scheduled client so its local usage remains visible on Nexus, alongside the other devices.
+The dashboard collects its host's logs directly and excludes that same device's stored rows. Leave other machines as scheduled clients. Do not copy one machine's client configuration onto another.
 
 ## Verification and structure
 
 See [PERFORMANCE.md](PERFORMANCE.md) for the performance audit and measurements. To measure the running dashboard without changing its data:
 
 ```sh
-bun run bench https://nexus.otter-hawksbill.ts.net:10007
+bun run bench http://127.0.0.1:8787
 ```
+
+With no URL, `bun run bench` uses `http://127.0.0.1:8787`. Pass another origin to measure a remote hub.
 
 ```sh
 bun run lint          # Oxlint, including type-aware rules and TypeScript checks
 bun run format        # Oxfmt, including Svelte components
 bun run format:check  # Check formatting without writing files
-bun run check
-bun test
+bun run check         # SvelteKit sync, Vite+ checks, and svelte-check --tsgo
+bun run test          # bun test tests
 bun run build
 bun run build:cli
 ```

@@ -241,7 +241,7 @@ const status = Command.make(
           ].join('\n'),
     );
   }),
-);
+).pipe(Command.withDescription('Show whether this machine is paired and when it last synced.'));
 
 const disconnect = Command.make(
   'disconnect',
@@ -259,7 +259,7 @@ const disconnect = Command.make(
     yield* fs.remove(join(configDirectory(), 'checkpoint-journal.jsonl'), { force: true });
     yield* Console.log('Disconnected. Future usage checks stay local. Uploaded history remains on the dashboard.');
   }),
-);
+).pipe(Command.withDescription('Remove local credentials and the scheduled sync. Uploaded history stays on the hub.'));
 
 const serve = Command.make(
   'serve',
