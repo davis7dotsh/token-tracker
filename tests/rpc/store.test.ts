@@ -123,3 +123,77 @@ test('pairing and uploads require credentials, and a device cannot upload as ano
     await runtime.dispose();
   }
 });
+
+test('dashboard renames survive uploads, and revoked devices keep history but cannot upload or pair', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-devices-'));
+  directories.push(directory);
+  const runtime = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }));
+  const run = <A, E>(program: (store: UsageStore['Service']) => Effect.Effect<A, E>) =>
+    runtime.runPromise(UsageStore.use(program));
+  const failure = async <A, E>(program: (store: UsageStore['Service']) => Effect.Effect<A, E>) => {
+    const exit = await runtime.runPromiseExit(UsageStore.use(program));
+    return exit._tag === 'Failure' ? JSON.stringify(exit.cause) : 'succeeded';
+  };
+  try {
+    const { token } = await run((store) => store.registerDevice(pairingSecret, device));
+    expect(await run((store) => store.renameDevice(device.id, '  Work laptop  '))).toMatchObject({
+      name: 'Work laptop',
+      revokedAt: null,
+    });
+    expect(await failure((store) => store.renameDevice(device.id, ' '))).toContain('InvalidRequest');
+    await run((store) => store.syncUsage(device.id, token, { device, events: [event] }));
+    expect((await run((store) => store.getDevices()))[0]).toMatchObject({ name: 'Work laptop', eventCount: 1 });
+
+    const revoked = await run((store) => store.revokeDevice(device.id));
+    expect(revoked.revokedAt).toEqual(expect.any(String));
+    expect(await failure((store) => store.syncUsage(device.id, token, { device, events: [event] }))).toContain(
+      'revoked',
+    );
+    expect(await failure((store) => store.syncUsage(device.id, '', { device, events: [event] }))).toContain(
+      'Unauthorized',
+    );
+    expect(await failure((store) => store.authorizeDevice(device.id, token))).toContain('Unauthorized');
+    expect(
+      await failure((store) =>
+        store.importUsage(pairingSecret, { device, events: [{ ...event, id: 'imported-request' }] }),
+      ),
+    ).toContain('revoked');
+    expect(await failure((store) => store.renameDevice(device.id, 'Old laptop'))).toContain('InvalidRequest');
+    expect(await failure((store) => store.revokeDevice('missing-device'))).toContain('InvalidRequest');
+    expect((await run((store) => store.getUsage())).events).toHaveLength(1);
+    expect((await run((store) => store.getDevices()))[0]).toMatchObject({
+      name: 'Work laptop',
+      eventCount: 1,
+      revokedAt: revoked.revokedAt,
+    });
+
+    // The pairing secret cannot bring a revoked device back.
+    expect(await failure((store) => store.registerDevice(pairingSecret, device))).toContain('revoked');
+    expect((await run((store) => store.getDevices()))[0]).toMatchObject({
+      revokedAt: revoked.revokedAt,
+      needsReconnect: true,
+    });
+
+    // Restoring lifts the block without reviving the discarded token.
+    const restored = await run((store) => store.restoreDevice(device.id));
+    expect(restored).toMatchObject({ name: 'Work laptop', revokedAt: null, needsReconnect: true });
+    expect(await run((store) => store.restoreDevice(device.id))).toMatchObject({ revokedAt: null });
+    expect(await failure((store) => store.restoreDevice('missing-device'))).toContain('InvalidRequest');
+    expect(await failure((store) => store.syncUsage(device.id, token, { device, events: [event] }))).toContain(
+      'Unauthorized',
+    );
+    expect(await failure((store) => store.authorizeDevice(device.id, token))).toContain('Unauthorized');
+
+    const reconnected = await run((store) => store.registerDevice(pairingSecret, device));
+    expect(reconnected.device).toMatchObject({ revokedAt: null, needsReconnect: false });
+    expect(reconnected.token).not.toBe(token);
+    expect(
+      await run((store) => store.syncUsage(device.id, reconnected.token, { device, events: [event] })),
+    ).toMatchObject({ accepted: 0 });
+    expect(await failure((store) => store.syncUsage(device.id, token, { device, events: [event] }))).toContain(
+      'Unauthorized',
+    );
+  } finally {
+    await runtime.dispose();
+  }
+});

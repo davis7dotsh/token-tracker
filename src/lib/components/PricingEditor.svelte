@@ -9,20 +9,18 @@
   let {
     client,
     query,
-    onchange,
+    adminSecret = $bindable(''),
   }: {
     client: ReturnType<typeof makeDashboardClient> | undefined;
     query: UsageQuery;
-    onchange: () => Promise<void>;
+    adminSecret?: string;
   } = $props();
 
-  let dialog: HTMLDialogElement;
   let settings = $state.raw<{
     info: PricingInfo;
     unresolved: readonly { model: string; tokens: number; reason: string }[];
     secretRequired: boolean;
   }>();
-  let adminSecret = $state('');
   let loading = $state(false);
   let busy = $state('');
   let error = $state('');
@@ -45,6 +43,7 @@
   let requestVersion = 0;
   let mutationVersion = 0;
   let editorVersion = 0;
+  let mounted = false;
 
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
   const validRate = (value: number | null | undefined) => value == null || (Number.isFinite(value) && value >= 0);
@@ -188,44 +187,26 @@
     }
   }
 
-  export function show() {
-    if (!dialog.open) dialog.showModal();
-    editDraft();
-    void load();
-  }
-
-  function mountDialog(element: HTMLDialogElement) {
-    untrack(() => {
-      dialog = element;
-    });
-    return endEditing;
-  }
-
-  function endEditing() {
-    cancelLoad();
-    editDraft();
-  }
-
-  function close() {
-    endEditing();
-    dialog.close();
+  function mountEditor() {
+    mounted = true;
+    untrack(() => void load());
+    return () => {
+      mounted = false;
+      cancelLoad();
+      editDraft();
+    };
   }
 
   function pricingChanged(info: PricingInfo, message: string, feedbackEditor: number, resetEditor = false) {
     if (settings) settings = { ...settings, info };
-    if (feedbackEditor === editorVersion && dialog.open) {
+    if (feedbackEditor === editorVersion && mounted) {
       if (resetEditor) selectModel(model);
       feedbackEditor = editorVersion;
       success = message;
     }
     // The mutation has already persisted. Keep editing responsive while the
-    // dashboard and unresolved-model list catch up independently.
-    const version = mutationVersion;
-    void onchange().catch((failure) => {
-      if (version === mutationVersion && feedbackEditor === editorVersion && dialog.open)
-        error = `Changes saved. ${messageFor(failure)}`;
-    });
-    if (dialog.open) void load(true, feedbackEditor);
+    // unresolved-model list catches up; the dashboard rereads usage when opened.
+    if (mounted) void load(true, feedbackEditor);
   }
 
   async function save(event: SubmitEvent) {
@@ -283,7 +264,7 @@
       const info = await client.setPricingRule(rule, adminSecret);
       if (version === mutationVersion) pricingChanged(info, 'Saved', editor);
     } catch (failure) {
-      if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
+      if (version === mutationVersion && editor === editorVersion && mounted) error = messageFor(failure);
     } finally {
       if (version === mutationVersion) busy = '';
     }
@@ -302,7 +283,7 @@
       const info = await client.deletePricingRule(currentRule.model, adminSecret);
       if (version === mutationVersion) pricingChanged(info, 'Reset to catalog pricing', editor, true);
     } catch (failure) {
-      if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
+      if (version === mutationVersion && editor === editorVersion && mounted) error = messageFor(failure);
     } finally {
       if (version === mutationVersion) busy = '';
     }
@@ -321,10 +302,10 @@
       const refreshed = await client.refreshPricing(adminSecret);
       if (version === mutationVersion) {
         pricingChanged(refreshed, 'Catalog updated', editor);
-        if (editor === editorVersion && dialog.open && refreshed.refreshError) error = refreshed.refreshError;
+        if (editor === editorVersion && mounted && refreshed.refreshError) error = refreshed.refreshError;
       }
     } catch (failure) {
-      if (version === mutationVersion && editor === editorVersion && dialog.open) error = messageFor(failure);
+      if (version === mutationVersion && editor === editorVersion && mounted) error = messageFor(failure);
     } finally {
       if (version === mutationVersion) busy = '';
     }
@@ -332,11 +313,7 @@
 </script>
 
 <svelte:window onpointerdown={targetOutside} />
-<dialog class="pricing-dialog" aria-labelledby="pricing-title" {@attach mountDialog} onclose={endEditing}>
-  <div class="dialog-heading">
-    <h2 id="pricing-title">Model pricing</h2>
-    <button class="icon-button" aria-label="Close model pricing" onclick={close}><Icon name="close" /></button>
-  </div>
+<div class="pricing-settings" {@attach mountEditor}>
   <div class="pricing-catalog-meta">
     <span>{settings ? `Catalog updated ${settings.info.updatedAt}` : 'Loading model prices…'}</span><button
       class="text-button"
@@ -344,7 +321,7 @@
       onclick={() => void refreshCatalog()}>Refresh prices</button
     >
   </div>
-  <div class="pricing-dialog-body" aria-busy={loading || Boolean(busy)}>
+  <div class="pricing-body" aria-busy={loading || Boolean(busy)}>
     <div class="pricing-rule-list">
       {#if unresolved.length}<div class="pricing-list-label">Needs pricing <span>{unresolved.length}</span></div>{/if}
       {#each unresolved as entry (entry.model)}<button
@@ -552,7 +529,7 @@
       >{/if}
     {#if loadFailed}<button class="text-button" disabled={Boolean(busy)} onclick={() => void load()}>Retry</button>{/if}
   </div>
-  <div class="pricing-dialog-footer">
+  <div class="pricing-footer">
     {#if settings?.secretRequired}<input
         class="pricing-secret"
         type="password"
@@ -561,7 +538,6 @@
         disabled={Boolean(busy)}
         placeholder="Pairing secret"
         autocomplete="current-password"
-      />{:else}<span>Changes apply across this dashboard.</span>{/if}<button class="button" onclick={close}>Done</button
-    >
+      />{:else}<span>Changes apply across this dashboard.</span>{/if}
   </div>
-</dialog>
+</div>
