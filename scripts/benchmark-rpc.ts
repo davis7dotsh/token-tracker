@@ -15,8 +15,8 @@ const measure = async <A>(operation: string, run: () => Promise<A>) => {
   const started = performance.now();
   const result = await run();
   const milliseconds = Math.round((performance.now() - started) * 10) / 10;
-  const responseBytes = Buffer.byteLength(JSON.stringify(result));
-  console.log(JSON.stringify({ operation, milliseconds, responseBytes }));
+  const serializedResultBytes = Buffer.byteLength(JSON.stringify(result));
+  console.log(JSON.stringify({ operation, milliseconds, serializedResultBytes }));
   return { result, milliseconds };
 };
 

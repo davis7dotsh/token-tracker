@@ -605,8 +605,9 @@
             onGroupingChange={(chartBy) => params.update({ chartBy })}
           />{:else}<div class="chart-loading">
             {#if error || chartError}<Icon name="warning" size={24} /><span>{chartError || 'Usage is unavailable'}</span
-              ><button class="text-button" onclick={() => void refresh()}>Try again</button>{:else}<span class="spinner"
-              ></span><span>Reading local usage</span>{/if}
+              ><button class="text-button" onclick={() => (chartError && !error ? loadChart() : void refresh())}
+                >Try again</button
+              >{:else}<span class="spinner"></span><span>Reading local usage</span>{/if}
           </div>{/if}
         <div class="token-composition" aria-label="Token composition">
           <div class="composition-track" role="img" aria-label={composition.map(compositionTitle).join('; ')}>

@@ -10,9 +10,9 @@ Production Vite manifest dependency graphs include the SvelteKit shell, layout, 
 
 | JavaScript phase                |  Before, raw / gzip |  After, raw / gzip | Raw reduction |
 | ------------------------------- | ------------------: | -----------------: | ------------: |
-| Initial hydration               | 395,842 / 137,303 B | 157,953 / 59,154 B |         60.1% |
-| Dashboard including chart       | 395,842 / 137,303 B | 223,865 / 82,456 B |         43.4% |
-| Including opened pricing editor | 395,842 / 137,303 B | 239,737 / 88,345 B |         39.4% |
+| Initial hydration               | 395,842 / 137,303 B | 157,971 / 59,165 B |         60.1% |
+| Dashboard including chart       | 395,842 / 137,303 B | 223,883 / 82,467 B |         43.4% |
+| Including opened pricing editor | 395,842 / 137,303 B | 239,755 / 88,356 B |         39.4% |
 
 The browser uses the existing unary Effect NDJSON protocol through native fetch, with RPC-derived input/output types and server-side schema validation/encoding. It checks response envelopes and retains authentication, exact endpoints, bounded deadlines, abort propagation, and disposal. CLI collectors keep their Effect client. URL state uses Runed's synchronous Standard Schema interface with the same normalization behavior, removing the remaining browser Effect imports.
 
@@ -66,7 +66,7 @@ bun run bench http://enceladus.otter-hawksbill.ts.net:8787 30d 5
 bun run bench http://enceladus.otter-hawksbill.ts.net:8787 all 5
 ```
 
-The RPC command reports the first read, individual repeats, median/p95, decoded response size, and whether totals changed between reads. Decoded size excludes wire envelopes, compression, and HTTP headers. Authenticated deployments require a client with a valid dashboard session. The build command can accept another client output directory for before/after comparisons. Private snapshot data and detailed evidence stay under ignored `artifacts/performance/`.
+The RPC command reports the first read, individual repeats, median/p95, JSON-serialized result size, and whether totals changed between reads. Serialized result size excludes wire envelopes, compression, and HTTP headers. Authenticated deployments require a client with a valid dashboard session. The build command can accept another client output directory for before/after comparisons. Private snapshot data and detailed evidence stay under ignored `artifacts/performance/`.
 
 ## Earlier October audit
 
