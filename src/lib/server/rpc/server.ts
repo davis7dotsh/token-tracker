@@ -7,6 +7,8 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { StorageFailure } from '../../shared/rpc';
+import { clickHouseConfigFromEnv } from './clickhouse';
+import { clickHouseUsageStoreLayer } from './clickhouse-store';
 import { collectUsage } from '../usage';
 import { filePricing } from '../usage/pricing-runtime';
 import { HubPricing, LocalUsage, makeHubWebHandler } from './hub';
@@ -66,20 +68,23 @@ const hubFiles = (options: ServerOptions) =>
 export const usageStoreLayer = (options: ServerOptions = {}) =>
   Layer.unwrap(
     Effect.map(hubFiles(options), ({ databasePath, pairingSecret }) =>
-      Layer.effect(
-        UsageStore,
-        UsageStore.make.pipe(
-          Effect.tap(() =>
-            Effect.tryPromise({
-              try: () => chmod(databasePath, 0o600),
-              catch: () => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' }),
-            }),
+      // Experimental: usage and devices in ClickHouse. Pricing stays file-based.
+      process.env.TOKEN_TRACKER_STORAGE === 'clickhouse'
+        ? clickHouseUsageStoreLayer(clickHouseConfigFromEnv(), pairingSecret)
+        : Layer.effect(
+            UsageStore,
+            UsageStore.make.pipe(
+              Effect.tap(() =>
+                Effect.tryPromise({
+                  try: () => chmod(databasePath, 0o600),
+                  catch: () => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' }),
+                }),
+              ),
+            ),
+          ).pipe(
+            Layer.provide(SqliteClient.layer({ filename: databasePath })),
+            Layer.provide(Layer.succeed(ServerConfiguration, { pairingSecret })),
           ),
-        ),
-      ).pipe(
-        Layer.provide(SqliteClient.layer({ filename: databasePath })),
-        Layer.provide(Layer.succeed(ServerConfiguration, { pairingSecret })),
-      ),
     ),
   );
 

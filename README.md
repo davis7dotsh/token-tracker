@@ -78,6 +78,59 @@ TOKEN_TRACKER_PAIRING_SECRET='the-new-hub-secret' bun scripts/migrate-hub.ts ~/.
 
 The script copies devices, missing usage records with their pricing snapshots, source diagnostics, and pricing rules through the new hub's RPCs. The target must run a version that supports `ImportUsage`. It checks source pricing before copying: unreadable or invalid pricing state, different source/target catalog rates, and target pricing rules absent from the source stop the migration before writing to the target. Align the catalogs and reconcile target-only rules before retrying; the script does not delete target rules automatically. Rerunning preserves existing target records and credentials for collectors already connected to the target. Then reconnect each device to the new URL; its uploads match the migrated records instead of adding usage again. A self-hosted hub's own machine does not upload to itself, so connect that machine as a client too.
 
+## Experimental: ClickHouse storage (local Docker)
+
+A prototype. A self-hosted Bun hub can keep usage records and devices in ClickHouse instead of `usage.sqlite`. SQLite remains the default, the Cloudflare hub is unchanged, and pricing state stays in the data directory either way.
+
+```sh
+bun run ch:up                 # docker compose up -d clickhouse (127.0.0.1:8123 HTTP, :9000 native)
+CLICKHOUSE_PASSWORD=token_tracker_dev bun run migrate:clickhouse   # optional: copy usage.sqlite (default data dir, or pass one)
+TOKEN_TRACKER_STORAGE=clickhouse CLICKHOUSE_PASSWORD=token_tracker_dev bun run dev
+```
+
+- Connection: `CLICKHOUSE_URL` (default `http://localhost:8123`), `CLICKHOUSE_DATABASE` (`token_tracker`), `CLICKHOUSE_USERNAME` (`token_tracker`), `CLICKHOUSE_PASSWORD` (empty). The compose file's `token_tracker_dev` password is a local-only default.
+- The hub and the migration script create the schema on start. Its DDL lives in `src/lib/server/rpc/clickhouse-schema.ts`, the single source of truth; there is no init SQL. Additive column changes apply themselves to existing tables (`ADD COLUMN IF NOT EXISTS`); for an incompatible schema change drop the old prototype data first: `docker compose down -v`, or `DROP DATABASE token_tracker` in a SQL shell.
+- The migration opens SQLite read-only and keeps record IDs, payload hashes, pricing snapshots, original timestamps, and device token hashes, so collectors keep syncing without reconnecting. Rerunning is safe, and never overrides what a live ClickHouse hub has written since. Records it cannot convert are listed as `deviceId:id` (first 20) and make it exit non-zero; pass `--allow-skips` to accept the loss and exit 0.
+- Schema: `usage_events` and `devices` are `ReplacingMergeTree(version)` tables. Every write appends a newer version; reads keep each record's latest version with `argMax`, and deletes append a tombstone (`is_deleted = 1`), so reads never wait for background merges. Events are partitioned by month, sorted by `(device_id, harness, timestamp, id)`, compressed with per-column codecs (DoubleDelta timestamps, T64 token counts, Gorilla costs, LowCardinality names), and carry an `events_by_time` projection for cross-device time-range scans.
+- Unlike SQLite, a sync batch is not one transaction. A failed batch may be partly written; its retry converges because unchanged records are skipped.
+- Device changes (pairing, rename, revoke, restore, and each sync's credential check and last-seen update) are serialized by an in-process lock. Run one hub process per database: separate processes sharing it can race and undo a revocation.
+- `timestamp_raw` keeps each record's original timestamp string, as SQLite does. The indexed `timestamp` column is `DateTime64`, which only covers 1900–2299: records dated outside that range keep their exact timestamp but are filed at the nearest edge for time windows.
+
+Open a SQL shell with `docker compose exec clickhouse clickhouse-client --database token_tracker`. Raw tables hold every version, so queries start from the latest live rows:
+
+```sql
+-- Latest live version of every record. Wrapping values in tuple() keeps NULLs,
+-- which argMax would otherwise skip.
+CREATE VIEW IF NOT EXISTS live_events AS
+SELECT device_id, id,
+  argMax(tuple(timestamp), version).1 AS timestamp, argMax(tuple(harness), version).1 AS harness,
+  argMax(tuple(model), version).1 AS model, argMax(tuple(provider), version).1 AS provider,
+  argMax(tuple(session_id), version).1 AS session_id,
+  argMax(tuple(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens), version).1 AS tokens,
+  argMax(tuple(cost_usd), version).1 AS cost_usd, argMax(tuple(is_deleted), version).1 AS is_deleted
+FROM usage_events GROUP BY device_id, id;
+
+-- Daily tokens by harness over the last 30 days.
+SELECT toDate(timestamp) AS day, harness, sum(tokens) AS tokens
+FROM live_events WHERE NOT is_deleted AND timestamp >= now() - INTERVAL 30 DAY
+GROUP BY day, harness ORDER BY day, harness;
+
+-- Top models by cost.
+SELECT provider, model, round(sum(cost_usd), 2) AS cost, sum(tokens) AS tokens
+FROM live_events WHERE NOT is_deleted GROUP BY provider, model ORDER BY cost DESC LIMIT 10;
+
+-- One session's requests.
+SELECT timestamp, model, tokens, cost_usd FROM live_events
+WHERE NOT is_deleted AND session_id = 'your-session-id' ORDER BY timestamp;
+
+-- Compression ratio per table.
+SELECT table, formatReadableSize(sum(data_compressed_bytes)) AS compressed,
+  round(sum(data_uncompressed_bytes) / sum(data_compressed_bytes), 1) AS ratio
+FROM system.parts WHERE database = currentDatabase() AND active GROUP BY table;
+```
+
+`bun run ch:down` stops the container and keeps its data. `docker compose down -v` also deletes the `token-tracker-clickhouse-data` volume and everything in it.
+
 ## Local usage checks
 
 ```sh
