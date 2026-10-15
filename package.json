@@ -38,6 +38,7 @@
     "ch:up": "docker compose up -d clickhouse",
     "ch:down": "docker compose down",
     "migrate:clickhouse": "bun scripts/migrate-clickhouse.ts",
+    "api:clickhouse": "bun scripts/clickhouse-api.ts",
     "lint": "svelte-kit sync && vp lint --deny-warnings",
     "lint:fix": "svelte-kit sync && vp lint --fix --deny-warnings",
     "format": "vp fmt",

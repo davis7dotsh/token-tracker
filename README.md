@@ -129,6 +129,28 @@ SELECT table, formatReadableSize(sum(data_compressed_bytes)) AS compressed,
 FROM system.parts WHERE database = currentDatabase() AND active GROUP BY table;
 ```
 
+### Query API
+
+A standalone, read-only JSON API over a ClickHouse usage database (the bench dataset by default), for trying how agents and dashboards would query it.
+
+```sh
+bun run ch:up
+bun run api:clickhouse        # http://0.0.0.0:8791, GET / lists every endpoint
+```
+
+- Env: `CLICKHOUSE_URL` (`http://localhost:8123`), `CLICKHOUSE_DATABASE` (`token_tracker_bench`), `CLICKHOUSE_USERNAME` / `CLICKHOUSE_PASSWORD` (`token_tracker` / `token_tracker_dev`), `HOST` (`0.0.0.0`), `PORT` (`8791`).
+- `/health`, `/v1/schema`, `/v1/storage`, `/v1/devices`: server, schema, compression, and devices.
+- `/v1/summary`, `/v1/timeseries` (`bucket`, `group_by`), `/v1/breakdown` (`dimension`, `sort`, `limit`): aggregates over the latest live version of each record.
+- `/v1/sessions`, `/v1/sessions/:sessionId`, `/v1/events`: session lists, one session with its events, and decoded events.
+- Shared filters: `from`/`to` (ISO, `[from, to)`), `device_id`, `harness`, `model`, `provider`, `project`, `repository`, `session_id` (comma-separated or repeated), and `q` (text search). `debug=1` adds the generated SQL to `meta`.
+- `POST /v1/sql` runs one `SELECT`/`WITH` statement, capped at `limit` rows (default 1,000, max 10,000), with `readonly = 1`. Rows are returned raw, so UInt64 values arrive as strings.
+
+```sh
+curl 'http://localhost:8791/v1/summary?from=2026-09-15&harness=claude'
+curl 'http://localhost:8791/v1/timeseries?bucket=day&group_by=harness&from=2026-10-01'
+curl -X POST http://localhost:8791/v1/sql -d '{"query":"SELECT model, count() AS rows FROM usage_events GROUP BY model ORDER BY rows DESC"}'
+```
+
 `bun run ch:down` stops the container and keeps its data. `docker compose down -v` also deletes the `token-tracker-clickhouse-data` volume and everything in it.
 
 ## Local usage checks
