@@ -1,6 +1,5 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Schema } from 'effect';
   import { useSearchParams } from 'runed/kit';
   import { page } from '$app/state';
   import {
@@ -13,8 +12,8 @@
     readDefaultRange,
     usageQueryFromParams,
   } from '#lib/client/dashboard-url.ts';
+  import { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import { relativeTime as relative } from '#lib/client/format.ts';
-  import { makeDashboardClient } from '#lib/client/rpc.ts';
   import {
     nativeThreadUrl,
     projectLabel,
@@ -23,11 +22,10 @@
     sessionDisplayName,
   } from '#lib/client/session-links.ts';
   import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
-  import { UsageQuery, type Breakdown, type DashboardResponse, type Device } from '#lib/shared/domain.ts';
+  import type { UsageQuery, Breakdown, DashboardResponse, Device } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
   import MultiSelect from '#lib/components/MultiSelect.svelte';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';
-  import UsageChart from '#lib/components/UsageChart.svelte';
 
   const integer = new Intl.NumberFormat('en-US');
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
@@ -41,9 +39,8 @@
   // A URL without `range` uses this browser's default from Settings.
   const params = useSearchParams(dashboardUrlSchemaFor(readDefaultRange()), { noScroll: true });
   let timezone = $state('UTC');
-  const queryKey = $derived(JSON.stringify(usageQueryFromParams(params, timezone)));
-  const decodeQuery = Schema.decodeUnknownSync(UsageQuery);
-  const query = $derived(decodeQuery(JSON.parse(queryKey)));
+  const query = $derived(usageQueryFromParams(params, timezone));
+  const queryKey = $derived(JSON.stringify(query));
   let data = $state.raw<DashboardResponse>();
   let devices = $state.raw<readonly Device[]>([]);
   let loading = $state(true);
@@ -55,6 +52,10 @@
   const sessionSearch = $derived(params.search);
   const sessionPage = $derived(params.page - 1);
   const sort = $derived(params.sort);
+  let UsageChart = $state.raw<typeof import('#lib/components/UsageChart.svelte').default>();
+  let chartModule: Promise<void> | undefined;
+  let chartError = $state('');
+  let mounted = false;
   let client = $state.raw<ReturnType<typeof makeDashboardClient>>();
   let request: AbortController | undefined;
   let requestVersion = 0;
@@ -130,22 +131,21 @@
     return remaining > 0 ? [...leading, { name: 'Other', value: remaining, color: 'var(--series-neutral)' }] : leading;
   });
   const sessionIndex = $derived(
-    (data?.sessions ?? []).map((session) => ({
-      session,
-      search:
+    new Map(
+      (data?.sessions ?? []).map((session) => [
+        session,
         `${session.sessionTitle ?? ''} ${session.projectName ?? ''} ${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''} ${session.t3ThreadId ?? ''}`.toLowerCase(),
-    })),
+      ]),
+    ),
   );
   const sortedSessions = $derived(
-    [...sessionIndex].sort((a, b) =>
-      sort === 'tokens'
-        ? b.session.tokens - a.session.tokens
-        : b.session.lastActiveAt.localeCompare(a.session.lastActiveAt),
+    [...(data?.sessions ?? [])].sort((a, b) =>
+      sort === 'tokens' ? b.tokens - a.tokens : b.lastActiveAt.localeCompare(a.lastActiveAt),
     ),
   );
   const filteredSessions = $derived.by(() => {
     const search = sessionSearch.toLowerCase();
-    return sortedSessions.filter((entry) => entry.search.includes(search)).map((entry) => entry.session);
+    return search ? sortedSessions.filter((session) => sessionIndex.get(session)?.includes(search)) : sortedSessions;
   });
   const pages = $derived(Math.max(1, Math.ceil(filteredSessions.length / 8)));
   const currentPage = $derived(Math.min(sessionPage, pages - 1));
@@ -223,6 +223,7 @@
   }
   async function refresh() {
     if (!client) return;
+    loadChart();
     request?.abort();
     const controller = new AbortController();
     request = controller;
@@ -274,20 +275,37 @@
     changeQuery({ ...query, [key]: query[key]?.length === 0 || remaining.length === 0 ? undefined : remaining });
   }
   function mountDashboard() {
+    mounted = true;
     untrack(() => {
       timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       client = makeDashboardClient();
+      loadChart();
     });
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
     }, 60000);
     return () => {
+      mounted = false;
       clearInterval(timer);
       request?.abort();
       params.cleanup();
       void client?.dispose();
       client = undefined;
     };
+  }
+  function loadChart() {
+    if (UsageChart || chartModule) return;
+    chartError = '';
+    chartModule = import('#lib/components/UsageChart.svelte').then(
+      (module) => {
+        chartModule = undefined;
+        if (mounted) UsageChart = module.default;
+      },
+      () => {
+        chartModule = undefined;
+        if (mounted) chartError = 'Could not load the chart. Try again.';
+      },
+    );
   }
   function exportCsv() {
     if (!data) return;
@@ -552,16 +570,16 @@
             </div>
           </div>
         </div>
-        {#if data}<UsageChart
+        {#if data && UsageChart}<UsageChart
             {data}
             mode={chartMode}
             {metric}
             grouping={params.chartBy}
             onGroupingChange={(chartBy) => params.update({ chartBy })}
           />{:else}<div class="chart-loading">
-            {#if error}<Icon name="warning" size={24} /><span>Usage is unavailable</span><button
-                class="text-button"
-                onclick={() => void refresh()}>Try again</button
+            {#if error || chartError}<Icon name="warning" size={24} /><span>{chartError || 'Usage is unavailable'}</span
+              ><button class="text-button" onclick={() => (chartError && !error ? loadChart() : void refresh())}
+                >Try again</button
               >{:else}<span class="spinner"></span><span>Reading local usage</span>{/if}
           </div>{/if}
         <div class="token-composition" aria-label="Token composition">

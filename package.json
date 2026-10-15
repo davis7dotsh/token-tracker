@@ -32,6 +32,7 @@
     "check": "svelte-kit sync && vp check && bun run check:svelte",
     "test": "bun test tests",
     "bench": "bun scripts/benchmark-rpc.ts",
+    "bench:build": "bun scripts/benchmark-build.ts",
     "cli": "bun src/cli/run.ts",
     "build:cli": "bun scripts/build-cli.ts",
     "update:pricing": "bun scripts/update-pricing.ts",

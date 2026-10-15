@@ -1,5 +1,5 @@
 import { createContext } from 'svelte';
-import type { makeDashboardClient } from './rpc';
+import type { makeDashboardClient } from './dashboard-rpc';
 export { relativeTime } from './format';
 
 // Settings sections share one RPC client and, on hubs that require it, the

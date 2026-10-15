@@ -146,14 +146,14 @@ export const usageTimeframe = (query: UsageQuery = {}, now = new Date()) => {
   return { requestedZone, zone, range, today, end, start, previousStart };
 };
 
-export const buildDashboard = (
+const aggregateDashboard = (
   data: UsageResult,
-  query: UsageQuery = {},
-  now = new Date(),
-  machine = 'This machine',
-  pricingPolicy: PricingPolicy = bundledPolicy,
+  query: UsageQuery,
+  now: Date,
+  machine: string,
+  pricingPolicy: PricingPolicy,
+  timeframe: ReturnType<typeof usageTimeframe>,
 ) => {
-  const timeframe = usageTimeframe(query, now);
   const { requestedZone, zone, range, today, end, previousStart } = timeframe;
   let { start } = timeframe;
   if (range === 'all') {
@@ -195,6 +195,14 @@ export const buildDashboard = (
   const previousMillis = previousStart.epochMilliseconds;
   const endMillis = end.epochMilliseconds;
   const todayMillis = today.epochMilliseconds;
+  // These neighboring timestamps describe exactly when a moving boundary can
+  // change an aggregate. Empty gaps can be reused without a stale-time budget.
+  let nowBefore = -Infinity;
+  let nowAfter = Infinity;
+  let startBefore = -Infinity;
+  let startAfter = Infinity;
+  let previousBefore = -Infinity;
+  let previousAfter = Infinity;
   const total = accumulator();
   const tokenCosts = {
     input: { costUSD: 0, unavailableTokens: 0 },
@@ -244,7 +252,16 @@ export const buildDashboard = (
     availableProjects.add(project);
     availableDevices.add(device);
     const millis = eventMillis(event);
-    if (!Number.isFinite(millis) || millis > nowMillis || !matchesUsage(query, event, eventProvider)) continue;
+    if (!Number.isFinite(millis) || !matchesUsage(query, event, eventProvider)) continue;
+    if (millis <= nowMillis) nowBefore = Math.max(nowBefore, millis);
+    else nowAfter = Math.min(nowAfter, millis);
+    if (range !== 'all') {
+      if (millis < startMillis) startBefore = Math.max(startBefore, millis);
+      else startAfter = Math.min(startAfter, millis);
+      if (millis < previousMillis) previousBefore = Math.max(previousBefore, millis);
+      else previousAfter = Math.min(previousAfter, millis);
+    }
+    if (millis > nowMillis) continue;
     const key = `${device}:${event.harness}:${event.sessionId}`;
     const tokens = tokenTotal(event);
     if (range !== 'all' && millis >= previousMillis && millis < startMillis) previous.add(event);
@@ -358,7 +375,7 @@ export const buildDashboard = (
     devices: [...availableDevices].sort(),
     modelProviders: [...availableModels].sort().map((model) => ({ model, provider: provider(model) })),
   };
-  return {
+  const response = {
     machine,
     generatedAt: now.toISOString(),
     timezone: zone,
@@ -401,4 +418,88 @@ export const buildDashboard = (
       updatedAt: data.pricingUpdatedAt,
     },
   } satisfies DashboardResponse;
+  return {
+    response,
+    todayMillis,
+    calendarStart: range === 'all' ? undefined : start.startOfDay().epochMilliseconds,
+    nowBefore,
+    nowAfter,
+    startBefore,
+    startAfter,
+    previousBefore,
+    previousAfter,
+  };
 };
+
+// Prepared RPC snapshots contain immutable event arrays. Retain at most eight
+// filtered aggregates for each live array; WeakMap ownership releases them with
+// the snapshot. Pricing snapshots and query values are part of the cache key.
+const dashboardAggregates = new WeakMap<
+  readonly UsageEvent[],
+  {
+    query: string;
+    policy: PricingPolicy;
+    aggregate: ReturnType<typeof aggregateDashboard>;
+  }[]
+>();
+export type DashboardValidity = Omit<ReturnType<typeof aggregateDashboard>, 'response'>;
+export const isDashboardCurrent = (proof: DashboardValidity, timeframe: ReturnType<typeof usageTimeframe>, now: Date) =>
+  proof.todayMillis === timeframe.today.epochMilliseconds &&
+  now.getTime() >= proof.nowBefore &&
+  now.getTime() < proof.nowAfter &&
+  (timeframe.range === 'all' ||
+    (proof.calendarStart === timeframe.start.startOfDay().epochMilliseconds &&
+      timeframe.start.epochMilliseconds > proof.startBefore &&
+      timeframe.start.epochMilliseconds <= proof.startAfter &&
+      timeframe.previousStart.epochMilliseconds > proof.previousBefore &&
+      timeframe.previousStart.epochMilliseconds <= proof.previousAfter));
+
+// The reusable result contains only the response and scalar boundary proof.
+// It can outlive prepared event arrays without retaining their source history.
+export const buildDashboardSnapshot = (
+  data: UsageResult,
+  query: UsageQuery = {},
+  now = new Date(),
+  machine = 'This machine',
+  pricingPolicy: PricingPolicy = bundledPolicy,
+) => {
+  const timeframe = usageTimeframe(query, now);
+  const queryKey = JSON.stringify(query);
+  const cached = dashboardAggregates.get(data.events) ?? [];
+  const match = cached.find(
+    ({ query: key, policy, aggregate }) =>
+      key === queryKey && policy === pricingPolicy && isDashboardCurrent(aggregate, timeframe, now),
+  );
+  if (match) {
+    dashboardAggregates.set(data.events, [match, ...cached.filter((entry) => entry !== match)]);
+    const response = match.aggregate.response;
+    return {
+      ...match.aggregate,
+      response: {
+        ...response,
+        machine,
+        generatedAt: now.toISOString(),
+        sources: data.sources,
+        warnings:
+          timeframe.zone === timeframe.requestedZone
+            ? data.warnings
+            : [...data.warnings, `Timezone ${timeframe.requestedZone} is unavailable; displaying UTC.`],
+        pricing: { ...response.pricing, updatedAt: data.pricingUpdatedAt },
+      },
+    };
+  }
+  const aggregate = aggregateDashboard(data, query, now, machine, pricingPolicy, timeframe);
+  dashboardAggregates.set(data.events, [
+    { query: queryKey, policy: pricingPolicy, aggregate },
+    ...cached.filter((entry) => entry.query !== queryKey || entry.policy !== pricingPolicy).slice(0, 7),
+  ]);
+  return aggregate;
+};
+
+export const buildDashboard = (
+  data: UsageResult,
+  query: UsageQuery = {},
+  now = new Date(),
+  machine = 'This machine',
+  pricingPolicy: PricingPolicy = bundledPolicy,
+) => buildDashboardSnapshot(data, query, now, machine, pricingPolicy).response;

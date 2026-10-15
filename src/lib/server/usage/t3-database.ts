@@ -1,7 +1,12 @@
 import type { SessionMetadata } from '../../shared/domain';
 
 export type T3Metadata = SessionMetadata & { repositoryPaths: string[] };
-export type T3DatabaseInput = { filenames: string[]; environmentId?: string; baseUrl: string };
+export type T3DatabaseInput = {
+  filenames: string[];
+  environmentId?: string;
+  baseUrl: string;
+  reportFailures?: boolean;
+};
 
 // Keep all runtime dependencies inside this function: its source is embedded
 // in a child Bun process, including in the minified standalone CLI.
@@ -211,6 +216,9 @@ export const queryT3Databases = async (input: T3DatabaseInput) => {
       const result = readDatabase(filename, input.environmentId, input.baseUrl, deletedThreadIds);
       for (const [key, value] of result) if (!metadata.has(key)) metadata.set(key, value);
     } catch {
+      // An empty key cannot be a harness:session identity. The parent removes
+      // this opt-in diagnostic before using metadata, and retries partial reads.
+      if (input.reportFailures) metadata.set('', { repositoryPaths: [] });
       // Optional metadata may disappear during a T3 upgrade or transient read.
     }
   }

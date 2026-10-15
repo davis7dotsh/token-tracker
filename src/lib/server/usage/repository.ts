@@ -1,18 +1,30 @@
 import { Clock, Data, Effect, FileSystem, Path, Result } from 'effect';
 import { homedir } from 'node:os';
 
-type RepositoryOptions = { platform?: NodeJS.Platform; home?: string };
-class RepositoryPathUnavailable extends Data.TaggedError('RepositoryPathUnavailable') {}
+export type RepositoryOptions = {
+  platform?: NodeJS.Platform;
+  home?: string;
+  onDependency?: (file: string) => void;
+  onFailure?: () => void;
+};
+class RepositoryPathUnavailable extends Data.TaggedError('RepositoryPathUnavailable')<{ retryable?: boolean }> {}
+export const skippedRepositoryPath = (error: unknown) => error instanceof RepositoryPathUnavailable && !error.retryable;
 
 // Optional Git grouping must never ask macOS for access to a user's private
 // folders. Check names before I/O and resolve symlinks one component at a time:
 // realPath/stat would follow an unchecked link into a protected directory.
-const makeRepositoryPathResolver = Effect.fn('usage.makeRepositoryPathResolver')(function* (
+export const makeRepositoryPathResolver = Effect.fn('usage.makeRepositoryPathResolver')(function* (
   cwd: string,
   options: RepositoryOptions,
 ) {
   const path = yield* Path.Path;
-  if ((options.platform ?? process.platform) !== 'darwin') return (file: string) => Effect.succeed(path.resolve(file));
+  if ((options.platform ?? process.platform) !== 'darwin')
+    return (file: string) =>
+      Effect.sync(() => {
+        const resolved = path.resolve(file);
+        options.onDependency?.(resolved);
+        return resolved;
+      });
   const fs = yield* FileSystem.FileSystem;
   const home = path.resolve(options.home ?? homedir());
   const canonical = (file: string) =>
@@ -27,19 +39,20 @@ const makeRepositoryPathResolver = Effect.fn('usage.makeRepositoryPathResolver')
     const canonicalFile = canonical(file);
     return roots.some((root) => canonicalFile === root || canonicalFile.startsWith(`${root}/`));
   };
-  if (blocked(cwd)) return yield* Effect.fail(new RepositoryPathUnavailable());
+  if (blocked(cwd)) return yield* Effect.fail(new RepositoryPathUnavailable({}));
   const nonLinks = new Set<string>();
   const safePath = Effect.fn('usage.resolveSafeRepositoryPath')(function* (file: string) {
     let resolved = path.resolve(file);
     for (let links = 0; links < 40; links++) {
-      if (blocked(resolved)) return yield* Effect.fail(new RepositoryPathUnavailable());
+      if (blocked(resolved)) return yield* Effect.fail(new RepositoryPathUnavailable({}));
       let component = path.parse(resolved).root;
       const parts = resolved.slice(component.length).split(path.sep).filter(Boolean);
       let followed = false;
       for (let index = 0; index < parts.length; index++) {
         component = path.join(component, parts[index]);
-        if (blocked(component)) return yield* Effect.fail(new RepositoryPathUnavailable());
+        if (blocked(component)) return yield* Effect.fail(new RepositoryPathUnavailable({}));
         if (nonLinks.has(component)) continue;
+        options.onDependency?.(component);
         const link = yield* Effect.result(fs.readLink(component));
         if (Result.isSuccess(link)) {
           resolved = path.resolve(path.dirname(component), link.success, ...parts.slice(index + 1));
@@ -55,11 +68,14 @@ const makeRepositoryPathResolver = Effect.fn('usage.makeRepositoryPathResolver')
             continue;
           }
         }
-        return yield* Effect.fail(new RepositoryPathUnavailable());
+        return yield* Effect.fail(new RepositoryPathUnavailable({ retryable: true }));
       }
-      if (!followed) return resolved;
+      if (!followed) {
+        options.onDependency?.(resolved);
+        return resolved;
+      }
     }
-    return yield* Effect.fail(new RepositoryPathUnavailable());
+    return yield* Effect.fail(new RepositoryPathUnavailable({}));
   });
   // Home itself can be an alias. Cover its physical protected folders too.
   const physicalHome = yield* safePath(home);
@@ -110,11 +126,16 @@ const originRemote = (config: string) => {
 };
 
 const maximumMetadataBytes = 1_048_576n;
-const readMetadata = Effect.fn('usage.readRepositoryMetadata')(function* (file: string) {
+const readMetadata = Effect.fn('usage.readRepositoryMetadata')(function* (file: string, onFailure?: () => void) {
   const fs = yield* FileSystem.FileSystem;
   const info = yield* Effect.result(fs.stat(file));
-  if (Result.isFailure(info) || info.success.type !== 'File' || info.success.size > maximumMetadataBytes) return null;
+  if (Result.isFailure(info)) {
+    if (info.failure.reason._tag !== 'NotFound') onFailure?.();
+    return null;
+  }
+  if (info.success.type !== 'File' || info.success.size > maximumMetadataBytes) return null;
   const contents = yield* Effect.result(fs.readFileString(file));
+  if (Result.isFailure(contents)) onFailure?.();
   return Result.isSuccess(contents) && contents.success.length <= Number(maximumMetadataBytes)
     ? contents.success
     : null;
@@ -130,20 +151,21 @@ export const resolveRepository = Effect.fn('usage.resolveRepository')(
     for (let depth = 0; depth < 100; depth++) {
       const git = yield* safePath(path.join(directory, '.git'));
       const info = yield* Effect.result(fs.stat(git));
+      if (Result.isFailure(info) && info.failure.reason._tag !== 'NotFound') options.onFailure?.();
       if (Result.isSuccess(info)) {
         let gitDir = git;
         if (info.success.type !== 'Directory') {
           if (info.success.type !== 'File') return null;
-          const pointer = yield* readMetadata(git);
+          const pointer = yield* readMetadata(git, options.onFailure);
           if (pointer === null) return null;
           const target = /^gitdir:\s*(.+)$/m.exec(pointer)?.[1];
           if (!target) return null;
           gitDir = yield* safePath(path.resolve(directory, target.trim()));
         }
         // Linked worktrees share config in the common Git directory.
-        const common = yield* readMetadata(yield* safePath(path.join(gitDir, 'commondir')));
+        const common = yield* readMetadata(yield* safePath(path.join(gitDir, 'commondir')), options.onFailure);
         if (common !== null) gitDir = yield* safePath(path.resolve(gitDir, common.trim()));
-        const config = yield* readMetadata(yield* safePath(path.join(gitDir, 'config')));
+        const config = yield* readMetadata(yield* safePath(path.join(gitDir, 'config')), options.onFailure);
         const localIdentity = `local:${path.dirname(gitDir)}`;
         return config !== null ? (originRemote(config) ?? localIdentity) : localIdentity;
       }
@@ -155,10 +177,13 @@ export const resolveRepository = Effect.fn('usage.resolveRepository')(
   },
   // Repository grouping is optional metadata. Cancellable filesystem reads
   // must not keep an otherwise complete token collection waiting indefinitely.
-  (effect) =>
+  (effect, _cwd, options = {}) =>
     effect.pipe(
       Effect.timeout('3 seconds'),
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.catch((error) => {
+        if (!(error instanceof RepositoryPathUnavailable) || error.retryable) options.onFailure?.();
+        return Effect.succeed(null);
+      }),
     ),
 );
 
@@ -173,7 +198,10 @@ export const makeRepositoryResolver = (options: RepositoryOptions = {}) => {
     if (remaining <= 0) return null;
     return yield* resolveRepository(cwd, options).pipe(
       Effect.timeout(remaining),
-      Effect.catch(() => Effect.succeed(null)),
+      Effect.catch(() => {
+        options.onFailure?.();
+        return Effect.succeed(null);
+      }),
     );
   });
 };

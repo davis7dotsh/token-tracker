@@ -1,5 +1,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { appendFile, mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  chmod,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BunServices } from '@effect/platform-bun';
@@ -117,4 +129,71 @@ describe('streaming collection and durable metadata cache', () => {
     expect(rawReads).toBe(5);
     expect(await readFile(cachedPath, 'utf8')).toBe(beforeManual);
   });
+
+  test.skipIf(process.platform === 'win32')(
+    'source inventory follows the configured root alias and skips nested symlinks and special files',
+    async () => {
+      const home = await directory();
+      const root = join(home, 'actual-projects');
+      const source = join(home, 'claude', 'projects');
+      const outside = join(home, 'outside');
+      await mkdir(join(root, 'nested'), { recursive: true });
+      await mkdir(join(home, 'claude'));
+      await mkdir(outside);
+      await writeFile(join(root, 'first.JSONL'), `${claudeRecord('first')}\n`);
+      await writeFile(join(root, 'nested', 'second.jsonl'), `${claudeRecord('second')}\n`);
+      await writeFile(join(root, 'ignored.txt'), `${claudeRecord('ignored')}\n`);
+      await writeFile(join(outside, 'outside.jsonl'), `${claudeRecord('outside')}\n`);
+      await symlink(root, source);
+      await symlink(outside, join(root, 'linked-directory'));
+      await symlink(join(outside, 'outside.jsonl'), join(root, 'linked-file.jsonl'));
+      await symlink(join(home, 'missing'), join(root, 'broken-link'));
+      const fifo = Bun.spawn(['mkfifo', join(root, 'special.jsonl')], { stdout: 'ignore', stderr: 'ignore' });
+      expect(await fifo.exited).toBe(0);
+      const result = await Effect.runPromise(
+        collectUsage({
+          home,
+          claudeDirs: [join(home, 'claude')],
+          codexDirs: [],
+          piDirs: [],
+          grokDirs: [],
+          museDirs: [],
+        }).pipe(Effect.provide(BunServices.layer)),
+      );
+      expect(result.sources[0]).toMatchObject({ files: 2, events: 2, status: 'ready' });
+      expect(result.events.map((event) => event.id)).toEqual(['claude:message:first:', 'claude:message:second:']);
+    },
+  );
+
+  test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'unreadable nested inventory directories retain partial source diagnostics',
+    async () => {
+      const home = await directory();
+      const root = join(home, 'claude', 'projects');
+      const denied = join(root, 'denied');
+      await mkdir(denied, { recursive: true });
+      await writeFile(join(root, 'readable.jsonl'), `${claudeRecord('readable')}\n`);
+      await chmod(denied, 0);
+      try {
+        const result = await Effect.runPromise(
+          collectUsage({
+            home,
+            claudeDirs: [join(home, 'claude')],
+            codexDirs: [],
+            piDirs: [],
+            grokDirs: [],
+            museDirs: [],
+          }).pipe(Effect.provide(BunServices.layer)),
+        );
+        expect(result.events).toHaveLength(1);
+        expect(result.sources[0]).toMatchObject({ files: 1, events: 1, status: 'partial' });
+        expect(result.sources[0].error).toBe(
+          'Skipped 0 malformed records; 0 files and 1 directories could not be read.',
+        );
+        expect(result.warnings).toContain(`claude: ${result.sources[0].error}`);
+      } finally {
+        await chmod(denied, 0o700);
+      }
+    },
+  );
 });

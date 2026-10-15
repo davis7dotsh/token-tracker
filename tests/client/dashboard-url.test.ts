@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   dashboardUrlSchema,
   dashboardUrlSchemaFor,
+  dashboardRanges,
   decodeFilter,
   encodeFilter,
   filterKeys,
@@ -46,16 +47,17 @@ describe('dashboard URL state', () => {
     expect(filterKeys.every((key) => usageQueryFromParams(defaults, 'UTC')[key] === undefined)).toBe(true);
   });
 
-  test('a browser default range applies only when the URL has no range', () => {
-    const schema = dashboardUrlSchemaFor('6m');
+  test.each(dashboardRanges.map(({ value }) => value))('browser default %s preserves explicit URL ranges', (value) => {
+    const schema = dashboardUrlSchemaFor(value);
     const read = (input: Record<string, string>) => {
       const result = schema['~standard'].validate(input);
       if (result instanceof Promise || !('value' in result)) throw new Error('Expected synchronous validation.');
       return result.value.range;
     };
-    expect(read({})).toBe('6m');
+    expect(read({})).toBe(value);
     expect(read({ range: '30d' })).toBe('30d');
-    expect(read({ range: 'invalid' })).toBe('6m');
+    expect(read({ range: 'today' })).toBe('today');
+    expect(read({ range: 'invalid' })).toBe(value);
     expect(validate({}).range).toBe('30d');
   });
 

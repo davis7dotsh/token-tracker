@@ -9,9 +9,11 @@ import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { StorageFailure } from '../../shared/rpc';
 import { collectUsage } from '../usage';
 import { filePricing } from '../usage/pricing-runtime';
+import { usageRevision } from '../usage/revision';
 import { HubPricing, LocalUsage, makeHubWebHandler } from './hub';
 import { getLocalDevice } from './identity';
 import { ServerConfiguration, UsageStore } from './store';
+import { compressRpcResponse } from './compression';
 
 export { LocalUsage } from './hub';
 
@@ -100,7 +102,15 @@ export const localUsageLayer = Layer.effect(
         'dashboard',
       ),
     }).pipe(Effect.provideService(FileSystem.FileSystem, filesystem), Effect.provideService(Path.Path, path));
-    return { device, collect };
+    return {
+      device,
+      collect,
+      revision: (previous) =>
+        usageRevision()(previous).pipe(
+          Effect.provideService(FileSystem.FileSystem, filesystem),
+          Effect.provideService(Path.Path, path),
+        ),
+    };
   }),
 ).pipe(Layer.provide(BunServices.layer));
 
@@ -139,7 +149,7 @@ export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = loca
   // deployment's explicit public origin when one is configured.
   const publicOrigin = options.dashboardOrigin ?? process.env.ORIGIN?.trim();
   // Tailnet access is the dashboard's owner boundary in this personal mode.
-  return makeHubWebHandler(
+  const web = makeHubWebHandler(
     services,
     {
       trustBrowser: true,
@@ -148,6 +158,11 @@ export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = loca
     },
     downloads,
   );
+  return {
+    ...web,
+    handler: async (request: Request, collectorOnly = false) =>
+      compressRpcResponse(request, await web.handler(request, collectorOnly)),
+  };
 };
 
 let server: ReturnType<typeof makeRpcWebHandler> | undefined;

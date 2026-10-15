@@ -19,6 +19,8 @@
   let width = $state(900);
   let active = $state(-1);
   let stage: HTMLElement | undefined;
+  let pointerFrame: number | undefined;
+  let pendingPointer: { x: number; y: number } | undefined;
   let pointerY = $state<number | undefined>();
   let plot = $state.raw({ left: 0, top: 0, width: 900, height: 320, viewportWidth: 900, viewportHeight: 320 });
   let tooltipSize = $state.raw({ width: 0, height: 0 });
@@ -155,18 +157,21 @@
   const bars = $derived.by(() =>
     points.flatMap((point) => {
       let accumulated = 0;
-      return chartSeries.map((series) => {
+      return chartSeries.flatMap((series) => {
         const value = point.values.get(series.name)?.[metric] ?? 0;
+        if (value <= 0) return [];
         const bottom = y(accumulated);
         accumulated += value;
-        return {
-          key: point.key + ':' + series.name,
-          name: series.name,
-          color: series.color,
-          x: x(point.key) ?? 52,
-          y: y(accumulated),
-          height: bottom - y(accumulated),
-        };
+        return [
+          {
+            key: point.key + ':' + series.name,
+            name: series.name,
+            color: series.color,
+            x: x(point.key) ?? 52,
+            y: y(accumulated),
+            height: bottom - y(accumulated),
+          },
+        ];
       });
     }),
   );
@@ -243,6 +248,7 @@
     observer.observe(node);
     return () => {
       observer.disconnect();
+      cancelPointer();
       stage = undefined;
     };
   }
@@ -269,13 +275,23 @@
     return selectedGrouping === 'models' ? ['', '6 3', '2 3', '9 3 2 3', '3 2', '8 4'][index % 6] : '';
   }
   function pointer(event: PointerEvent) {
-    const node = event.currentTarget;
-    if (!(node instanceof HTMLElement) || points.length === 0) return;
-    updatePlotBounds();
-    const offset = ((event.clientX - plot.left) * width) / Math.max(1, plot.width);
-    const firstCenter = (x(points[0].key) ?? 52) + x.bandwidth() / 2;
-    active = Math.max(0, Math.min(points.length - 1, Math.round((offset - firstCenter) / Math.max(1, x.step()))));
-    pointerY = Math.max(0, Math.min(plot.height, event.clientY - plot.top));
+    if (points.length === 0) return;
+    pendingPointer = { x: event.clientX, y: event.clientY };
+    pointerFrame ??= requestAnimationFrame(() => {
+      pointerFrame = undefined;
+      const next = pendingPointer;
+      pendingPointer = undefined;
+      if (!next || points.length === 0) return;
+      const offset = ((next.x - plot.left) * width) / Math.max(1, plot.width);
+      const firstCenter = (x(points[0].key) ?? 52) + x.bandwidth() / 2;
+      active = Math.max(0, Math.min(points.length - 1, Math.round((offset - firstCenter) / Math.max(1, x.step()))));
+      pointerY = Math.max(0, Math.min(plot.height, next.y - plot.top));
+    });
+  }
+  function cancelPointer() {
+    if (pointerFrame !== undefined) cancelAnimationFrame(pointerFrame);
+    pointerFrame = undefined;
+    pendingPointer = undefined;
   }
   function keyboard(event: KeyboardEvent) {
     if (points.length === 0) return;
@@ -290,6 +306,7 @@
       active = points.length - 1;
     } else if (event.key === 'Escape') active = -1;
     else return;
+    cancelPointer();
     pointerY = undefined;
     updatePlotBounds();
   }
@@ -333,10 +350,14 @@
       (metric === 'tokens' ? ' tokens' : ' estimated cost')
     : 'Use arrow keys to inspect usage'}
   tabindex="0"
+  onpointerenter={updatePlotBounds}
   onpointerdown={pointer}
   onpointermove={pointer}
   onpointerleave={(event) => {
-    if (event.pointerType !== 'touch') active = -1;
+    if (event.pointerType !== 'touch') {
+      cancelPointer();
+      active = -1;
+    }
   }}
   onkeydown={keyboard}
 >

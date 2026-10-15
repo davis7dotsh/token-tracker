@@ -1,7 +1,7 @@
 <script lang="ts">
   import { browser } from '$app/env';
   import { page } from '$app/state';
-  import { makeDashboardClient } from '#lib/client/rpc.ts';
+  import { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import { SettingsState, setSettings } from '#lib/client/settings.svelte.ts';
   import Icon from '#lib/components/Icon.svelte';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';

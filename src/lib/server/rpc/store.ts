@@ -206,10 +206,44 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         }),
       )
       .pipe(Effect.mapError(storageFailure));
+    // Only copied IDs need out-of-window owner checks. Maintain this small
+    // index transactionally instead of rescanning every historical ID after an
+    // upload. LIMIT/OFFSET uses the existing covering event-ID index.
+    yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const existing =
+            yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_copied_ids'`;
+          yield* sql.unsafe('CREATE TABLE IF NOT EXISTS usage_copied_ids (id TEXT PRIMARY KEY) WITHOUT ROWID');
+          if (!existing.length)
+            yield* sql.unsafe(`INSERT INTO usage_copied_ids
+              SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1`);
+          const addCopy = `INSERT OR IGNORE INTO usage_copied_ids (id)
+            SELECT NEW.id WHERE EXISTS (SELECT 1 FROM usage_events WHERE id = NEW.id LIMIT 1 OFFSET 1);`;
+          const removeCopy = `DELETE FROM usage_copied_ids WHERE id = OLD.id
+            AND NOT EXISTS (SELECT 1 FROM usage_events WHERE id = OLD.id LIMIT 1 OFFSET 1);`;
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_insert
+            AFTER INSERT ON usage_events BEGIN ${addCopy} END`);
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_delete
+            AFTER DELETE ON usage_events BEGIN ${removeCopy} END`);
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_update
+            AFTER UPDATE OF id, device_id ON usage_events
+            WHEN OLD.id IS NOT NEW.id OR OLD.device_id IS NOT NEW.device_id
+            BEGIN ${removeCopy} ${addCopy} END`);
+        }),
+      )
+      .pipe(Effect.mapError(storageFailure));
     let revision = 0;
+    let metadataRevision = 0;
     let ownerRevision = 0;
     let copiedRevision = -1;
     let copiedIds = new Set<string>();
+    // Upload work remains cancellable, but a durable commit must publish its
+    // generation before cancellation can discard the acknowledgement.
+    const commitWrite = <A, E, R>(write: Effect.Effect<A, E, R>, onCommit: (result: A) => void) =>
+      Effect.uninterruptibleMask((restore) =>
+        sql.withTransaction(restore(write)).pipe(Effect.tap((result) => Effect.sync(() => onCommit(result)))),
+      );
 
     const getDevices = Effect.fn('UsageStore.getDevices')(
       function* () {
@@ -235,19 +269,30 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const token = randomBytes(32).toString('base64url');
       // A revoked device stays blocked, even with the pairing secret, until the
       // dashboard restores it. The conflict update skips it atomically.
-      const paired = yield* sql<{ id: string }>`
-        INSERT INTO devices (id, name, platform, token_hash)
-        VALUES (${device.id}, ${device.name}, ${device.platform}, ${digest(token)})
-        ON CONFLICT (id) DO UPDATE SET name = excluded.name,
-          platform = excluded.platform, token_hash = excluded.token_hash
-        WHERE devices.revoked_at IS NULL
-        RETURNING id
-      `.pipe(Effect.mapError(storageFailure));
-      if (!paired.length) return yield* Effect.fail(revokedFailure());
+      yield* commitWrite(
+        Effect.gen(function* () {
+          const previous = yield* sql<{
+            name: string;
+            platform: string;
+          }>`SELECT name, platform FROM devices WHERE id = ${device.id}`;
+          const paired = yield* sql<{ id: string }>`
+              INSERT INTO devices (id, name, platform, token_hash)
+              VALUES (${device.id}, ${device.name}, ${device.platform}, ${digest(token)})
+              ON CONFLICT (id) DO UPDATE SET name = excluded.name,
+                platform = excluded.platform, token_hash = excluded.token_hash
+              WHERE devices.revoked_at IS NULL
+              RETURNING id
+            `;
+          if (!paired.length) return yield* Effect.fail(revokedFailure());
+          return previous[0]?.name !== device.name || previous[0]?.platform !== device.platform;
+        }),
+        (metadataChanged) => {
+          if (metadataChanged) metadataRevision++;
+        },
+      ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
       const devices = yield* getDevices();
       const registered = devices.find((item) => item.id === device.id);
       if (!registered) return yield* Effect.fail(storageFailure());
-      revision++;
       return { device: registered, token };
     });
 
@@ -290,128 +335,138 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
 
       // Authentication, every upsert/deletion, and the durable last-seen marker
       // share one transaction. A cancelled or failed batch is never acknowledged.
-      const result = yield* sql
-        .withTransaction(
-          Effect.gen(function* () {
-            if ('pairingSecret' in authorization) {
-              if (!equalSecret(authorization.pairingSecret, configuration.pairingSecret))
-                return yield* Effect.fail(new Unauthorized({ message: 'The pairing secret is incorrect.' }));
-              // Migration may create devices, but never rotates a connected
-              // collector's credential. New devices still pair normally later.
-              yield* sql`INSERT INTO devices (id, name, platform, token_hash)
+      const result = yield* commitWrite(
+        Effect.gen(function* () {
+          let createdDevice = false;
+          if ('pairingSecret' in authorization) {
+            if (!equalSecret(authorization.pairingSecret, configuration.pairingSecret))
+              return yield* Effect.fail(new Unauthorized({ message: 'The pairing secret is incorrect.' }));
+            // Migration may create devices, but never rotates a connected
+            // collector's credential. New devices still pair normally later.
+            const inserted = yield* sql`INSERT INTO devices (id, name, platform, token_hash)
                 VALUES (${deviceId}, ${batch.device.name}, ${batch.device.platform}, ${digest(randomBytes(32).toString('base64url'))})
-                ON CONFLICT (id) DO NOTHING`;
-              const target = yield* sql<{
-                revoked_at: string | null;
-              }>`SELECT revoked_at FROM devices WHERE id = ${deviceId}`;
-              if (target[0]?.revoked_at) return yield* Effect.fail(revokedFailure());
-            } else {
-              const credentials = yield* sql<{
-                token_hash: string;
-                revoked_at: string | null;
-              }>`SELECT token_hash, revoked_at FROM devices WHERE id = ${deviceId}`;
-              if (credentials[0]?.revoked_at) return yield* Effect.fail(revokedFailure());
-              if (!credentials[0] || !equalSecret(digest(authorization.token), credentials[0].token_hash)) {
-                return yield* Effect.fail(
-                  new Unauthorized({
-                    message: 'This device is not connected, or its credential has expired. Connect it again.',
-                  }),
-                );
-              }
+                ON CONFLICT (id) DO NOTHING RETURNING id`;
+            createdDevice = inserted.length > 0;
+          }
+          const credentials = yield* sql<{
+            token_hash: string;
+            revoked_at: string | null;
+            platform: string;
+            sources: string;
+            pricing_updated_at: string;
+          }>`SELECT token_hash, revoked_at, platform, sources, pricing_updated_at FROM devices WHERE id = ${deviceId}`;
+          const previousDevice = credentials[0];
+          if (previousDevice?.revoked_at) return yield* Effect.fail(revokedFailure());
+          if ('token' in authorization) {
+            if (!previousDevice || !equalSecret(digest(authorization.token), previousDevice.token_hash)) {
+              return yield* Effect.fail(
+                new Unauthorized({
+                  message: 'This device is not connected, or its credential has expired. Connect it again.',
+                }),
+              );
             }
-            let accepted = 0;
-            let updated = 0;
-            let deleted = 0;
-            const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
-            const existingRows = batch.events.length
-              ? yield* sql.unsafe<{ id: string; payload_hash: string; payload: string }>(
-                  'SELECT id, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?))',
-                  [deviceId, JSON.stringify(batch.events.map((event) => event.id))],
-                )
-              : [];
-            const existing = yield* Effect.try({
-              try: () =>
-                new Map(
-                  existingRows.map((row) => [row.id, { hash: row.payload_hash, event: decodeEvent(row.payload) }]),
-                ),
-              catch: storageFailure,
+          }
+          let accepted = 0;
+          let updated = 0;
+          let deleted = 0;
+          const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
+          const existingRows = batch.events.length
+            ? yield* sql.unsafe<{ id: string; payload_hash: string; payload: string }>(
+                'SELECT id, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?))',
+                [deviceId, JSON.stringify(batch.events.map((event) => event.id))],
+              )
+            : [];
+          const existing = yield* Effect.try({
+            try: () =>
+              new Map(existingRows.map((row) => [row.id, { hash: row.payload_hash, event: decodeEvent(row.payload) }])),
+            catch: storageFailure,
+          });
+          const changedRows: {
+            device_id: string;
+            id: string;
+            timestamp: string;
+            payload: string;
+            payload_hash: string;
+            pricing_snapshot: string;
+          }[] = [];
+          for (const event of batch.events) {
+            const previous = existing.get(event.id);
+            // A source backup can be older than corrections already synced
+            // by collectors. Imports only fill missing record IDs.
+            if (previous && 'pairingSecret' in authorization) continue;
+            const normalized = {
+              ...preserveSessionMetadata(event, previous?.event),
+              ...event,
+              // A missing optional T3 binding is not evidence that an attached
+              // remote was removed. Explicit bindings and cwd remotes still win.
+              repository: preserveRepository(event, previous?.event),
+              deviceId,
+              costUsd: event.costKnown ? event.costUsd : 0,
+            };
+            const payload = JSON.stringify(normalized);
+            const payloadHash = digest(JSON.stringify([pricingSnapshot, payload]));
+            if (previous?.hash === payloadHash) continue;
+            changedRows.push({
+              device_id: deviceId,
+              id: event.id,
+              timestamp: new Date(event.timestamp).toISOString(),
+              payload,
+              payload_hash: payloadHash,
+              pricing_snapshot: pricingSnapshot,
             });
-            const changedRows: {
-              device_id: string;
-              id: string;
-              timestamp: string;
-              payload: string;
-              payload_hash: string;
-              pricing_snapshot: string;
-            }[] = [];
-            for (const event of batch.events) {
-              const previous = existing.get(event.id);
-              // A source backup can be older than corrections already synced
-              // by collectors. Imports only fill missing record IDs.
-              if (previous && 'pairingSecret' in authorization) continue;
-              const normalized = {
-                ...preserveSessionMetadata(event, previous?.event),
-                ...event,
-                // A missing optional T3 binding is not evidence that an attached
-                // remote was removed. Explicit bindings and cwd remotes still win.
-                repository: preserveRepository(event, previous?.event),
-                deviceId,
-                costUsd: event.costKnown ? event.costUsd : 0,
-              };
-              const payload = JSON.stringify(normalized);
-              const payloadHash = digest(JSON.stringify([pricingSnapshot, payload]));
-              if (previous?.hash === payloadHash) continue;
-              changedRows.push({
-                device_id: deviceId,
-                id: event.id,
-                timestamp: new Date(event.timestamp).toISOString(),
-                payload,
-                payload_hash: payloadHash,
-                pricing_snapshot: pricingSnapshot,
-              });
-              if (previous === undefined) accepted += 1;
-              else updated += 1;
-              existing.set(event.id, { hash: payloadHash, event: normalized });
-            }
-            for (let offset = 0; offset < changedRows.length; offset += rowsPerUpsert) {
-              const chunk = changedRows.slice(offset, offset + rowsPerUpsert);
-              yield* sql.unsafe(
-                `INSERT INTO usage_events (device_id, id, timestamp, payload, payload_hash, pricing_snapshot)
+            if (previous === undefined) accepted += 1;
+            else updated += 1;
+            existing.set(event.id, { hash: payloadHash, event: normalized });
+          }
+          for (let offset = 0; offset < changedRows.length; offset += rowsPerUpsert) {
+            const chunk = changedRows.slice(offset, offset + rowsPerUpsert);
+            yield* sql.unsafe(
+              `INSERT INTO usage_events (device_id, id, timestamp, payload, payload_hash, pricing_snapshot)
                 VALUES ${chunk.map(() => '(?, ?, ?, ?, ?, ?)').join(', ')}
                 ON CONFLICT (device_id, id) DO UPDATE SET timestamp = excluded.timestamp,
                 payload = excluded.payload, payload_hash = excluded.payload_hash, pricing_snapshot = excluded.pricing_snapshot`,
-                chunk.flatMap((row) => [
-                  row.device_id,
-                  row.id,
-                  row.timestamp,
-                  row.payload,
-                  row.payload_hash,
-                  row.pricing_snapshot,
-                ]),
-              );
-              yield* Effect.yieldNow;
-            }
-            const deletedIds = batch.deletedIds ?? [];
-            for (let offset = 0; offset < deletedIds.length; offset += 256) {
-              const ids = deletedIds.slice(offset, offset + 256);
-              const rows = yield* sql.unsafe(
-                'DELETE FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?)) RETURNING id',
-                [deviceId, JSON.stringify(ids)],
-              );
-              deleted += rows.length;
-            }
-            const receivedAt = new Date().toISOString();
-            // Pairing sets the name; later uploads keep any rename from the dashboard.
-            yield* sql`UPDATE devices SET platform = ${batch.device.platform}, last_seen = ${receivedAt},
-              sources = COALESCE(${batch.sources ? JSON.stringify(batch.sources) : null}, sources),
-              pricing_updated_at = COALESCE(${batch.pricingUpdatedAt || null}, pricing_updated_at) WHERE id = ${deviceId}`;
-            return { accepted, updated, deleted, receivedAt };
-          }),
-        )
-        .pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
-      if ('pairingSecret' in authorization || result.accepted || result.updated || result.deleted) revision++;
-      if (result.accepted || result.deleted) ownerRevision++;
-      return result;
+              chunk.flatMap((row) => [
+                row.device_id,
+                row.id,
+                row.timestamp,
+                row.payload,
+                row.payload_hash,
+                row.pricing_snapshot,
+              ]),
+            );
+            yield* Effect.yieldNow;
+          }
+          const deletedIds = batch.deletedIds ?? [];
+          for (let offset = 0; offset < deletedIds.length; offset += 256) {
+            const ids = deletedIds.slice(offset, offset + 256);
+            const rows = yield* sql.unsafe(
+              'DELETE FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?)) RETURNING id',
+              [deviceId, JSON.stringify(ids)],
+            );
+            deleted += rows.length;
+          }
+          const receivedAt = new Date().toISOString();
+          const sources = batch.sources ? JSON.stringify(batch.sources) : null;
+          const pricingUpdatedAt = batch.pricingUpdatedAt || null;
+          const metadataChanged =
+            createdDevice ||
+            previousDevice?.platform !== batch.device.platform ||
+            (sources !== null && sources !== previousDevice?.sources) ||
+            (pricingUpdatedAt !== null && pricingUpdatedAt !== previousDevice?.pricing_updated_at);
+          // Pairing sets the name; later uploads keep any rename from the dashboard.
+          yield* sql`UPDATE devices SET platform = ${batch.device.platform}, last_seen = ${receivedAt},
+              sources = COALESCE(${sources}, sources),
+              pricing_updated_at = COALESCE(${pricingUpdatedAt}, pricing_updated_at) WHERE id = ${deviceId}`;
+          return { accepted, updated, deleted, receivedAt, metadataChanged };
+        }),
+        (result) => {
+          if (result.accepted || result.updated || result.deleted) revision++;
+          if (result.metadataChanged) metadataRevision++;
+          if (result.accepted || result.deleted) ownerRevision++;
+        },
+      ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
+      const { metadataChanged: _metadataChanged, ...acknowledgement } = result;
+      return acknowledgement;
     });
 
     const readWindow = Effect.fn('UsageStore.readWindow')(
@@ -449,7 +504,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         if (window.length) {
           if (copiedRevision !== ownerRevision) {
             const version = ownerRevision;
-            const copies = yield* sql<{ id: string }>`SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1`;
+            const copies = yield* sql<{ id: string }>`SELECT id FROM usage_copied_ids`;
             copiedIds = new Set(copies.map((row) => row.id));
             copiedRevision = version;
           }
@@ -535,13 +590,20 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         const input = decodeWindowKey(key);
         return readWindow(input.excluded, input.options);
       },
-      { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? '5 minutes' : 0) },
+      { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
     );
+    let windowRevision = revision;
     const getUsage = Effect.fn('UsageStore.getUsage')(function* (
       excludeDeviceId?: string,
       options: UsageReadOptions = {},
     ) {
       const { candidateIds, ...windowOptions } = options;
+      // Retire large decoded arrays after a committed event change. Metadata
+      // updates reuse them, and the revision in each key isolates in-flight reads.
+      if (windowRevision !== revision) {
+        yield* Cache.invalidateAll(windows);
+        windowRevision = revision;
+      }
       const data = yield* Cache.get(
         windows,
         JSON.stringify({ excluded: excludeDeviceId ?? '', revision, options: windowOptions }),
@@ -654,14 +716,22 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const label = name.trim();
       if (!label || label.length > 200)
         return yield* new InvalidRequest({ message: 'Enter a device name of at most 200 characters.' });
-      const renamed = yield* sql<{
-        id: string;
-      }>`UPDATE devices SET name = ${label} WHERE id = ${deviceId} AND revoked_at IS NULL RETURNING id`.pipe(
-        Effect.mapError(storageFailure),
-      );
-      if (!renamed.length)
-        return yield* new InvalidRequest({ message: 'Only connected devices that are not revoked can be renamed.' });
-      revision++;
+      yield* commitWrite(
+        Effect.gen(function* () {
+          const previous = yield* sql<{
+            name: string;
+          }>`SELECT name FROM devices WHERE id = ${deviceId} AND revoked_at IS NULL`;
+          if (!previous[0])
+            return yield* new InvalidRequest({
+              message: 'Only connected devices that are not revoked can be renamed.',
+            });
+          yield* sql`UPDATE devices SET name = ${label} WHERE id = ${deviceId}`;
+          return previous[0].name !== label;
+        }),
+        (metadataChanged) => {
+          if (metadataChanged) metadataRevision++;
+        },
+      ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
       return yield* deviceById(deviceId);
     });
     const revokeDevice = Effect.fn('UsageStore.revokeDevice')(function* (deviceId: string) {
@@ -698,6 +768,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       getUsage,
       getDimensions,
       getRevision: () => revision,
+      getMetadataRevision: () => metadataRevision,
       authorizeAdmin,
       authorizeDevice,
     };

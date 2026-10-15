@@ -249,6 +249,32 @@ describe('Grok Build accounting collection', () => {
     expect(result.warnings.join(' ')).toContain('1 malformed');
   });
 
+  test('nonadjacent native replays replace whole model sets, retain damaged turns and withdraw empty corrections', async () => {
+    const fixture = await directory();
+    await saveSession(fixture.sessions, 'replay-order', {
+      updates: [
+        update(1, { usage: { modelUsage: { 'former-a': counters, 'former-b': counters } } }),
+        update(2),
+        update(3),
+        update(1, { usage: usage({ outputTokens: 90 }, 'corrected') }),
+        update(2, {
+          usage: { modelUsage: { broken: { ...counters, inputTokens: 'invalid' }, unaccepted: counters } },
+        }),
+        update(3, { usage: usage({ inputTokens: 0, outputTokens: 0 }) }),
+        update(4),
+      ],
+    });
+    const result = await collect(fixture.sessions, { tinyChunks: true });
+    expect(result.events.map((event) => event.id)).toEqual([
+      'grok:turn:replay-order:2:grok-4.7-build-fast',
+      'grok:turn:replay-order:1:corrected',
+      'grok:turn:replay-order:4:grok-4.7-build-fast',
+    ]);
+    expect(result.events.map((event) => event.outputTokens)).toEqual([104, 90, 104]);
+    expect(result.source.status).toBe('partial');
+    expect(result.warnings.join(' ')).toContain('1 malformed');
+  });
+
   test('a malformed ledger falls back without hiding valid history; bad completed JSONL records report partial', async () => {
     const fixture = await directory();
     const session = await saveSession(fixture.sessions, 'broken', { ledger: '{broken', updates: [update()] });
