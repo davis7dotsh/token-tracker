@@ -148,6 +148,38 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
         // working-tree writes do not change repository grouping metadata.
         const signature = info?.isDirectory() ? `${info.dev}:${info.ino}` : info ? fingerprint(info) : 'missing';
         records.push(`repository:${dependency}:${safe}:${signature}`);
+        if (info?.isSymbolicLink()) {
+          // lstat detects link replacement; the collector also reads the linked
+          // metadata file. Resolve it through the same privacy guard before
+          // observing the target, so external config edits invalidate too.
+          const target = yield* Effect.result(resolver.success(dependency));
+          if (Result.isFailure(target)) {
+            if (skippedRepositoryPath(target.failure)) records.push(`repository-target:skipped:${dependency}`);
+            else {
+              optionalUnavailable = true;
+              records.push(`repository-target:unavailable:${dependency}`);
+            }
+            continue;
+          }
+          const targetInfo = yield* Effect.result(
+            Effect.tryPromise({
+              try: () => fileInfo(target.success, true),
+              catch: () => new CollectionError({ message: 'Could not check linked repository metadata for changes.' }),
+            }),
+          );
+          if (Result.isFailure(targetInfo)) {
+            optionalUnavailable = true;
+            records.push(`repository-target:unavailable:${dependency}`);
+            continue;
+          }
+          const linked = targetInfo.success;
+          const targetSignature = linked?.isDirectory()
+            ? `${linked.dev}:${linked.ino}`
+            : linked
+              ? fingerprint(linked)
+              : 'missing';
+          records.push(`repository-target:${dependency}:${target.success}:${targetSignature}`);
+        }
       }
     }
     records.sort();

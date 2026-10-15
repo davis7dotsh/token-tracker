@@ -131,11 +131,11 @@ const controlledHub = async (
       ),
       { signal },
     );
-  const getPricing = () =>
+  const getPricing = (query: UsageQuery = {}) =>
     runtime.runPromise(
       Effect.gen(function* () {
         const handler = yield* UsageRpc.accessHandler('GetPricing');
-        const result = yield* handler({}, options);
+        const result = yield* handler(query, options);
         return Deferred.isDeferred<PricingSettings, PricingFailure | UsageFailure>(result)
           ? yield* Deferred.await(result)
           : result;
@@ -308,10 +308,10 @@ test('concurrent usage and pricing readers share collection while one abort and 
   expect(collections).toBe(1);
 });
 
-test('dashboard ranges and device/timezone variants remain cached after long idle gaps', async () => {
+test('eight final dashboard and pricing results outlive evicted event snapshots and long idle gaps', async () => {
   let collections = 0;
   let sourceChecks = 0;
-  const { runtime, getUsage } = await controlledHub(
+  const { runtime, getUsage, getPricing } = await controlledHub(
     Effect.sync(() => {
       collections++;
       return usage([event({ deviceId: localDevice.id, timestamp: '2026-10-15T10:00:00.000Z' })]);
@@ -328,7 +328,12 @@ test('dashboard ranges and device/timezone variants remain cached after long idl
     { range: '7d', devices: [localDevice.id] },
     { range: '7d', timezone: 'America/New_York' },
   ];
-  const before = await Promise.all(queries.map((query) => getUsage(query)));
+  const before: DashboardResponse[] = [];
+  const pricingBefore: PricingSettings[] = [];
+  for (const query of queries) {
+    before.push(await getUsage(query));
+    pricingBefore.push(await getPricing(query));
+  }
   expect(before[0].generatedAt).toBe('2026-10-15T12:00:00.000Z');
   expect(collections).toBe(1);
   expect(sourceChecks).toBe(2);
@@ -337,14 +342,119 @@ test('dashboard ranges and device/timezone variants remain cached after long idl
     const after = await getUsage(query);
     expect(after.totals.tokens).toBe(100);
     expect(after.sessions).toBe(before[index].sessions);
+    expect(after.daily).toBe(before[index].daily);
+    expect(after.generatedAt).toBe('2026-10-15T12:01:00.000Z');
+    expect((await getPricing(query)).unresolved).toBe(pricingBefore[index].unresolved);
   }
   expect(collections).toBe(1);
   expect(sourceChecks).toBe(3);
   await runtime.runPromise(TestClock.adjust('1 hour'));
   expect(sourceChecks).toBe(3);
   expect((await getUsage({ range: '7d' })).sessions).toBe(before[1].sessions);
+  expect((await getPricing({ range: '7d' })).unresolved).toBe(pricingBefore[1].unresolved);
   expect(collections).toBe(1);
   expect(sourceChecks).toBe(4);
+});
+
+test('final result keys normalize every filter while preserving selected model order', async () => {
+  const first = event({
+    id: 'first',
+    model: 'unknown-first',
+    deviceId: localDevice.id,
+    timestamp: '2026-10-15T10:00:00.000Z',
+  });
+  const second = event({
+    id: 'second',
+    sessionId: 'second-session',
+    harness: 'claude',
+    model: 'unknown-second',
+    project: '/work/second',
+    inputTokens: 250,
+    deviceId: localDevice.id,
+    timestamp: first.timestamp,
+  });
+  const { runtime, getUsage, getPricing } = await controlledHub(Effect.succeed(usage([first, second])));
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T12:00:00.000Z')));
+  const queries: UsageQuery[] = [
+    { range: 'all' },
+    { range: 'all', harnesses: ['codex'] },
+    { range: 'all', models: ['unknown-second'] },
+    { range: 'all', providers: ['missing'] },
+    { range: 'all', projects: ['/work/app'] },
+    { range: 'all', devices: [] },
+    { range: 'all', models: [] },
+    { range: 'all', models: ['unknown-second', 'unknown-first', 'unknown-second'] },
+  ];
+  const before = await Promise.all(queries.map((query) => getUsage(query)));
+  expect(before.map((result) => result.totals.tokens)).toEqual([350, 100, 250, 0, 100, 0, 0, 350]);
+  for (const [index, query] of queries.entries()) {
+    expect((await getUsage(query)).sessions).toBe(before[index].sessions);
+    const unresolved = (await getPricing(query)).unresolved;
+    expect(unresolved.reduce((sum, row) => sum + row.tokens, 0)).toBe(before[index].totals.unpricedTokens);
+  }
+  const reordered = await getUsage({ range: 'all', models: ['unknown-first', 'unknown-second'] });
+  expect(reordered.sessions).toBe(before[7].sessions);
+  expect(reordered.filters.selectedModels).toEqual(['unknown-first', 'unknown-second']);
+  expect(before[7].filters.selectedModels).toEqual(['unknown-second', 'unknown-first']);
+});
+
+test('final dashboard and pricing responses follow exact event edges, rolling periods, calendar changes and reversed clocks', async () => {
+  const events = [
+    ['previous-edge', '2026-10-01T12:00:00.000Z'],
+    ['start-edge', '2026-10-08T12:00:00.000Z'],
+    ['today', '2026-10-15T00:00:00.000Z'],
+    ['now-edge', '2026-10-15T12:00:00.001Z'],
+    ['midnight', '2026-10-16T00:00:00.000Z'],
+    ['dst-fold', '2026-11-01T06:00:00.000Z'],
+  ].map(([id, timestamp], index) =>
+    event({ id, sessionId: id, timestamp, deviceId: localDevice.id, inputTokens: (index + 1) * 100 }),
+  );
+  const { runtime, getUsage, getPricing } = await controlledHub(Effect.succeed(usage(events)), () =>
+    Effect.succeed('unchanged'),
+  );
+  const queries: UsageQuery[] = [
+    ...(['today', '7d', '30d', '90d', '6m', 'all'] as const).map((range) => ({ range })),
+    { range: 'today', timezone: 'America/New_York' },
+    { range: '7d', timezone: 'Invalid/Timezone' },
+  ];
+  for (const timestamp of [
+    '2026-10-15T11:59:59.999Z',
+    '2026-10-15T12:00:00.000Z',
+    '2026-10-15T12:00:00.001Z',
+    '2026-10-15T12:00:00.002Z',
+    '2026-10-15T12:00:00.000Z',
+    '2026-10-15T23:59:59.999Z',
+    '2026-10-16T00:00:00.000Z',
+    '2026-11-01T05:30:00.000Z',
+    '2026-11-01T06:30:00.000Z',
+    '2026-11-01T05:30:00.000Z',
+  ]) {
+    await runtime.runPromise(TestClock.setTime(Date.parse(timestamp)));
+    for (const query of queries) {
+      const expected = buildDashboard(
+        {
+          ...usage(events),
+          warnings: [
+            'No reliable API price for: performance-unknown-model. These tokens are included, but their costs are unavailable.',
+          ],
+        },
+        query,
+        new Date(timestamp),
+      );
+      const actual = await getUsage(query);
+      expect(actual.generatedAt).toBe(timestamp);
+      expect(actual.totals).toEqual(expected.totals);
+      expect(actual.previous).toEqual(expected.previous);
+      expect(actual.period).toEqual(expected.period);
+      expect(actual.sessions).toEqual(expected.sessions);
+      expect(actual.daily).toEqual(expected.daily);
+      expect(actual.hourly).toEqual(expected.hourly);
+      expect(actual.warnings).toEqual(expected.warnings);
+      expect((await getPricing(query)).unresolved.reduce((sum, row) => sum + row.tokens, 0)).toBe(
+        expected.totals.unpricedTokens,
+      );
+    }
+  }
 });
 
 test('uploaded writes and pricing revisions invalidate immediately without collecting unchanged local logs', async () => {
@@ -371,10 +481,12 @@ test('uploaded writes and pricing revisions invalidate immediately without colle
   );
   const query = { range: 'all' as const };
   const first = await getUsage(query);
+  const firstPricing = await getPricing(query);
   expect(first.totals.tokens).toBe(350);
   expect(first.warnings.some((warning) => warning.startsWith('No reliable API price for: '))).toBe(true);
   await runtime.runPromise(store.syncUsage(remoteDevice.id, registration.token, { device: remoteDevice, events: [] }));
   expect((await getUsage(query)).sessions).toBe(first.sessions);
+  expect((await getPricing(query)).unresolved).toBe(firstPricing.unresolved);
   await runtime.runPromise(
     store.syncUsage(remoteDevice.id, registration.token, {
       device: remoteDevice,
@@ -385,6 +497,10 @@ test('uploaded writes and pricing revisions invalidate immediately without colle
   const metadata = await getUsage(query);
   expect(metadata.totals.tokens).toBe(350);
   expect(metadata.sources[0]?.path).toBe('Remote · /changed/source');
+  await runtime.runPromise(store.renameDevice(remoteDevice.id, 'Updated Remote'));
+  const renamed = await getUsage(query);
+  expect(renamed.sources[0]?.path).toBe('Updated Remote · /changed/source');
+  expect(renamed.sessions).not.toBe(metadata.sessions);
   await runtime.runPromise(
     store.syncUsage(remoteDevice.id, registration.token, {
       device: remoteDevice,
@@ -398,6 +514,7 @@ test('uploaded writes and pricing revisions invalidate immediately without colle
   expect((await getUsage(query)).totals.tokens).toBe(100);
   await runtime.runPromise(store.importUsage(pairingSecret, { device: remoteDevice, events: [remote] }));
   const imported = await getUsage(query);
+  const importedPricing = await getPricing(query);
   expect(imported.totals.tokens).toBe(350);
   await runtime.runPromise(store.importUsage(pairingSecret, { device: remoteDevice, events: [remote] }));
   expect((await getUsage(query)).sessions).toBe(imported.sessions);
@@ -413,6 +530,7 @@ test('uploaded writes and pricing revisions invalidate immediately without colle
   const currentInfo = await getPricing();
   expect(currentInfo.info.checkedAt).toBe('2026-10-15T12:00:00.000Z');
   expect(currentInfo.info.refreshError).toBe('Fixture refresh unavailable.');
+  expect((await getPricing(query)).unresolved).toBe(importedPricing.unresolved);
   expect((await getUsage(query)).sessions).toBe(imported.sessions);
   const pricing = await runtime.runPromise(HubPricing);
   await runtime.runPromise(pricing.setRule({ model: local.model, kind: 'free' }));

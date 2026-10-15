@@ -590,7 +590,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         const input = decodeWindowKey(key);
         return readWindow(input.excluded, input.options);
       },
-      { capacity: 8, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
+      { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
     );
     let windowRevision = revision;
     const getUsage = Effect.fn('UsageStore.getUsage')(function* (

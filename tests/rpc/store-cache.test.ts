@@ -146,23 +146,14 @@ test('metadata changes refresh diagnostics while identical heartbeats preserve e
   );
 });
 
-test('dashboard ranges and device windows retain decoded arrays beyond the previous five-minute lifetime', async () => {
+test('two decoded windows retain arrays beyond the previous lifetime and evict the least recently used history', async () => {
   const { runtime } = await storeRuntime();
   await runtime.runPromise(
     Effect.gen(function* () {
       const store = yield* UsageStore;
       const registration = yield* store.registerDevice(pairingSecret, device);
       yield* store.syncUsage(device.id, registration.token, { device, events: [event] });
-      const ranges = [
-        { start: '2026-10-03T00:00:00.000Z', end: '2026-10-04T00:00:00.000Z' },
-        { start: '2026-09-27T00:00:00.000Z', end: '2026-10-04T00:00:00.000Z' },
-        { start: '2026-09-04T00:00:00.000Z', end: '2026-10-04T00:00:00.000Z' },
-        { start: '2026-07-06T00:00:00.000Z', end: '2026-10-04T00:00:00.000Z' },
-        { start: '2026-04-04T00:00:00.000Z', end: '2026-10-04T00:00:00.000Z' },
-        {},
-        { ...window, devices: [device.id] },
-        { start: '2026-10-03T04:00:00.000Z', end: '2026-10-04T04:00:00.000Z' },
-      ];
+      const ranges = [{ start: '2026-10-03T00:00:00.000Z', end: '2026-10-04T00:00:00.000Z' }, {}];
       const original = yield* Effect.forEach(ranges, (options) => store.getUsage(undefined, options));
       yield* TestClock.adjust('1 day');
       for (const [index, options] of ranges.entries()) {
@@ -170,11 +161,13 @@ test('dashboard ranges and device windows retain decoded arrays beyond the previ
         expect(cached.events).toBe(original[index].events);
         expect(cached.pricingSnapshots).toBe(original[index].pricingSnapshots);
       }
+      yield* store.getUsage(undefined, ranges[0]);
       yield* store.getUsage(undefined, {
         start: '2026-10-02T00:00:00.000Z',
         end: '2026-10-04T00:00:00.000Z',
       });
-      expect((yield* store.getUsage(undefined, ranges[0])).events).not.toBe(original[0].events);
+      expect((yield* store.getUsage(undefined, ranges[0])).events).toBe(original[0].events);
+      expect((yield* store.getUsage(undefined, ranges[1])).events).not.toBe(original[1].events);
       yield* store.syncUsage(device.id, registration.token, {
         device,
         events: [{ ...event, inputTokens: 300 }],

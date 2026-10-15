@@ -24,50 +24,60 @@ Session search indexing is deferred until search is used. Charts omit zero-value
 
 ### Dashboard requests and transfer sizes
 
-The cache-correction comparison uses the same 1,001,603-record SQLite snapshot, pricing state, calendar instant (`2026-10-05T05:00:00.000Z`), Los Angeles timezone, and empty local collector. Before is PR commit `6e2d889`; after is its cache correction. Both run only on the isolated Enceladus preview on port 5182. Timings include HTTP, server work, schema encoding, serialization, body reading, and JSON parsing on the same host, with identity encoding. These are individual samples, not cold-disk or production latency guarantees.
+The cache-correction comparison uses the same 1,001,603-record SQLite snapshot, pricing state, calendar instant (`2026-10-05T05:00:00.000Z`), Los Angeles timezone, and empty local collector. Baseline is PR commit `6e2d889`; the rejected eight-history design is `ee517ed`; final caches small outputs instead. Each runs in a fresh process on the isolated Enceladus preview on port 5182. Timings include HTTP, server work, schema encoding, serialization, body reading, and JSON parsing on the same host, with identity encoding. These are individual samples, not cold-disk or production latency guarantees.
 
 The sequence reads 7d/30d/6m twice each, waits 61 seconds, reads them again, then cycles 7d → 30d → 6m → today → all → 7d → 30d → 6m. The accounting clock is fixed for exact comparison; cache expiration and the 61-second wait use advancing real clocks. An empty-local collection counter verifies the five-second validation cache expires during the wait.
 
-| Range | Scenario        |     Before |       After |
-| ----- | --------------- | ---------: | ----------: |
-| 7d    | first           |   506.2 ms |    375.5 ms |
-| 7d    | immediate       |    10.1 ms |     12.9 ms |
-| 7d    | after-61s       |   409.0 ms |     14.9 ms |
-| 7d    | range-roundtrip |   327.9 ms |     10.0 ms |
-| 30d   | first           | 4,748.2 ms |  3,691.2 ms |
-| 30d   | immediate       |    25.0 ms |     26.8 ms |
-| 30d   | after-61s       | 4,658.7 ms |     22.1 ms |
-| 30d   | range-roundtrip | 4,199.7 ms |     21.5 ms |
-| 6m    | first           | 8,629.6 ms | 10,615.1 ms |
-| 6m    | immediate       |    86.6 ms |     85.0 ms |
-| 6m    | after-61s       | 8,319.8 ms |     86.3 ms |
-| 6m    | range-roundtrip | 7,118.2 ms |    103.8 ms |
+| Range | Scenario        | Baseline `6e2d889` | Rejected `ee517ed` | Final output cache |
+| ----- | --------------- | -----------------: | -----------------: | -----------------: |
+| 7d    | first           |           377.6 ms |           444.4 ms |           367.6 ms |
+| 7d    | immediate       |            12.7 ms |            13.2 ms |            12.7 ms |
+| 7d    | after-61s       |           310.6 ms |            15.3 ms |            12.9 ms |
+| 7d    | range-roundtrip |           352.1 ms |            10.5 ms |            10.3 ms |
+| 30d   | first           |         3,662.0 ms |         4,025.0 ms |         3,721.5 ms |
+| 30d   | immediate       |            83.6 ms |            27.6 ms |            23.4 ms |
+| 30d   | after-61s       |         3,638.6 ms |            24.1 ms |            23.0 ms |
+| 30d   | range-roundtrip |         4,029.2 ms |            20.8 ms |            23.0 ms |
+| 6m    | first           |         7,182.8 ms |         7,897.3 ms |         6,997.4 ms |
+| 6m    | immediate       |            84.2 ms |           134.0 ms |           414.2 ms |
+| 6m    | after-61s       |         8,443.2 ms |            88.6 ms |            83.4 ms |
+| 6m    | range-roundtrip |         8,648.0 ms |            99.1 ms |            98.1 ms |
 
-First wide reads remain expensive: retaining caches avoids repeating that work; it does not eliminate initial SQL decoding, pricing, or aggregation. HTTP serialization and parsing still scale with response size. All 17 full payload SHA-256 and totals/accounting SHA-256 pairs in the before/after sequence match exactly. An earlier six-month after-idle sample took 1.03 seconds despite cache reuse; retaining prepared results does not guarantee a sub-100-ms HTTP round trip.
+First wide reads remain expensive: retaining final outputs avoids repeating that work; it does not eliminate initial SQL decoding, pricing, or aggregation. HTTP serialization and parsing still scale with response size. All 33 full payload SHA-256 and totals/accounting SHA-256 pairs (17 idle/range reads plus 16 eight-key reads) match across all three versions. The advancing clock covers 61,138 ms in the final pause, and the empty-local collection counter advances from two to three. The 414-ms immediate six-month sample shows that cache reuse does not guarantee a sub-100-ms HTTP round trip.
 
-Raw snapshots, prepared pricing snapshots, and decoded store windows each retain eight successful keys until their inputs change; failed entries expire immediately. Eight covers all six supported ranges (today/7d/30d/90d/6m/all), one alternate timezone, and one selected-device window. Additional combinations can evict older entries. Old data generations are cleared, and pricing-only changes keep raw event windows. Aggregate caches retain eight filter variants per live event array through WeakMap ownership.
+Final dashboard responses and unresolved-pricing results each retain eight successful query keys. Entries contain only the response and scalar time-boundary proofs; they hold no event histories, pricing state, Effects, or closures. Eight covers all six supported ranges (today/7d/30d/90d/6m/all), one alternate timezone, and one selected-device window. Additional combinations can evict older results. Raw snapshots, prepared pricing snapshots, and decoded store windows each retain at most two keys; failed entries expire immediately. Final results remain reusable after those histories are evicted. Old data generations clear dependent caches, and pricing-only changes preserve the two raw windows.
 
-Exact boundary-aware aggregation also checks current-time, current/previous-period event boundaries, calendar dates, query values, event-array identity, and pricing-policy identity. Query keys include resolved calendar windows, timezone, and selected devices. Sources, warnings, generation time, machine name, and pricing check/error metadata stay current.
+Exact boundary-aware aggregation also checks current-time, current/previous-period event boundaries, calendar dates, query values, event-array identity, and pricing-policy identity. Final query keys include every normalized filter (harness, model, provider, project, device), requested timezone, resolved calendar window, event revision, metadata revision, local generation, and pricing revision. Model-filter order is echoed from the request even when equivalent filters share a result. Sources, warnings, generation time, machine name, and pricing check/error metadata stay current.
 
-With all eight keys resident, the final fixture process used 7,439,511,552 B RSS (6.93 GiB), or 7,128,338,432 B (6.64 GiB) after an explicit full GC; a prior fresh run measured 6.10 GiB after GC. These are process totals, including SQLite, decoded records, pricing, aggregates, and allocator overhead, not isolated cache allocations. Retaining wide overlapping windows has a substantial memory cost. There is no claim of a memory reduction, and the eight-key bound is not a byte limit. All eight keys were revisited in order with matching payload hashes; controlled tests also verify retained array/session identity and ninth-key eviction.
+The original eight-history design retained overlapping decoded ranges and was rejected for its memory cost. In the complete idle/range/eight-key sequence above, immediate post-GC RSS was 3.30 GiB for baseline, 6.16 GiB for the rejected design, and 4.68 GiB for final. RSS continued falling after `Bun.gc(true)` returned, so these immediate samples do not describe settled residency.
+
+A separate controlled memory comparison starts each version in a fresh process, opens the same eight keys twice in order, forces one full GC, and waits 30 seconds without dashboard requests before sampling. The keys are today/7d/30d/90d/6m/all in Los Angeles, 30d in UTC, and 30d for the same first populated device in Los Angeles. All 16 full-payload and accounting hash pairs match across versions. The fixture's individual serialized dashboard results range from 128,462 to 4,530,489 bytes.
+
+| Version                                  | Immediate post-GC RSS |       RSS after 30 seconds | Live heap after 30 seconds |
+| ---------------------------------------- | --------------------: | -------------------------: | -------------------------: |
+| Baseline `6e2d889`, two raw windows      |              3.17 GiB | 1.44 GiB (1,546,227,712 B) |              682,665,555 B |
+| Rejected `ee517ed`, eight raw windows    |              6.66 GiB | 5.43 GiB (5,835,218,944 B) |            4,201,627,200 B |
+| Final, eight outputs and two raw windows |              3.68 GiB | 1.71 GiB (1,832,017,920 B) |              694,496,471 B |
+
+Final settled RSS is 0.27 GiB above baseline, rather than the rejected design's 3.99 GiB increase; live heap differs by 11,830,916 B. These are process totals, including SQLite, decoded records, pricing, responses, and allocator overhead, not isolated cache allocations or peak-memory limits. Wide misses still allocate large temporary histories. The eight-output bound is by count, not bytes. Controlled tests verify result/session identity after raw eviction, all eight query revisits, and ninth-key eviction.
 
 ### Cache freshness and write audit
 
 Successful entries have no timer expiry because their data revisions and calculation inputs form the key. These write paths publish revisions after a successful durable commit; cancellation before commit rolls back, while cancellation after commit cannot suppress revision publication.
 
-| Write path                                                             | Cache effect                                                                                                                                                                                     |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Sync inserts, corrections, or deletions                                | Event revision changes; decoded windows, raw snapshots, prepared prices, and aggregates refresh on the next read.                                                                                |
-| Import adds missing records                                            | Same event invalidation; duplicate imports and rejected/rolled-back writes preserve revisions.                                                                                                   |
-| Registration or re-registration                                        | New device/name/platform changes publish metadata revision; token rotation alone preserves usage caches.                                                                                         |
-| Sync changes source diagnostics, platform, or pricing marker           | Metadata revision changes; raw/prepared results refresh while unchanged decoded event arrays remain reusable.                                                                                    |
-| Heartbeat, identical upload, no-op sync/import                         | Last-seen/status reads are uncached; unchanged usage revisions and aggregate identity survive.                                                                                                   |
-| Rename                                                                 | Changed labels publish metadata revision immediately; identical labels preserve it.                                                                                                              |
-| Revoke/restore                                                         | Only device credentials/status change. Uncached GetDevices/auth reads update immediately; dashboard history, sources, dimensions, and filter IDs are unchanged, so their revisions remain valid. |
-| Set/delete pricing rule, catalog refresh, external pricing-file change | Policy revision invalidates prepared prices/aggregates; raw usage is retained. Checked-at/error-only changes update returned metadata without rebuilding unchanged rates.                        |
-| Local log/T3/repository input change                                   | Local generation changes after collection if output changes; raw/prepared results refresh. Equal output retains aggregate identity while the latest dependency watch set is retained separately. |
+| Write path                                                             | Cache effect                                                                                                                                                                                           |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Sync inserts, corrections, or deletions                                | Event revision changes; decoded windows, raw snapshots, prepared prices, final responses, and aggregates refresh on the next read.                                                                     |
+| Import adds missing records                                            | Same event invalidation; duplicate imports and rejected/rolled-back writes preserve revisions.                                                                                                         |
+| Registration or re-registration                                        | New device/name/platform changes publish metadata revision; token rotation alone preserves usage caches.                                                                                               |
+| Sync changes source diagnostics, platform, or pricing marker           | Metadata revision changes; raw/prepared/final results refresh while unchanged decoded event arrays remain reusable.                                                                                    |
+| Heartbeat, identical upload, no-op sync/import                         | Last-seen/status reads are uncached; unchanged usage revisions and aggregate identity survive.                                                                                                         |
+| Rename                                                                 | Changed labels publish metadata revision immediately; identical labels preserve it.                                                                                                                    |
+| Revoke/restore                                                         | Only device credentials/status change. Uncached GetDevices/auth reads update immediately; dashboard history, sources, dimensions, and filter IDs are unchanged, so their revisions remain valid.       |
+| Set/delete pricing rule, catalog refresh, external pricing-file change | Policy revision invalidates prepared prices/final responses/aggregates; raw usage is retained. Checked-at/error-only changes update returned metadata without rebuilding unchanged rates.              |
+| Local log/T3/repository input change                                   | Local generation changes after collection if output changes; raw/prepared/final results refresh. Equal output retains aggregate identity while the latest dependency watch set is retained separately. |
 
-Self-hosted local sources are checked at most once every five seconds using directory entries and file device/inode/size/mtime/ctime metadata. Checks do not parse logs, query T3 SQLite, serialize events, or hash event history. Configured root changes, additions/removals, same-size rewrites, Grok metadata, T3 database/WAL/environment identity, and safely discovered Git metadata are tracked. Direct edits to the usage database outside application write paths are not supported invalidation signals.
+Self-hosted local sources are checked at most once every five seconds using directory entries and file device/inode/size/mtime/ctime metadata. Checks do not parse logs, query T3 SQLite, serialize events, or hash event history. Configured root changes, additions/removals, same-size rewrites, Grok metadata, T3 database/WAL/environment identity, and safely discovered Git metadata are tracked. Linked Git metadata tracks both the symlink and its safely resolved target, preserving macOS protected-folder guards. Direct edits to the usage database outside application write paths are not supported invalidation signals.
 
 Local log visibility can lag by up to the remaining five-second validation interval. Once a check detects a change, that same request awaits collection; there is no stale-while-revalidate response. Collection is shared across concurrent readers. Initial dependency discovery or files changing during collection can require a second collection in the same request. Continued change or transient metadata failure forces another validation on the next read. Full result hashing happens only after collection following a changed signal, in bounded chunks, to preserve identity for equal output. Optional repository discovery retains its existing three-second lookup/five-second total budget and protected-folder policy; intentionally skipped grouping uses recorded paths until another observed input changes.
 

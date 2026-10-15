@@ -3,13 +3,21 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Headers as EffectHeaders } from 'effect/http/Headers';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { RpcSerialization, RpcServer } from 'effect/rpc';
-import { InvalidRequest, UsageFailure, UsageRpc } from '../../shared/rpc';
+import { InvalidRequest, UsageFailure, UsageRpc, type PricingSettings } from '../../shared/rpc';
 import type { PricingPolicy } from '../../shared/pricing';
 import { UsageQuery, type CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
 import { tokenTotal } from '../usage/parsers';
 import { repriceEvent, resolveDisplayModel } from '../usage/pricing';
 import { makePricingRuntime, pricingRefreshDue, sqlPricingStorage, type PricingState } from '../usage/pricing-store';
-import { buildDashboard, eventMillis, matchesUsage, provider, usageTimeframe } from '../usage/dashboard';
+import {
+  buildDashboardSnapshot,
+  eventMillis,
+  isDashboardCurrent,
+  matchesUsage,
+  provider,
+  usageTimeframe,
+  type DashboardValidity,
+} from '../usage/dashboard';
 import { ServerConfiguration, UsageStore } from './store';
 
 // The hub serves the dashboard RPC and sync uploads on any host. A Bun hub also
@@ -135,6 +143,23 @@ const uniqueEvents = (events: readonly UsageEvent[], localDeviceId: string, quer
 
 const dashboardProofHeader = 'x-token-tracker-pricing-access';
 const pricingPolicyProofHeader = 'x-token-tracker-pricing-policy-access';
+const normalizedQuery = (query: UsageQuery): UsageQuery => ({
+  range: query.range ?? '30d',
+  timezone: query.timezone ?? 'UTC',
+  ...Object.fromEntries(
+    (['harnesses', 'models', 'providers', 'projects', 'devices'] as const).flatMap((field) =>
+      query[field] === undefined ? [] : [[field, [...new Set(query[field])].sort()]],
+    ),
+  ),
+});
+const retainResult = <A>(cache: Map<string, A>, key: string, value: A) => {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > 8) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
+};
 // Same wire protocol and URL for existing uploads, but a separate group keeps
 // anonymous requests from invoking dashboard reads, including batched reads,
 // and device administration.
@@ -268,7 +293,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       // A pricing edit invalidates calculated prices, not the underlying usage.
       // Reuse validated records so a save never rereads unchanged log history.
       const rawSnapshots = yield* Cache.makeWith(readRawSnapshot, {
-        capacity: 8,
+        capacity: 2,
         timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0),
         requireServicesAt: 'lookup',
       });
@@ -342,16 +367,21 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           },
         };
       });
-      // Retain dashboard ranges and nearby device/timezone variants until their data changes. Expiring
-      // prepared history on a timer made ordinary revisits expensive again.
+      // Full event histories are the expensive layer to retain. Final response
+      // caches below keep eight revisitable queries without holding those arrays.
       const snapshots = yield* Cache.makeWith(readSnapshot, {
-        capacity: 8,
+        capacity: 2,
         timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0),
         requireServicesAt: 'lookup',
       });
+      const dashboards = new Map<string, ReturnType<typeof buildDashboardSnapshot>>();
+      const pricingResults = new Map<
+        string,
+        { unresolved: PricingSettings['unresolved']; validity: DashboardValidity }
+      >();
       let snapshotEpoch = '';
       let snapshotPricing = '';
-      const readUsage = Effect.fn('rpc.readUsage')(function* (query: UsageQuery) {
+      const readQuery = Effect.fn('rpc.readQuery')(function* (query: UsageQuery) {
         const { current, generation } = yield* localSnapshot;
         const state = yield* pricing.load;
         const revision = store.getRevision();
@@ -361,78 +391,103 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           snapshotEpoch = epoch;
           yield* Cache.invalidateAll(rawSnapshots);
           yield* Cache.invalidateAll(snapshots);
-        } else if (snapshotPricing !== state.policy.revision) yield* Cache.invalidateAll(snapshots);
+          dashboards.clear();
+          pricingResults.clear();
+        } else if (snapshotPricing !== state.policy.revision) {
+          yield* Cache.invalidateAll(snapshots);
+          dashboards.clear();
+          pricingResults.clear();
+        }
         snapshotPricing = state.policy.revision;
         const now = new Date(yield* Clock.currentTimeMillis);
         const timeframe = usageTimeframe(query, now);
-        const result = yield* Cache.get(
-          snapshots,
-          JSON.stringify({
-            query: {
-              range: query.range ?? '30d',
-              timezone: query.timezone ?? 'UTC',
-              ...(query.devices ? { devices: [...query.devices].sort() } : {}),
-            },
-            revision,
-            metadataRevision,
-            localGeneration: generation,
-            ...(timeframe.range !== 'all'
-              ? {
-                  start: timeframe.previousStart.startOfDay().toInstant().toString({ fractionalSecondDigits: 3 }),
-                  end: timeframe.end.toInstant().toString({ fractionalSecondDigits: 3 }),
-                }
-              : {}),
-            pricingRevision: state.policy.revision,
-          }),
-        ).pipe(Effect.provideService(SnapshotInput, { current, state }));
+        const effective = effectiveQuery(query, state.policy);
+        const normalized = normalizedQuery(effective);
+        const readKey = {
+          query: {
+            range: normalized.range,
+            timezone: normalized.timezone,
+            ...(normalized.devices ? { devices: normalized.devices } : {}),
+          },
+          revision,
+          metadataRevision,
+          localGeneration: generation,
+          ...(timeframe.range !== 'all'
+            ? {
+                start: timeframe.previousStart.startOfDay().toInstant().toString({ fractionalSecondDigits: 3 }),
+                end: timeframe.end.toInstant().toString({ fractionalSecondDigits: 3 }),
+              }
+            : {}),
+          pricingRevision: state.policy.revision,
+        };
         return {
-          ...result,
-          // Checked-at/error metadata can change without changing rates. Reuse
-          // immutable policy identity for aggregates, while returning current info.
-          state: { policy: result.state.policy, info: state.info },
-          query: effectiveQuery(query, result.state.policy),
+          current,
+          state,
+          readKey: JSON.stringify(readKey),
+          resultKey: JSON.stringify({ ...readKey, query: normalized }),
+          query: effective,
+          normalized,
           now,
+          timeframe,
         };
       });
       return {
         GetUsage: Effect.fn('rpc.GetUsage')(
           function* (query) {
-            const result = yield* readUsage(query);
-            return yield* Effect.try({
-              try: () => {
-                const dashboard = buildDashboard(
-                  result.data,
-                  result.query,
-                  result.now,
-                  local.device?.name ?? 'All devices',
-                  result.state.policy,
-                );
-                const available = result.dimensions.filter(
-                  (dimension) => !result.query.devices || result.query.devices.includes(dimension.deviceId),
-                );
-                const models = [
-                  ...new Set(available.map((dimension) => resolveDisplayModel(dimension.model, result.state.policy))),
-                ].sort();
-                return {
-                  ...dashboard,
-                  pricing: {
-                    ...dashboard.pricing,
-                    method:
-                      'API-equivalent cost from complete native Grok accounting, cached model prices, and saved pricing rules. Subscription charges may differ; unavailable costs are excluded.',
+            const input = yield* readQuery(query);
+            let cached = dashboards.get(input.resultKey);
+            if (!cached || !isDashboardCurrent(cached, input.timeframe, input.now)) {
+              const result = yield* Cache.get(snapshots, input.readKey).pipe(
+                Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
+              );
+              // A concurrent reader can finish the same small response while
+              // this request waits for shared event preparation.
+              cached = dashboards.get(input.resultKey);
+              if (!cached || !isDashboardCurrent(cached, input.timeframe, input.now))
+                cached = yield* Effect.try({
+                  try: () => {
+                    const snapshot = buildDashboardSnapshot(
+                      result.data,
+                      input.normalized,
+                      input.now,
+                      local.device?.name ?? 'All devices',
+                      result.state.policy,
+                    );
+                    const available = result.dimensions.filter(
+                      (dimension) => !input.query.devices || input.query.devices.includes(dimension.deviceId),
+                    );
+                    const models = [
+                      ...new Set(
+                        available.map((dimension) => resolveDisplayModel(dimension.model, result.state.policy)),
+                      ),
+                    ].sort();
+                    return {
+                      ...snapshot,
+                      response: {
+                        ...snapshot.response,
+                        filters: {
+                          harnesses: [...new Set(available.map((dimension) => dimension.harness))].sort(),
+                          models,
+                          providers: [...new Set(models.map(provider))].sort(),
+                          projects: [...new Set(available.map((dimension) => dimension.project))].sort(),
+                          modelProviders: models.map((model) => ({ model, provider: provider(model) })),
+                          devices: [...new Set(result.dimensions.map((dimension) => dimension.deviceId))].sort(),
+                        },
+                      },
+                    };
                   },
-                  filters: {
-                    harnesses: [...new Set(available.map((dimension) => dimension.harness))].sort(),
-                    models,
-                    providers: [...new Set(models.map(provider))].sort(),
-                    projects: [...new Set(available.map((dimension) => dimension.project))].sort(),
-                    modelProviders: models.map((model) => ({ model, provider: provider(model) })),
-                    ...(result.query.models ? { selectedModels: result.query.models } : {}),
-                    devices: [...new Set(result.dimensions.map((dimension) => dimension.deviceId))].sort(),
-                  },
-                };
+                  catch: () => new UsageFailure({ message: 'The selected usage timeframe or timezone is invalid.' }),
+                });
+            }
+            retainResult(dashboards, input.resultKey, cached);
+            return {
+              ...cached.response,
+              generatedAt: input.now.toISOString(),
+              filters: {
+                ...cached.response.filters,
+                ...(input.query.models ? { selectedModels: input.query.models } : {}),
               },
-              catch: () => new UsageFailure({ message: 'The selected usage timeframe or timezone is invalid.' }),
-            });
+            };
           },
           Effect.mapError((error) =>
             error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
@@ -440,39 +495,67 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         ),
         GetPricing: Effect.fn('rpc.GetPricing')(
           function* (query) {
-            const result = yield* readUsage(query);
-            const groups = new Map<string, { tokens: number; legacy: boolean }>();
-            const timeframe = usageTimeframe(result.query, result.now);
-            const start = timeframe.start.epochMilliseconds;
-            const end = Math.min(timeframe.end.epochMilliseconds, result.now.getTime() + 1);
-            for (const event of result.data.events) {
-              if (event.costKnown) continue;
-              const millis = eventMillis(event);
-              if ((timeframe.range !== 'all' && millis < start) || millis >= end || !matchesUsage(result.query, event))
-                continue;
-              const raw = event.rawModel ?? event.model;
-              const group = groups.get(raw) ?? { tokens: 0, legacy: false };
-              group.tokens += tokenTotal(event);
-              group.legacy ||=
-                event.serviceTier === undefined ||
-                (event.cacheWriteTokens > 0 && event.cacheWrite1hTokens === undefined);
-              groups.set(raw, group);
+            const input = yield* readQuery(query);
+            let cached = pricingResults.get(input.resultKey);
+            if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
+              const result = yield* Cache.get(snapshots, input.readKey).pipe(
+                Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
+              );
+              cached = pricingResults.get(input.resultKey);
+              if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
+                const groups = new Map<string, { tokens: number; legacy: boolean }>();
+                const timeframe = input.timeframe;
+                const start = timeframe.start.epochMilliseconds;
+                const now = input.now.getTime();
+                const end = Math.min(timeframe.end.epochMilliseconds, now + 1);
+                const validity: DashboardValidity = {
+                  todayMillis: timeframe.today.epochMilliseconds,
+                  calendarStart: timeframe.range === 'all' ? undefined : timeframe.start.startOfDay().epochMilliseconds,
+                  nowBefore: -Infinity,
+                  nowAfter: Infinity,
+                  startBefore: -Infinity,
+                  startAfter: Infinity,
+                  previousBefore: -Infinity,
+                  previousAfter: Infinity,
+                };
+                for (const event of result.data.events) {
+                  if (event.costKnown || !matchesUsage(input.normalized, event)) continue;
+                  const millis = eventMillis(event);
+                  if (!Number.isFinite(millis)) continue;
+                  if (millis <= now) validity.nowBefore = Math.max(validity.nowBefore, millis);
+                  else validity.nowAfter = Math.min(validity.nowAfter, millis);
+                  if (timeframe.range !== 'all') {
+                    if (millis < start) validity.startBefore = Math.max(validity.startBefore, millis);
+                    else validity.startAfter = Math.min(validity.startAfter, millis);
+                  }
+                  if ((timeframe.range !== 'all' && millis < start) || millis >= end) continue;
+                  const raw = event.rawModel ?? event.model;
+                  const group = groups.get(raw) ?? { tokens: 0, legacy: false };
+                  group.tokens += tokenTotal(event);
+                  group.legacy ||=
+                    event.serviceTier === undefined ||
+                    (event.cacheWriteTokens > 0 && event.cacheWrite1hTokens === undefined);
+                  groups.set(raw, group);
+                }
+                const unresolved = [...groups]
+                  .flatMap(([model, { tokens, legacy }]) => {
+                    if (!tokens) return [];
+                    return [
+                      {
+                        model,
+                        tokens,
+                        reason: legacy
+                          ? 'This device needs to sync with the updated collector before all rates can be applied.'
+                          : 'Choose an existing model or supply the missing input, output, cache, or service-tier rates.',
+                      },
+                    ];
+                  })
+                  .sort((left, right) => right.tokens - left.tokens || left.model.localeCompare(right.model));
+                cached = { unresolved, validity };
+              }
             }
-            const unresolved = [...groups]
-              .flatMap(([model, { tokens, legacy }]) => {
-                if (!tokens) return [];
-                return [
-                  {
-                    model,
-                    tokens,
-                    reason: legacy
-                      ? 'This device needs to sync with the updated collector before all rates can be applied.'
-                      : 'Choose an existing model or supply the missing input, output, cache, or service-tier rates.',
-                  },
-                ];
-              })
-              .sort((left, right) => right.tokens - left.tokens || left.model.localeCompare(right.model));
-            return { info: result.state.info, unresolved, secretRequired: !options.trustBrowser };
+            retainResult(pricingResults, input.resultKey, cached);
+            return { info: input.state.info, unresolved: cached.unresolved, secretRequired: !options.trustBrowser };
           },
           Effect.mapError((error) =>
             error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),

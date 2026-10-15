@@ -442,7 +442,21 @@ const dashboardAggregates = new WeakMap<
     aggregate: ReturnType<typeof aggregateDashboard>;
   }[]
 >();
-export const buildDashboard = (
+export type DashboardValidity = Omit<ReturnType<typeof aggregateDashboard>, 'response'>;
+export const isDashboardCurrent = (proof: DashboardValidity, timeframe: ReturnType<typeof usageTimeframe>, now: Date) =>
+  proof.todayMillis === timeframe.today.epochMilliseconds &&
+  now.getTime() >= proof.nowBefore &&
+  now.getTime() < proof.nowAfter &&
+  (timeframe.range === 'all' ||
+    (proof.calendarStart === timeframe.start.startOfDay().epochMilliseconds &&
+      timeframe.start.epochMilliseconds > proof.startBefore &&
+      timeframe.start.epochMilliseconds <= proof.startAfter &&
+      timeframe.previousStart.epochMilliseconds > proof.previousBefore &&
+      timeframe.previousStart.epochMilliseconds <= proof.previousAfter));
+
+// The reusable result contains only the response and scalar boundary proof.
+// It can outlive prepared event arrays without retaining their source history.
+export const buildDashboardSnapshot = (
   data: UsageResult,
   query: UsageQuery = {},
   now = new Date(),
@@ -451,37 +465,27 @@ export const buildDashboard = (
 ) => {
   const timeframe = usageTimeframe(query, now);
   const queryKey = JSON.stringify(query);
-  const nowMillis = now.getTime();
-  const startMillis = timeframe.start.epochMilliseconds;
-  const previousMillis = timeframe.previousStart.epochMilliseconds;
   const cached = dashboardAggregates.get(data.events) ?? [];
   const match = cached.find(
     ({ query: key, policy, aggregate }) =>
-      key === queryKey &&
-      policy === pricingPolicy &&
-      aggregate.todayMillis === timeframe.today.epochMilliseconds &&
-      nowMillis >= aggregate.nowBefore &&
-      nowMillis < aggregate.nowAfter &&
-      (timeframe.range === 'all' ||
-        (aggregate.calendarStart === timeframe.start.startOfDay().epochMilliseconds &&
-          startMillis > aggregate.startBefore &&
-          startMillis <= aggregate.startAfter &&
-          previousMillis > aggregate.previousBefore &&
-          previousMillis <= aggregate.previousAfter)),
+      key === queryKey && policy === pricingPolicy && isDashboardCurrent(aggregate, timeframe, now),
   );
   if (match) {
     dashboardAggregates.set(data.events, [match, ...cached.filter((entry) => entry !== match)]);
     const response = match.aggregate.response;
     return {
-      ...response,
-      machine,
-      generatedAt: now.toISOString(),
-      sources: data.sources,
-      warnings:
-        timeframe.zone === timeframe.requestedZone
-          ? data.warnings
-          : [...data.warnings, `Timezone ${timeframe.requestedZone} is unavailable; displaying UTC.`],
-      pricing: { ...response.pricing, updatedAt: data.pricingUpdatedAt },
+      ...match.aggregate,
+      response: {
+        ...response,
+        machine,
+        generatedAt: now.toISOString(),
+        sources: data.sources,
+        warnings:
+          timeframe.zone === timeframe.requestedZone
+            ? data.warnings
+            : [...data.warnings, `Timezone ${timeframe.requestedZone} is unavailable; displaying UTC.`],
+        pricing: { ...response.pricing, updatedAt: data.pricingUpdatedAt },
+      },
     };
   }
   const aggregate = aggregateDashboard(data, query, now, machine, pricingPolicy, timeframe);
@@ -489,5 +493,13 @@ export const buildDashboard = (
     { query: queryKey, policy: pricingPolicy, aggregate },
     ...cached.filter((entry) => entry.query !== queryKey || entry.policy !== pricingPolicy).slice(0, 7),
   ]);
-  return aggregate.response;
+  return aggregate;
 };
+
+export const buildDashboard = (
+  data: UsageResult,
+  query: UsageQuery = {},
+  now = new Date(),
+  machine = 'This machine',
+  pricingPolicy: PricingPolicy = bundledPolicy,
+) => buildDashboardSnapshot(data, query, now, machine, pricingPolicy).response;

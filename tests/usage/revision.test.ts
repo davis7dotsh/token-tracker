@@ -4,6 +4,7 @@ import { Effect, FileSystem } from 'effect';
 import {
   appendFile,
   chmod,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -350,4 +351,56 @@ test('optional T3 observation errors are retryable without requiring a permissio
   await rm(directory);
   await mkdir(directory);
   expect(await revision(options)).toBe(await revision(options));
+});
+
+test('linked Git metadata invalidates when the external target changes without replacing the symlink', async () => {
+  const home = await temporary();
+  const project = join(home, 'project');
+  const target = join(home, 'shared/git-config');
+  const link = join(project, '.git/config');
+  await write(target, '[remote "origin"]\n url = git@github.com:owner/first.git\n');
+  await mkdir(dirname(link), { recursive: true });
+  await symlink(target, link);
+  const log = await readFile(join(import.meta.dir, 'testdata/claude.jsonl'), 'utf8');
+  await write(
+    join(home, '.claude/projects/one/events.jsonl'),
+    log
+      .split('\n')
+      .map((line) => (line ? JSON.stringify({ ...JSON.parse(line), cwd: project }) : line))
+      .join('\n'),
+  );
+  const options = optionsFor(home);
+  const usage = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+  expect(usage.events[0].repository).toBe('github.com/owner/first');
+  const beforeLink = await lstat(link, { bigint: true });
+  const initial = await revision(options, usage);
+  await writeFile(target, '[remote "origin"]\n url = git@github.com:owner/other.git\n');
+  const afterLink = await lstat(link, { bigint: true });
+  expect([afterLink.ino, afterLink.size, afterLink.mtimeNs, afterLink.ctimeNs]).toEqual([
+    beforeLink.ino,
+    beforeLink.size,
+    beforeLink.mtimeNs,
+    beforeLink.ctimeNs,
+  ]);
+  expect(await revision(options, usage)).not.toBe(initial);
+  const updated = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+  expect(updated.events[0].repository).toBe('github.com/owner/other');
+});
+
+test('linked Git metadata never follows a final symlink into Darwin protected directories', async () => {
+  const home = await temporary();
+  const target = join(home, 'Documents/private-config');
+  const link = join(home, 'Developer/project/.git/config');
+  await write(target, '[remote "origin"]\n url = git@github.com:owner/private.git\n');
+  await mkdir(dirname(link), { recursive: true });
+  await symlink(target, link);
+  const usage = emptyUsage();
+  rememberRepositoryDependencies(usage, new Set([link]));
+  const guardedRevision = () =>
+    Effect.runPromise(
+      usageRevision(optionsFor(home), { platform: 'darwin', home })(usage).pipe(Effect.provide(BunServices.layer)),
+    );
+  const initial = await guardedRevision();
+  await writeFile(target, '[remote "origin"]\n url = git@github.com:owner/changed.git\n');
+  expect(await guardedRevision()).toBe(initial);
 });
