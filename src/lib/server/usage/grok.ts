@@ -228,6 +228,15 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
   const path = yield* Path.Path;
   const cache = cacheDirectory && (yield* prepareParsedCache(cacheDirectory)) ? cacheDirectory : undefined;
   const warnings: string[] = [];
+  let incomplete = false;
+  const retryRead = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          incomplete = true;
+        }),
+      ),
+    );
   const sessions: Session[] = [];
   const parents = new Map<string, string>();
   const problems = new Map<
@@ -235,14 +244,16 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
     { malformed: number; unreadable: number; directories: number; orphans: number }
   >();
   const readBounded = Effect.fn('usage.grok.readBounded')(function* (file: string, maximumBytes: number) {
-    const info = yield* fileSignature(file);
+    const info = yield* retryRead(fileSignature(file));
     if (info.size > BigInt(maximumBytes))
       return yield* Effect.fail(new CollectionError({ message: 'Grok metadata exceeds the supported size.' }));
     const decoder = new TextDecoder();
     const fragments: string[] = [];
-    yield* fs
-      .stream(file, { bytesToRead: info.size })
-      .pipe(Stream.runForEach((chunk) => Effect.sync(() => fragments.push(decoder.decode(chunk, { stream: true })))));
+    yield* retryRead(
+      fs
+        .stream(file, { bytesToRead: info.size })
+        .pipe(Stream.runForEach((chunk) => Effect.sync(() => fragments.push(decoder.decode(chunk, { stream: true }))))),
+    );
     fragments.push(decoder.decode());
     return { contents: fragments.join(''), signature: info.signature };
   });
@@ -257,6 +268,7 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
   const regularFile = Effect.fn('usage.grok.regularFile')(function* (file: string) {
     if (Result.isSuccess(yield* Effect.result(fs.readLink(file)))) return false;
     const info = yield* Effect.result(fs.stat(file));
+    if (Result.isFailure(info) && info.failure.reason._tag !== 'NotFound') incomplete = true;
     return Result.isSuccess(info) && info.success.type === 'File';
   });
   const directories = Effect.fn('usage.grok.directories')(function* (
@@ -265,6 +277,7 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
   ) {
     const listed = yield* Effect.result(readUsageDirectory(directory));
     if (Result.isFailure(listed)) {
+      incomplete = true;
       problem.directories++;
       return [];
     }
@@ -284,6 +297,7 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
     const root = yield* Effect.result(fs.realPath(source.path));
     if (Result.isFailure(root)) {
       if (root.failure.reason._tag !== 'NotFound') {
+        incomplete = true;
         source.status = 'error';
         source.error = 'Grok usage directory could not be read.';
         warnings.push(`grok: ${source.error}`);
@@ -292,6 +306,7 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
     }
     const info = yield* Effect.result(fs.stat(root.success));
     if (Result.isFailure(info) || info.success.type !== 'Directory') {
+      if (Result.isFailure(info)) incomplete = true;
       source.status = 'error';
       source.error = 'Grok usage source is not a readable directory.';
       warnings.push(`grok: ${source.error}`);
@@ -378,7 +393,7 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
     let ledgerMalformed = 0;
     let parsedLedger = false;
     const parseFile = Effect.fn('usage.grok.parseFile')(function* (file: string, ledger: boolean) {
-      const info = yield* fileSignature(file);
+      const info = yield* retryRead(fileSignature(file));
       const signature = `grok-v1:${info.signature}:${session.signature}`;
       const destination = cache ? parsedCachePath(cache, 'grok', file) : undefined;
       if (destination) retainedCacheFiles?.add(path.basename(destination));
@@ -489,5 +504,10 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
       warnings.push(`grok: ${source.error}`);
     }
   }
-  return { files: sessions.flatMap((session) => (session.parsed ? [session.parsed] : [])), warnings };
+  return {
+    files: sessions.flatMap((session) => (session.parsed ? [session.parsed] : [])),
+    warnings,
+    incomplete:
+      incomplete || [...problems.values()].some((problem) => problem.unreadable > 0 || problem.directories > 0),
+  };
 });

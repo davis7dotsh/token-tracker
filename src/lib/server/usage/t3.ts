@@ -3,7 +3,7 @@ import type { UsageEvent } from '../../shared/domain';
 import { queryT3Databases, type T3Metadata } from './t3-database';
 import { runT3DatabaseProcess } from './t3-process';
 
-type T3Options = { home: string; dataDirectory?: string; url?: string };
+type T3Options = { home: string; dataDirectory?: string; url?: string; onFailure?: () => void };
 const text = (value: unknown, maximum = 1024) =>
   typeof value === 'string' && value.trim().length > 0 && value.length <= maximum ? value.trim() : undefined;
 export const t3MetadataKey = (event: Pick<UsageEvent, 'harness' | 'sessionId'>) =>
@@ -21,24 +21,37 @@ export const readT3Metadata = Effect.fn('usage.readT3Metadata')(
     const baseUrl = options.url ?? process.env.TOKEN_TRACKER_T3_URL ?? 'https://app.t3.codes';
     const identityPath = path.join(directory, 'environment-id');
     const identityInfo = yield* Effect.result(fs.stat(identityPath));
+    if (Result.isFailure(identityInfo) && identityInfo.failure.reason._tag !== 'NotFound') options.onFailure?.();
     const identity =
       Result.isSuccess(identityInfo) && identityInfo.success.type === 'File' && identityInfo.success.size <= 512n
         ? yield* Effect.result(fs.readFileString(identityPath))
         : undefined;
+    if (identity && Result.isFailure(identity)) options.onFailure?.();
     const environmentId = identity && Result.isSuccess(identity) ? text(identity.success, 512) : undefined;
     const filenames: string[] = [];
     for (const name of ['statev2.sqlite', 'state.sqlite']) {
       const filename = path.join(directory, name);
       const info = yield* Effect.result(fs.stat(filename));
+      if (Result.isFailure(info) && info.failure.reason._tag !== 'NotFound') options.onFailure?.();
       if (Result.isFailure(info) || info.success.type !== 'File' || info.success.size > 2_147_483_648n) continue;
       filenames.push(filename);
     }
     if (filenames.length === 0) return new Map<string, T3Metadata>();
-    return yield* runT3DatabaseProcess(queryT3Databases, { filenames, environmentId, baseUrl });
+    const metadata = yield* runT3DatabaseProcess(queryT3Databases, {
+      filenames,
+      environmentId,
+      baseUrl,
+      reportFailures: true,
+    });
+    if (metadata.delete('')) options.onFailure?.();
+    return metadata;
   },
-  (effect) =>
+  (effect, options) =>
     effect.pipe(
       Effect.timeout('1 second'),
-      Effect.catch(() => Effect.succeed(new Map<string, T3Metadata>())),
+      Effect.catch(() => {
+        options.onFailure?.();
+        return Effect.succeed(new Map<string, T3Metadata>());
+      }),
     ),
 );

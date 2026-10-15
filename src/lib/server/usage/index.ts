@@ -1,6 +1,5 @@
-import { homedir } from 'node:os';
 import { Effect, FileSystem, Path, Result, Stream } from 'effect';
-import { CollectionError, type SourceStatus, type UsageEvent, type UsageResult } from '../../shared/domain';
+import { CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
 import type { PricingPolicy } from '../../shared/pricing';
 import { deduplicate, claudeParser, codexParser, museParser, piParser, type ParsedFile } from './parsers';
 import {
@@ -17,18 +16,14 @@ import { makeRepositoryResolver } from './repository';
 import { collectGrokFiles } from './grok';
 import { readT3Metadata, t3MetadataKey } from './t3';
 import { readUsageDirectory } from './files';
+import { usageSourceRoots, type SourceRootOptions } from './source-roots';
+import { rememberRepositoryDependencies } from './revision-dependencies';
 
 export { buildDashboard, provider, validateTimezone } from './dashboard';
 export { canonicalRepository, resolveRepository } from './repository';
 export { tokenTotal } from './parsers';
 
-export type CollectionOptions = {
-  home?: string;
-  claudeDirs?: readonly string[];
-  codexDirs?: readonly string[];
-  piDirs?: readonly string[];
-  grokDirs?: readonly string[];
-  museDirs?: readonly string[];
+export type CollectionOptions = SourceRootOptions & {
   deviceId?: string;
   pricingPolicy?: PricingPolicy;
   t3DataDirectory?: string;
@@ -37,67 +32,17 @@ export type CollectionOptions = {
   // checks omit it and remain entirely read-only.
   cacheDirectory?: string;
 };
-type MutableSource = { -readonly [K in keyof SourceStatus]: SourceStatus[K] };
-
-const environmentDirs = (name: string) => {
-  const roots = process.env[name]
-    ?.split(',')
-    .map((value) => value.trim())
-    .filter(Boolean);
-  return roots?.length ? roots : undefined;
-};
-
 export const collectUsage = Effect.fn('usage.collect')(function* (options: CollectionOptions = {}) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const pricingPolicy =
     options.pricingPolicy ??
     (yield* loadPricing().pipe(Effect.mapError((error) => new CollectionError({ message: error.message })))).policy;
-  const home = yield* Effect.try({
-    try: () => path.resolve(options.home || homedir()),
-    catch: () => new CollectionError({ message: 'Could not locate the home directory.' }),
-  });
-  const expandPath = (root: string) =>
-    path.resolve(root === '~' ? home : root.startsWith('~/') ? path.join(home, root.slice(2)) : root);
-  let claudeDirs = options.claudeDirs ?? environmentDirs('CLAUDE_CONFIG_DIR');
-  if (!claudeDirs?.length && options.claudeDirs === undefined && !process.env.CLAUDE_CONFIG_DIR?.trim()) {
-    claudeDirs = [path.join(home, '.claude')];
-    const xdgRoot = path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'claude');
-    const xdg = yield* Effect.result(fs.stat(path.join(xdgRoot, 'projects')));
-    if (Result.isSuccess(xdg) && xdg.success.type === 'Directory') claudeDirs = [...claudeDirs, xdgRoot];
-  }
-  const codexDirs = options.codexDirs ?? environmentDirs('CODEX_HOME') ?? [path.join(home, '.codex')];
-  const piDirs = options.piDirs ?? environmentDirs('PI_CODING_AGENT_DIR') ?? [path.join(home, '.pi', 'agent')];
-  const grokDirs = options.grokDirs ?? environmentDirs('GROK_HOME') ?? [path.join(home, '.grok')];
-  // Muse keeps session logs under the XDG data directory on every platform.
-  const museDirs = options.museDirs ??
-    environmentDirs('MUSE_HOME') ?? [
-      path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'muse'),
-    ];
-  const sources: MutableSource[] = [];
-  const seen = new Set<string>();
-  const addSource = (harness: SourceStatus['harness'], root: string) => {
-    const expanded = expandPath(root);
-    const key = `${harness}:${expanded}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    sources.push({ harness, path: expanded, files: 0, events: 0, status: 'missing' });
+  const { home, sources } = yield* usageSourceRoots(options);
+  let incomplete = false;
+  const markIncomplete = () => {
+    incomplete = true;
   };
-  for (const root of claudeDirs ?? [])
-    addSource('claude', path.basename(root.replace(/\/$/, '')) === 'projects' ? root : path.join(root, 'projects'));
-  for (const root of codexDirs) {
-    if (['sessions', 'archived_sessions'].includes(path.basename(root.replace(/\/$/, '')))) addSource('codex', root);
-    else {
-      addSource('codex', path.join(root, 'sessions'));
-      addSource('codex', path.join(root, 'archived_sessions'));
-    }
-  }
-  for (const root of piDirs)
-    addSource('pi', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
-  for (const root of grokDirs)
-    addSource('grok', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
-  for (const root of museDirs)
-    addSource('muse', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
   const cacheDirectory =
     options.cacheDirectory && (yield* prepareParsedCache(options.cacheDirectory)) ? options.cacheDirectory : undefined;
   const warnings: string[] = [];
@@ -108,6 +53,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     const realRoot = yield* Effect.result(fs.realPath(source.path));
     if (Result.isFailure(realRoot)) {
       if (realRoot.failure.reason._tag !== 'NotFound') {
+        markIncomplete();
         source.status = 'error';
         source.error = 'Usage directory could not be read.';
         warnings.push(`${source.harness}: ${source.error}`);
@@ -116,6 +62,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     }
     const rootInfo = yield* Effect.result(fs.stat(realRoot.success));
     if (Result.isFailure(rootInfo) || rootInfo.success.type !== 'Directory') {
+      if (Result.isFailure(rootInfo)) markIncomplete();
       source.status = 'error';
       source.error = 'Usage source is not a readable directory.';
       warnings.push(`${source.harness}: ${source.error}`);
@@ -129,6 +76,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
       if (!directory) break;
       const listed = yield* Effect.result(readUsageDirectory(directory));
       if (Result.isFailure(listed)) {
+        markIncomplete();
         unreadableDirectories++;
         continue;
       }
@@ -147,6 +95,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     for (const file of paths) {
       const info = yield* Effect.result(fileSignature(file));
       if (Result.isFailure(info)) {
+        markIncomplete();
         unreadable++;
         continue;
       }
@@ -171,6 +120,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
             ),
         );
         if (Result.isFailure(contents)) {
+          markIncomplete();
           unreadable++;
           continue;
         }
@@ -199,6 +149,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   );
   files.push(...grok.files);
   warnings.push(...grok.warnings);
+  if (grok.incomplete) markIncomplete();
   if (cacheDirectory) yield* pruneParsedCache(cacheDirectory, retainedCacheFiles);
   const candidateIds = new Set<string>();
   for (const file of files)
@@ -215,14 +166,23 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     (id) => !retainedIds.has(id),
   );
   const repositories = new Map<string, string | null>();
-  const resolveRepository = makeRepositoryResolver();
+  const repositoryDependencies = new Set<string>();
+  const resolveRepository = makeRepositoryResolver({
+    onDependency: (file) => repositoryDependencies.add(file),
+    onFailure: markIncomplete,
+  });
   for (const entry of entries) {
     if (!repositories.has(entry.event.project))
       repositories.set(entry.event.project, yield* resolveRepository(entry.event.project));
   }
   // T3 titles and thread bindings can change without touching usage logs. Read
   // them after the parser cache on every collection so warm syncs refresh them.
-  const t3Metadata = yield* readT3Metadata({ home, dataDirectory: options.t3DataDirectory, url: options.t3Url });
+  const t3Metadata = yield* readT3Metadata({
+    home,
+    dataDirectory: options.t3DataDirectory,
+    url: options.t3Url,
+    onFailure: markIncomplete,
+  });
   const sessionRepositories = new Map<string, string>();
   const attemptedSessionRepositories = new Set<string>();
   for (const entry of entries) {
@@ -283,11 +243,13 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     warnings.push(
       `No reliable API price for: ${[...unknownModels].sort().join(', ')}. These tokens are included, but their costs are unavailable.`,
     );
-  return {
+  const usage = {
     events,
     sources,
     warnings,
     pricingUpdatedAt: `${pricingPolicy.catalog.updatedAt} (${pricingPolicy.revision})`,
     ...(retractedIds.length ? { retractedIds } : {}),
   } satisfies UsageResult;
+  rememberRepositoryDependencies(usage, repositoryDependencies, incomplete);
+  return usage;
 });

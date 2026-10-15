@@ -1,5 +1,5 @@
-import { Cache, Context, Effect, Exit, Layer, Schedule, Schema } from 'effect';
-import { randomBytes } from 'node:crypto';
+import { Cache, Clock, Context, Effect, Exit, Layer, Schedule, Schema } from 'effect';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Headers as EffectHeaders } from 'effect/http/Headers';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { RpcSerialization, RpcServer } from 'effect/rpc';
@@ -8,7 +8,7 @@ import type { PricingPolicy } from '../../shared/pricing';
 import { UsageQuery, type CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
 import { tokenTotal } from '../usage/parsers';
 import { repriceEvent, resolveDisplayModel } from '../usage/pricing';
-import { makePricingRuntime, pricingRefreshDue, sqlPricingStorage } from '../usage/pricing-store';
+import { makePricingRuntime, pricingRefreshDue, sqlPricingStorage, type PricingState } from '../usage/pricing-store';
 import { buildDashboard, eventMillis, matchesUsage, provider, usageTimeframe } from '../usage/dashboard';
 import { ServerConfiguration, UsageStore } from './store';
 
@@ -19,12 +19,78 @@ export class LocalUsage extends Context.Service<
   {
     readonly device?: { readonly id: string; readonly name: string; readonly platform: string };
     readonly collect: Effect.Effect<UsageResult, CollectionError>;
+    readonly revision?: (previous?: UsageResult) => Effect.Effect<string, CollectionError>;
   }
 >()('token-tracker/LocalUsage') {}
 
 export const noLocalUsage = Layer.succeed(LocalUsage, {
   collect: Effect.succeed({ events: [], sources: [], warnings: [], pricingUpdatedAt: '' }),
 });
+
+// Local logs are independent of ranges, remote uploads, and saved prices.
+// Check their inexpensive source revision at most once per five seconds, and
+// await one shared collection only when the sources have actually changed.
+export const makeLocalUsageSnapshot = (
+  collect: Effect.Effect<UsageResult, CollectionError>,
+  revision?: (previous?: UsageResult) => Effect.Effect<string, CollectionError>,
+) =>
+  Effect.gen(function* () {
+    let snapshot: { current: UsageResult; generation: number } | undefined;
+    let observed: UsageResult | undefined;
+    let fingerprint = '';
+    let sourceRevision: string | undefined;
+    let stable = true;
+    const checks = yield* Cache.makeWith(
+      () =>
+        Effect.gen(function* () {
+          const previous = observed;
+          let before = revision ? yield* revision(previous) : undefined;
+          stable = true;
+          if (snapshot && revision && before === sourceRevision) return snapshot;
+          let next = yield* collect;
+          if (revision) {
+            const after = yield* revision(next);
+            if (before !== after) {
+              // The first collection can discover repository dependencies, or
+              // logs can change while being read. Stabilize once in this same
+              // request rather than deferring updated records to a later poll.
+              before = after;
+              next = yield* collect;
+              stable = before === (yield* revision(next));
+            }
+          }
+          const digest = createHash('sha256').update(
+            JSON.stringify([next.sources, next.warnings, next.pricingUpdatedAt, next.retractedIds]),
+          );
+          // Hash only changed collections, without allocating one enormous JSON
+          // string or blocking requests for an entire history traversal.
+          for (let offset = 0; offset < next.events.length; offset += 1_000) {
+            for (const event of next.events.slice(offset, offset + 1_000))
+              digest.update(JSON.stringify(event)).update('\n');
+            yield* Effect.yieldNow;
+          }
+          const nextFingerprint = digest.digest('hex');
+          if (!snapshot || nextFingerprint !== fingerprint) {
+            snapshot = { current: next, generation: (snapshot?.generation ?? 0) + 1 };
+            fingerprint = nextFingerprint;
+          }
+          // Dependency discovery is attached to the latest collected object.
+          // Retain that observer separately when unchanged accounting reuses
+          // the previous immutable event array and aggregate generation.
+          observed = next;
+          // Retain the pre-collection signal. A change during collection must be
+          // checked again rather than labelling potentially older data as current.
+          sourceRevision = before;
+          return snapshot;
+        }),
+      { capacity: 1, timeToLive: (exit) => (Exit.isSuccess(exit) && stable ? '5 seconds' : 0) },
+    );
+    return Cache.get(checks, undefined);
+  });
+
+class SnapshotInput extends Context.Service<SnapshotInput, { current: UsageResult; state: PricingState }>()(
+  'token-tracker/SnapshotInput',
+) {}
 
 export class HubPricing extends Context.Service<HubPricing, ReturnType<typeof makePricingRuntime>>()(
   'token-tracker/HubPricing',
@@ -88,6 +154,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       const store = yield* UsageStore;
       const local = yield* LocalUsage;
       const pricing = yield* HubPricing;
+      const localSnapshot = yield* makeLocalUsageSnapshot(local.collect, local.revision);
       const localDeviceId = local.device?.id ?? '';
       if (options.autoRefreshPricing) {
         yield* pricing.load.pipe(
@@ -123,31 +190,32 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           Schema.Struct({
             query: UsageQuery,
             revision: Schema.Number,
+            metadataRevision: Schema.Number,
+            localGeneration: Schema.Number,
+            start: Schema.optionalKey(Schema.String),
+            end: Schema.optionalKey(Schema.String),
             pricingRevision: Schema.optionalKey(Schema.String),
           }),
         ),
       );
       const readRawSnapshot = Effect.fn('rpc.readRawSnapshot')(function* (key: string) {
-        const { query } = decodeReadKey(key);
-        const timeframe = usageTimeframe(query);
-        const current = yield* local.collect;
-        const previousMillis = timeframe.previousStart.startOfDay().epochMilliseconds;
-        const endMillis = timeframe.end.epochMilliseconds;
-        const localCandidates = current.events
-          .filter((event) => {
-            const millis = eventMillis(event);
-            return millis >= previousMillis && millis < endMillis;
-          })
-          .map((event) => event.id);
+        const { query, start, end } = decodeReadKey(key);
+        const { current } = yield* SnapshotInput;
+        const previousMillis = start ? Date.parse(start) : -Infinity;
+        const endMillis = end ? Date.parse(end) : Infinity;
+        const localCandidates = start
+          ? current.events
+              .filter((event) => {
+                const millis = eventMillis(event);
+                return millis >= previousMillis && millis < endMillis;
+              })
+              .map((event) => event.id)
+          : [];
         const [remote, dimensions] = yield* Effect.all(
           [
             store.getUsage(localDeviceId, {
-              ...(timeframe.range !== 'all'
-                ? {
-                    start: timeframe.previousStart.startOfDay().toInstant().toString({ fractionalSecondDigits: 3 }),
-                    end: timeframe.end.toInstant().toString({ fractionalSecondDigits: 3 }),
-                  }
-                : {}),
+              ...(start ? { start } : {}),
+              ...(end ? { end } : {}),
               devices: query.devices,
               candidateIds: localCandidates,
             }),
@@ -200,20 +268,24 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       // A pricing edit invalidates calculated prices, not the underlying usage.
       // Reuse validated records so a save never rereads unchanged log history.
       const rawSnapshots = yield* Cache.makeWith(readRawSnapshot, {
-        capacity: 2,
-        timeToLive: (exit) => (Exit.isSuccess(exit) ? '5 seconds' : 0),
+        capacity: 8,
+        timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0),
+        requireServicesAt: 'lookup',
       });
       const readSnapshot = Effect.fn('rpc.readSnapshot')(function* (key: string) {
-        const { query, revision } = decodeReadKey(key);
-        const state = yield* pricing.load;
-        const { remote, current, dimensions, unique } = yield* Cache.get(
-          rawSnapshots,
-          JSON.stringify({ query, revision }),
-        );
+        const { pricingRevision: _, ...rawKey } = decodeReadKey(key);
+        const { state } = yield* SnapshotInput;
+        const { remote, current, dimensions, unique } = yield* Cache.get(rawSnapshots, JSON.stringify(rawKey));
         const events: UsageEvent[] = [];
+        const unknownLocalModels = new Set<string>();
         for (let offset = 0; offset < unique.length; offset += 1_000) {
           const end = Math.min(offset + 1_000, unique.length);
-          for (let index = offset; index < end; index++) events.push(repriceEvent(unique[index], state.policy));
+          for (let index = offset; index < end; index++) {
+            const event = repriceEvent(unique[index], state.policy);
+            events.push(event);
+            if ((event.deviceId ?? '') === localDeviceId && !event.costKnown)
+              unknownLocalModels.add(event.rawModel ?? event.model);
+          }
           yield* Effect.yieldNow;
         }
         const policySnapshot = `${state.info.updatedAt} · ${state.info.revision.slice(0, 12)}`;
@@ -256,19 +328,43 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           data: {
             events,
             sources: [...current.sources, ...remote.sources],
-            warnings: [...current.warnings, ...remote.warnings, ...pricingWarnings],
+            warnings: [
+              ...current.warnings.filter((warning) => !warning.startsWith('No reliable API price for: ')),
+              ...(unknownLocalModels.size
+                ? [
+                    `No reliable API price for: ${[...unknownLocalModels].sort().join(', ')}. These tokens are included, but their costs are unavailable.`,
+                  ]
+                : []),
+              ...remote.warnings,
+              ...pricingWarnings,
+            ],
             pricingUpdatedAt: snapshots.join(', ') || policySnapshot,
           },
         };
       });
-      // Share concurrent dashboard/pricing reads and retain two bounded, short-
-      // lived snapshots. Writes change the key immediately; failures are never cached.
+      // Retain dashboard ranges and nearby device/timezone variants until their data changes. Expiring
+      // prepared history on a timer made ordinary revisits expensive again.
       const snapshots = yield* Cache.makeWith(readSnapshot, {
-        capacity: 2,
-        timeToLive: (exit) => (Exit.isSuccess(exit) ? '5 seconds' : 0),
+        capacity: 8,
+        timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0),
+        requireServicesAt: 'lookup',
       });
+      let snapshotEpoch = '';
+      let snapshotPricing = '';
       const readUsage = Effect.fn('rpc.readUsage')(function* (query: UsageQuery) {
+        const { current, generation } = yield* localSnapshot;
         const state = yield* pricing.load;
+        const revision = store.getRevision();
+        const metadataRevision = store.getMetadataRevision();
+        const epoch = `${revision}:${metadataRevision}:${generation}`;
+        if (epoch !== snapshotEpoch) {
+          snapshotEpoch = epoch;
+          yield* Cache.invalidateAll(rawSnapshots);
+          yield* Cache.invalidateAll(snapshots);
+        } else if (snapshotPricing !== state.policy.revision) yield* Cache.invalidateAll(snapshots);
+        snapshotPricing = state.policy.revision;
+        const now = new Date(yield* Clock.currentTimeMillis);
+        const timeframe = usageTimeframe(query, now);
         const result = yield* Cache.get(
           snapshots,
           JSON.stringify({
@@ -277,11 +373,26 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               timezone: query.timezone ?? 'UTC',
               ...(query.devices ? { devices: [...query.devices].sort() } : {}),
             },
-            revision: store.getRevision(),
+            revision,
+            metadataRevision,
+            localGeneration: generation,
+            ...(timeframe.range !== 'all'
+              ? {
+                  start: timeframe.previousStart.startOfDay().toInstant().toString({ fractionalSecondDigits: 3 }),
+                  end: timeframe.end.toInstant().toString({ fractionalSecondDigits: 3 }),
+                }
+              : {}),
             pricingRevision: state.policy.revision,
           }),
-        );
-        return { ...result, query: effectiveQuery(query, result.state.policy) };
+        ).pipe(Effect.provideService(SnapshotInput, { current, state }));
+        return {
+          ...result,
+          // Checked-at/error metadata can change without changing rates. Reuse
+          // immutable policy identity for aggregates, while returning current info.
+          state: { policy: result.state.policy, info: state.info },
+          query: effectiveQuery(query, result.state.policy),
+          now,
+        };
       });
       return {
         GetUsage: Effect.fn('rpc.GetUsage')(
@@ -292,7 +403,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
                 const dashboard = buildDashboard(
                   result.data,
                   result.query,
-                  new Date(),
+                  result.now,
                   local.device?.name ?? 'All devices',
                   result.state.policy,
                 );
@@ -331,10 +442,9 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           function* (query) {
             const result = yield* readUsage(query);
             const groups = new Map<string, { tokens: number; legacy: boolean }>();
-            const now = new Date();
-            const timeframe = usageTimeframe(result.query, now);
+            const timeframe = usageTimeframe(result.query, result.now);
             const start = timeframe.start.epochMilliseconds;
-            const end = Math.min(timeframe.end.epochMilliseconds, now.getTime() + 1);
+            const end = Math.min(timeframe.end.epochMilliseconds, result.now.getTime() + 1);
             for (const event of result.data.events) {
               if (event.costKnown) continue;
               const millis = eventMillis(event);

@@ -9,6 +9,7 @@ import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { StorageFailure } from '../../shared/rpc';
 import { collectUsage } from '../usage';
 import { filePricing } from '../usage/pricing-runtime';
+import { usageRevision } from '../usage/revision';
 import { HubPricing, LocalUsage, makeHubWebHandler } from './hub';
 import { getLocalDevice } from './identity';
 import { ServerConfiguration, UsageStore } from './store';
@@ -101,7 +102,15 @@ export const localUsageLayer = Layer.effect(
         'dashboard',
       ),
     }).pipe(Effect.provideService(FileSystem.FileSystem, filesystem), Effect.provideService(Path.Path, path));
-    return { device, collect };
+    return {
+      device,
+      collect,
+      revision: (previous) =>
+        usageRevision()(previous).pipe(
+          Effect.provideService(FileSystem.FileSystem, filesystem),
+          Effect.provideService(Path.Path, path),
+        ),
+    };
   }),
 ).pipe(Layer.provide(BunServices.layer));
 

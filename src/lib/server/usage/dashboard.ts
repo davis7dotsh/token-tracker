@@ -431,7 +431,7 @@ const aggregateDashboard = (
   };
 };
 
-// Prepared RPC snapshots contain immutable event arrays. Retain at most two
+// Prepared RPC snapshots contain immutable event arrays. Retain at most eight
 // filtered aggregates for each live array; WeakMap ownership releases them with
 // the snapshot. Pricing snapshots and query values are part of the cache key.
 const dashboardAggregates = new WeakMap<
@@ -470,6 +470,7 @@ export const buildDashboard = (
           previousMillis <= aggregate.previousAfter)),
   );
   if (match) {
+    dashboardAggregates.set(data.events, [match, ...cached.filter((entry) => entry !== match)]);
     const response = match.aggregate.response;
     return {
       ...response,
@@ -486,7 +487,7 @@ export const buildDashboard = (
   const aggregate = aggregateDashboard(data, query, now, machine, pricingPolicy, timeframe);
   dashboardAggregates.set(data.events, [
     { query: queryKey, policy: pricingPolicy, aggregate },
-    ...cached.filter((entry) => entry.query !== queryKey || entry.policy !== pricingPolicy).slice(0, 1),
+    ...cached.filter((entry) => entry.query !== queryKey || entry.policy !== pricingPolicy).slice(0, 7),
   ]);
   return aggregate.response;
 };

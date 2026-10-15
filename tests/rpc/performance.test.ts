@@ -1,14 +1,28 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { Effect, Layer, ManagedRuntime } from 'effect';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { Clock, Deferred, Effect, Layer, ManagedRuntime } from 'effect';
+import { Headers } from 'effect/http';
+import { Rpc, RpcMessage } from 'effect/rpc';
+import { TestClock } from 'effect/testing';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDashboardClient, rpcClientLayer, UsageClient } from '../../src/lib/client/rpc';
-import { LocalUsage, makeRpcWebHandler, usageStoreLayer } from '../../src/lib/server/rpc/server';
+import { filePricingLayer, LocalUsage, makeRpcWebHandler, usageStoreLayer } from '../../src/lib/server/rpc/server';
+import { HubPricing, makeLocalUsageSnapshot, rpcHandlersLayer } from '../../src/lib/server/rpc/hub';
+import { defaultStored } from '../../src/lib/server/usage/pricing-store';
 import { UsageStore } from '../../src/lib/server/rpc/store';
 import { buildDashboard } from '../../src/lib/server/usage/dashboard';
-import { CollectionError, type UsageEvent, type DeviceRegistration } from '../../src/lib/shared/domain';
+import {
+  CollectionError,
+  type UsageEvent,
+  type DeviceRegistration,
+  type UsageQuery,
+  type UsageResult,
+  type DashboardResponse,
+} from '../../src/lib/shared/domain';
+import { UsageRpc, type UsageFailure, type PricingSettings } from '../../src/lib/shared/rpc';
+import type { PricingFailure } from '../../src/lib/shared/pricing';
 
 const directories: string[] = [];
 const disposers: (() => Promise<void>)[] = [];
@@ -83,6 +97,59 @@ const hub = async (collect: Effect.Effect<ReturnType<typeof usage>, CollectionEr
       );
   };
   return { browser, register };
+};
+
+const controlledHub = async (
+  collect: Effect.Effect<UsageResult, CollectionError>,
+  revision?: (previous?: UsageResult) => Effect.Effect<string, CollectionError>,
+) => {
+  const directory = await temporary();
+  const clock = TestClock.layer();
+  const services = Layer.mergeAll(
+    usageStoreLayer({ dataDirectory: directory, pairingSecret }),
+    filePricingLayer({ dataDirectory: directory }),
+    Layer.succeed(LocalUsage, { device: localDevice, collect, ...(revision ? { revision } : {}) }),
+  );
+  const handlers = rpcHandlersLayer('test-browser-proof', { trustBrowser: true, autoRefreshPricing: false }).pipe(
+    Layer.provide(Layer.mergeAll(services, clock)),
+  );
+  const runtime = ManagedRuntime.make(Layer.mergeAll(handlers, services, clock));
+  disposers.push(() => runtime.dispose());
+  const options = {
+    client: new Rpc.ServerClient(1),
+    requestId: RpcMessage.RequestId('test-request'),
+    headers: Headers.empty,
+  };
+  const getUsage = (query: UsageQuery = {}, signal?: AbortSignal) =>
+    runtime.runPromise(
+      Effect.flatMap(UsageRpc.accessHandler('GetUsage'), (handler) => handler(query, options)).pipe(
+        Effect.flatMap((result) =>
+          Deferred.isDeferred<DashboardResponse, UsageFailure>(result)
+            ? Deferred.await(result)
+            : Effect.succeed(result),
+        ),
+      ),
+      { signal },
+    );
+  const getPricing = () =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        const handler = yield* UsageRpc.accessHandler('GetPricing');
+        const result = yield* handler({}, options);
+        return Deferred.isDeferred<PricingSettings, PricingFailure | UsageFailure>(result)
+          ? yield* Deferred.await(result)
+          : result;
+      }),
+    );
+  const settle = () =>
+    runtime.runPromise(
+      Effect.gen(function* () {
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+      }),
+    );
+  return { directory, runtime, getUsage, getPricing, settle };
 };
 
 test('indexed windows retain accepted offset formats and preserve original timestamp payloads', async () => {
@@ -238,7 +305,330 @@ test('concurrent usage and pricing readers share collection while one abort and 
   expect(collections).toBe(1);
   await upload([event({ id: 'new-remote-request', inputTokens: 250 })]);
   expect((await browser.getUsage()).totals.tokens).toBe(350);
+  expect(collections).toBe(1);
+});
+
+test('dashboard ranges and device/timezone variants remain cached after long idle gaps', async () => {
+  let collections = 0;
+  let sourceChecks = 0;
+  const { runtime, getUsage } = await controlledHub(
+    Effect.sync(() => {
+      collections++;
+      return usage([event({ deviceId: localDevice.id, timestamp: '2026-10-15T10:00:00.000Z' })]);
+    }),
+    () =>
+      Effect.sync(() => {
+        sourceChecks++;
+        return 'unchanged-sources';
+      }),
+  );
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T12:00:00.000Z')));
+  const queries: UsageQuery[] = [
+    ...(['today', '7d', '30d', '90d', '6m', 'all'] as const).map((range) => ({ range })),
+    { range: '7d', devices: [localDevice.id] },
+    { range: '7d', timezone: 'America/New_York' },
+  ];
+  const before = await Promise.all(queries.map((query) => getUsage(query)));
+  expect(before[0].generatedAt).toBe('2026-10-15T12:00:00.000Z');
+  expect(collections).toBe(1);
+  expect(sourceChecks).toBe(2);
+  await runtime.runPromise(TestClock.adjust('60 seconds'));
+  for (const [index, query] of queries.entries()) {
+    const after = await getUsage(query);
+    expect(after.totals.tokens).toBe(100);
+    expect(after.sessions).toBe(before[index].sessions);
+  }
+  expect(collections).toBe(1);
+  expect(sourceChecks).toBe(3);
+  await runtime.runPromise(TestClock.adjust('1 hour'));
+  expect(sourceChecks).toBe(3);
+  expect((await getUsage({ range: '7d' })).sessions).toBe(before[1].sessions);
+  expect(collections).toBe(1);
+  expect(sourceChecks).toBe(4);
+});
+
+test('uploaded writes and pricing revisions invalidate immediately without collecting unchanged local logs', async () => {
+  let collections = 0;
+  const local = event({ deviceId: localDevice.id, timestamp: '2026-10-15T10:00:00.000Z' });
+  const { directory, runtime, getUsage, getPricing } = await controlledHub(
+    Effect.sync(() => {
+      collections++;
+      return {
+        ...usage([local]),
+        warnings: [
+          `No reliable API price for: ${local.model}. These tokens are included, but their costs are unavailable.`,
+        ],
+      };
+    }),
+    () => Effect.succeed('unchanged-source'),
+  );
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T12:00:00.000Z')));
+  const store = await runtime.runPromise(UsageStore);
+  const registration = await runtime.runPromise(store.registerDevice(pairingSecret, remoteDevice));
+  const remote = event({ id: 'remote-write', inputTokens: 250, timestamp: local.timestamp });
+  await runtime.runPromise(
+    store.syncUsage(remoteDevice.id, registration.token, { device: remoteDevice, events: [remote] }),
+  );
+  const query = { range: 'all' as const };
+  const first = await getUsage(query);
+  expect(first.totals.tokens).toBe(350);
+  expect(first.warnings.some((warning) => warning.startsWith('No reliable API price for: '))).toBe(true);
+  await runtime.runPromise(store.syncUsage(remoteDevice.id, registration.token, { device: remoteDevice, events: [] }));
+  expect((await getUsage(query)).sessions).toBe(first.sessions);
+  await runtime.runPromise(
+    store.syncUsage(remoteDevice.id, registration.token, {
+      device: remoteDevice,
+      events: [],
+      sources: [{ harness: 'codex', path: '/changed/source', files: 1, events: 1, status: 'ready' }],
+    }),
+  );
+  const metadata = await getUsage(query);
+  expect(metadata.totals.tokens).toBe(350);
+  expect(metadata.sources[0]?.path).toBe('Remote · /changed/source');
+  await runtime.runPromise(
+    store.syncUsage(remoteDevice.id, registration.token, {
+      device: remoteDevice,
+      events: [{ ...remote, inputTokens: 300 }],
+    }),
+  );
+  expect((await getUsage(query)).totals.tokens).toBe(400);
+  await runtime.runPromise(
+    store.syncUsage(remoteDevice.id, registration.token, { device: remoteDevice, events: [], deletedIds: [remote.id] }),
+  );
+  expect((await getUsage(query)).totals.tokens).toBe(100);
+  await runtime.runPromise(store.importUsage(pairingSecret, { device: remoteDevice, events: [remote] }));
+  const imported = await getUsage(query);
+  expect(imported.totals.tokens).toBe(350);
+  await runtime.runPromise(store.importUsage(pairingSecret, { device: remoteDevice, events: [remote] }));
+  expect((await getUsage(query)).sessions).toBe(imported.sessions);
+
+  await writeFile(
+    join(directory, 'pricing-state.json'),
+    JSON.stringify({
+      ...defaultStored(),
+      checkedAt: '2026-10-15T12:00:00.000Z',
+      refreshError: 'Fixture refresh unavailable.',
+    }),
+  );
+  const currentInfo = await getPricing();
+  expect(currentInfo.info.checkedAt).toBe('2026-10-15T12:00:00.000Z');
+  expect(currentInfo.info.refreshError).toBe('Fixture refresh unavailable.');
+  expect((await getUsage(query)).sessions).toBe(imported.sessions);
+  const pricing = await runtime.runPromise(HubPricing);
+  await runtime.runPromise(pricing.setRule({ model: local.model, kind: 'free' }));
+  const free = await getUsage(query);
+  expect(free.totals.unpricedTokens).toBe(0);
+  expect(free.warnings).toEqual([]);
+  expect((await getPricing()).unresolved).toEqual([]);
+  await runtime.runPromise(pricing.deleteRule(local.model));
+  const deleted = await getUsage(query);
+  expect(deleted.totals.unpricedTokens).toBe(350);
+  expect(deleted.warnings.some((warning) => warning.startsWith('No reliable API price for: '))).toBe(true);
+  expect(collections).toBe(1);
+});
+
+test('changed local sources await one shared collection, propagate failures, retry, and cancel abandoned work', async () => {
+  let collections = 0;
+  let shouldFail = false;
+  let inventoryFailure = false;
+  let signal = 'initial';
+  let tokens = 100;
+  let gate = Effect.runSync(Deferred.make<void>());
+  let interrupted = false;
+  const { runtime, getUsage, settle } = await controlledHub(
+    Effect.gen(function* () {
+      collections++;
+      if (collections > 1)
+        yield* Deferred.await(gate).pipe(
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true;
+            }),
+          ),
+        );
+      if (shouldFail) return yield* new CollectionError({ message: 'Temporary source failure.' });
+      return usage([event({ deviceId: localDevice.id, inputTokens: tokens, timestamp: '2026-10-15T10:00:00.000Z' })]);
+    }),
+    () =>
+      Effect.suspend(() =>
+        inventoryFailure
+          ? Effect.fail(new CollectionError({ message: 'Source inventory failed.' }))
+          : Effect.succeed(signal),
+      ),
+  );
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T12:00:00.000Z')));
+  expect((await getUsage()).totals.tokens).toBe(100);
+  tokens = 250;
+  signal = 'changed';
+  await runtime.runPromise(TestClock.adjust('6 seconds'));
+  let resolved = false;
+  const pending = Promise.all([getUsage(), getUsage(), getUsage()]).then((responses) => {
+    resolved = true;
+    return responses;
+  });
+  await settle();
   expect(collections).toBe(2);
+  expect(resolved).toBe(false);
+  await Effect.runPromise(Deferred.succeed(gate, undefined));
+  expect((await pending).every((response) => response.totals.tokens === 250)).toBe(true);
+
+  shouldFail = true;
+  signal = 'failed-change';
+  await runtime.runPromise(TestClock.adjust('6 seconds'));
+  expect(await getUsage().catch((error: unknown) => error)).toMatchObject({ message: 'Temporary source failure.' });
+  expect(collections).toBe(3);
+  shouldFail = false;
+  const recovered = await getUsage();
+  expect(recovered.totals.tokens).toBe(250);
+  expect(recovered.warnings.every((warning) => !warning.includes('Temporary source failure.'))).toBe(true);
+  expect(collections).toBe(4);
+
+  inventoryFailure = true;
+  await runtime.runPromise(TestClock.adjust('6 seconds'));
+  expect(await getUsage().catch((error: unknown) => error)).toMatchObject({ message: 'Source inventory failed.' });
+  inventoryFailure = false;
+  expect((await getUsage()).sessions).toBe(recovered.sessions);
+  expect(collections).toBe(4);
+
+  gate = Effect.runSync(Deferred.make<void>());
+  signal = 'cancelled-change';
+  tokens = 400;
+  await runtime.runPromise(TestClock.adjust('6 seconds'));
+  const controller = new AbortController();
+  const cancelled = getUsage({}, controller.signal).catch((error: unknown) => error);
+  await settle();
+  expect(collections).toBe(5);
+  controller.abort();
+  expect(await cancelled).toBeInstanceOf(Error);
+  expect(interrupted).toBe(true);
+  await Effect.runPromise(Deferred.succeed(gate, undefined));
+  expect((await getUsage()).totals.tokens).toBe(400);
+  expect(collections).toBe(6);
+});
+
+test('local snapshot generation stays stable for unchanged data and retries an initial failure', async () => {
+  let attempts = 0;
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const read = yield* makeLocalUsageSnapshot(
+        Effect.suspend(() => {
+          attempts++;
+          return attempts === 1
+            ? Effect.fail(new CollectionError({ message: 'First attempt failed.' }))
+            : Effect.succeed(
+                usage([
+                  event({
+                    timestamp: '2026-10-15T10:00:00Z',
+                    sessionTitle: attempts >= 4 ? 'Updated title' : 'Original title',
+                  }),
+                ]),
+              );
+        }),
+      );
+      expect((yield* Effect.result(read))._tag).toBe('Failure');
+      const original = yield* read;
+      yield* TestClock.adjust('6 seconds');
+      expect(yield* read).toBe(original);
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      expect(yield* read).toBe(original);
+      yield* TestClock.adjust('6 seconds');
+      yield* read;
+      yield* Effect.yieldNow;
+      yield* Effect.yieldNow;
+      const updated = yield* read;
+      expect(updated.generation).toBeGreaterThan(original.generation);
+      expect(updated.current.events[0].sessionTitle).toBe('Updated title');
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+  expect(attempts).toBe(4);
+});
+
+test('local source races stabilize within two collections and unstable results revalidate on the next read', async () => {
+  let attempts = 0;
+  let signal = 'initial';
+  let keepChanging = true;
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const read = yield* makeLocalUsageSnapshot(
+        Effect.sync(() => {
+          attempts++;
+          if (keepChanging) signal = `revision-${attempts}`;
+          return usage([event({ timestamp: '2026-10-15T10:00:00Z', inputTokens: attempts * 100 })]);
+        }),
+        () => Effect.sync(() => signal),
+      );
+      const unstable = yield* read;
+      expect(attempts).toBe(2);
+      expect(unstable.current.events[0].inputTokens).toBe(200);
+      keepChanging = false;
+      const stabilized = yield* read;
+      expect(attempts).toBe(3);
+      expect(stabilized.current.events[0].inputTokens).toBe(300);
+      yield* TestClock.adjust('60 seconds');
+      expect(yield* read).toBe(stabilized);
+      expect(attempts).toBe(3);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+});
+
+test('unchanged accounting retains the latest dependency observer without recurring collection', async () => {
+  let collections = 0;
+  let physical = 'initial-source';
+  let dependency = 'original-git-path';
+  const dependencies = new WeakMap<UsageResult, string>();
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const read = yield* makeLocalUsageSnapshot(
+        Effect.sync(() => {
+          collections++;
+          const next = usage([event({ timestamp: '2026-10-15T10:00:00Z' })]);
+          dependencies.set(next, dependency);
+          return next;
+        }),
+        (previous) => Effect.sync(() => `${physical}:${previous ? dependencies.get(previous) : ''}`),
+      );
+      const original = yield* read;
+      expect(collections).toBe(2);
+      physical = 'changed-source';
+      dependency = 'retargeted-git-path';
+      yield* TestClock.adjust('6 seconds');
+      expect(yield* read).toBe(original);
+      expect(collections).toBe(4);
+      yield* TestClock.adjust('60 seconds');
+      expect(yield* read).toBe(original);
+      expect(collections).toBe(4);
+    }).pipe(Effect.provide(TestClock.layer())),
+  );
+});
+
+test('cached remote windows move at midnight and survive a backwards clock change', async () => {
+  const { runtime, getUsage } = await controlledHub(Effect.succeed(usage([])));
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const store = yield* UsageStore;
+      const registration = yield* store.registerDevice(pairingSecret, remoteDevice);
+      yield* store.syncUsage(remoteDevice.id, registration.token, {
+        device: remoteDevice,
+        events: [
+          event({ id: 'before-midnight', timestamp: '2026-10-15T23:00:00.000Z', inputTokens: 100 }),
+          event({ id: 'after-midnight', timestamp: '2026-10-16T00:00:00.000Z', inputTokens: 250 }),
+        ],
+      });
+    }),
+  );
+  const query = { range: 'today' as const, timezone: 'UTC' };
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T23:59:59.999Z')));
+  const before = await getUsage(query);
+  expect(before.generatedAt).toBe('2026-10-15T23:59:59.999Z');
+  expect(before.totals.tokens).toBe(100);
+  await runtime.runPromise(TestClock.adjust('1 millis'));
+  const after = await getUsage(query);
+  expect(after.totals.tokens).toBe(250);
+  expect(after.previous?.tokens).toBe(100);
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-15T23:59:59.999Z')));
+  expect((await getUsage(query)).totals.tokens).toBe(100);
+  expect(await runtime.runPromise(Clock.currentTimeMillis)).toBe(Date.parse('2026-10-15T23:59:59.999Z'));
 });
 
 test('failed shared snapshots are retried immediately', async () => {
