@@ -5,9 +5,41 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDashboardClient } from '../../src/lib/client/dashboard-rpc';
 import { LocalUsage, makeRpcWebHandler } from '../../src/lib/server/rpc/server';
+import { buildDashboard } from '../../src/lib/server/usage/dashboard';
 
 const unavailable = 'Could not load usage. Try again.';
-const success = (requestId: string) => ({ _tag: 'Exit', requestId, exit: { _tag: 'Success', value: [] } });
+const success = (requestId: string, value: unknown = []) => ({
+  _tag: 'Exit',
+  requestId,
+  exit: { _tag: 'Success', value },
+});
+const dashboard = buildDashboard(
+  {
+    events: [
+      {
+        id: 'event',
+        timestamp: '2026-10-15T10:00:00Z',
+        harness: 'codex',
+        model: 'gpt-6.1-sol',
+        project: '/work/app',
+        repository: null,
+        sessionId: 'session',
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadTokens: 20,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        costUsd: 0.01,
+        costKnown: true,
+      },
+    ],
+    sources: [{ harness: 'codex', path: '/work/app', files: 1, events: 1, status: 'ready' }],
+    warnings: [],
+    pricingUpdatedAt: '2026-10-15T00:00:00Z',
+  },
+  { range: 'today', timezone: 'UTC' },
+  new Date('2026-10-15T12:00:00Z'),
+);
 
 test.each([
   ['HTML response', () => '<html>Sign in</html>'],
@@ -27,6 +59,77 @@ test.each([
   try {
     const [outcome] = await Promise.allSettled([client.getDevices()]);
     expect(outcome).toMatchObject({ status: 'rejected', reason: { message: unavailable } });
+  } finally {
+    await client.dispose();
+    await server.stop(true);
+  }
+});
+
+test.each([
+  ['null result', null],
+  ['array result', []],
+  ['empty result', {}],
+  ['missing filters', { ...dashboard, filters: undefined }],
+  ['null filters', { ...dashboard, filters: null }],
+  ['non-array filter options', { ...dashboard, filters: { ...dashboard.filters, models: 'gpt-6.1-sol' } }],
+  ['invalid optional selection', { ...dashboard, filters: { ...dashboard.filters, selectedModels: [42] } }],
+  ['missing totals field', { ...dashboard, totals: { ...dashboard.totals, tokens: undefined } }],
+  ['invalid previous totals', { ...dashboard, previous: {} }],
+  ['invalid period', { ...dashboard, period: { start: 42, end: '2026-10-15' } }],
+  ['invalid range', { ...dashboard, range: 'future' }],
+  ['invalid session entry', { ...dashboard, sessions: [null] }],
+  ['invalid session timestamp', { ...dashboard, sessions: [{ ...dashboard.sessions[0], lastActiveAt: 42 }] }],
+  ['invalid breakdown name', { ...dashboard, models: [{ ...dashboard.models[0], name: 42 }] }],
+  ['invalid daily bucket', { ...dashboard, daily: [null] }],
+  ['invalid hourly series', { ...dashboard, hourly: [{ ...dashboard.hourly[0], harnesses: {} }] }],
+  ['invalid optional chart series', { ...dashboard, daily: [{ ...dashboard.daily[0], providers: [null] }] }],
+  ['null optional token costs', { ...dashboard, tokenCosts: null }],
+  [
+    'invalid token cost count',
+    { ...dashboard, tokenCosts: { ...dashboard.tokenCosts, input: { costUSD: 0, unavailableTokens: -1 } } },
+  ],
+  ['invalid source', { ...dashboard, sources: [{ ...dashboard.sources[0], status: 'future' }] }],
+  ['invalid warnings', { ...dashboard, warnings: [42] }],
+])('browser RPC rejects successful usage with %s and accepts a later valid result', async (_name, invalid) => {
+  let requests = 0;
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const message: { id: string } = JSON.parse(await request.text());
+      return new Response(JSON.stringify(success(message.id, requests++ === 0 ? invalid : dashboard)));
+    },
+  });
+  const client = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  try {
+    const [outcome] = await Promise.allSettled([client.getUsage()]);
+    expect(outcome).toMatchObject({ status: 'rejected', reason: { message: unavailable } });
+    expect(await client.getUsage()).toEqual(dashboard);
+  } finally {
+    await client.dispose();
+    await server.stop(true);
+  }
+});
+
+test('browser RPC accepts legacy usage without optional fields and retains additional fields', async () => {
+  const without = (value: object, keys: readonly string[]) =>
+    Object.fromEntries(Object.entries(value).filter(([key]) => !keys.includes(key)));
+  const legacy = {
+    ...without(dashboard, ['tokenCosts']),
+    filters: without(dashboard.filters, ['selectedModels']),
+    daily: dashboard.daily.map((bucket) => without(bucket, ['providers', 'models'])),
+    hourly: dashboard.hourly.map((bucket) => without(bucket, ['providers', 'models'])),
+  };
+  const compatible = { ...legacy, futureField: 'preserved' };
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      const message: { id: string } = JSON.parse(await request.text());
+      return new Response(JSON.stringify(success(message.id, compatible)));
+    },
+  });
+  const client = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  try {
+    expect<unknown>(await client.getUsage()).toEqual(compatible);
   } finally {
     await client.dispose();
     await server.stop(true);

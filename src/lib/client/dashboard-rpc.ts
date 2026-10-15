@@ -2,6 +2,7 @@ import type { Rpc, RpcGroup } from 'effect/rpc';
 import type { UsageRpc } from '../shared/rpc';
 import type { UsageQuery } from '../shared/domain';
 import type { PricingRule } from '../shared/pricing';
+import { isDashboardResponse } from './dashboard-response';
 
 type Procedures = RpcGroup.Rpcs<typeof UsageRpc>;
 type Procedure<Tag extends Procedures['_tag']> = Extract<Procedures, { readonly _tag: Tag }>;
@@ -12,8 +13,8 @@ const timedOut = 'The dashboard took too long to respond. Try again.';
 const unavailable = 'Could not load usage. Try again.';
 
 // The server validates requests and schema-encodes every successful result.
-// This unary browser transport checks the Effect NDJSON envelope while keeping
-// the shared RPC types, without shipping the collector's Effect runtime.
+// This unary browser transport checks the Effect NDJSON envelope and dashboard
+// result shape without shipping the collector's Effect runtime.
 const readResult = (body: string, id: string) => {
   for (const line of body.split('\n')) {
     if (!line.trim()) continue;
@@ -81,9 +82,11 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
         } catch {
           throw new Error(unreachable);
         }
-        // UsageRpc owns the payload schema and encodes it at the server boundary.
-        // This assertion bridges that validated wire value to the matching RPC.
-        return readResult(body, id) as Rpc.Success<Procedure<Tag>>;
+        const result = readResult(body, id);
+        if (tag === 'GetUsage' && !isDashboardResponse(result)) throw new Error(unavailable);
+        // UsageRpc encodes all results; the dashboard guard also rejects
+        // incompatible successful payloads before they reach reactive state.
+        return result as Rpc.Success<Procedure<Tag>>;
       } catch (error) {
         if (signal?.aborted || disposed) throw new DOMException('Request cancelled', 'AbortError');
         if (expired) throw new Error(timedOut);

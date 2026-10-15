@@ -10,11 +10,13 @@ Production Vite manifest dependency graphs include the SvelteKit shell, layout, 
 
 | JavaScript phase                |  Before, raw / gzip |  After, raw / gzip | Raw reduction |
 | ------------------------------- | ------------------: | -----------------: | ------------: |
-| Initial hydration               | 395,842 / 137,303 B | 160,285 / 61,031 B |         59.5% |
-| Dashboard including chart       | 395,842 / 137,303 B | 226,202 / 84,320 B |         42.9% |
-| Including opened pricing editor | 395,842 / 137,303 B | 244,203 / 91,403 B |         38.3% |
+| Initial hydration               | 395,842 / 137,303 B | 162,292 / 61,818 B |         59.0% |
+| Dashboard including chart       | 395,842 / 137,303 B | 228,209 / 85,107 B |         42.3% |
+| Including opened pricing editor | 395,842 / 137,303 B | 246,210 / 92,189 B |         37.8% |
 
-The browser uses the existing unary Effect NDJSON protocol through native fetch, with RPC-derived input/output types and server-side schema validation/encoding. It checks response envelopes and retains authentication, exact endpoints, bounded deadlines, abort propagation, and disposal. CLI collectors keep their Effect client. URL state uses Runed's synchronous Standard Schema interface with the same normalization behavior, removing the remaining browser Effect imports.
+The browser uses the existing unary Effect NDJSON protocol through native fetch, with RPC-derived input/output types and server-side schema validation/encoding. It checks response envelopes and the complete dashboard result structure before updating reactive state, and retains authentication, exact endpoints, bounded deadlines, abort propagation, and disposal. CLI collectors keep their Effect client. URL state uses Runed's synchronous Standard Schema interface with the same normalization behavior, removing the remaining browser Effect imports.
+
+Structural result validation adds 2,007 raw bytes (787 gzip) to hydration. On an identical cached 4,530,489-byte all-history result served over local HTTP, median client time was 12.46 ms without the guard and 13.41 ms with it (ten alternating samples per client after two warmups). Invalid success payloads become a friendly retry error; legacy optional fields and additional fields remain compatible.
 
 Session search indexing is deferred until search is used. Charts omit zero-value SVG bars and batch pointer updates once per frame while retaining keyboard and touch interaction. The existing chart space stays reserved during module loading. A failed chart download has an independent retry, and lazy modules ignore completion after unmount.
 
@@ -56,7 +58,7 @@ Grok replay corrections now index complete turn results instead of scanning all 
 
 ### Verification and reproduction
 
-All 21 compared snapshot RPC responses match exactly, including 644,734 numeric values. An independent aggregate comparison also matched 630 outputs across all six ranges, five timezones (including Lord Howe and Kathmandu), exact timestamp edges, and forward/backward clock movements. The URL adapter matched 402 validation cases. Real HTTP tests cover the new transport and gzip; a compiled chart harness covers six mouse/touch/keyboard/unmount scenarios. After integrating settings and device management, the full repository suite passes 307 tests, plus formatting, lint, native TypeScript/Svelte checks, web build, CLI build, and whitespace checks.
+All 21 compared snapshot RPC responses match exactly, including 644,734 numeric values. An independent aggregate comparison also matched 630 outputs across all six ranges, five timezones (including Lord Howe and Kathmandu), exact timestamp edges, and forward/backward clock movements. The URL adapter matched 402 validation cases. Real HTTP tests cover the new transport and gzip; a compiled chart harness covers six mouse/touch/keyboard/unmount scenarios. After integrating settings and device management, the full repository suite passes 329 tests, plus formatting, lint, native TypeScript/Svelte checks, web build, CLI build, and whitespace checks.
 
 Run these after building to inspect script sizes and measure a reachable service:
 
