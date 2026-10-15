@@ -368,3 +368,166 @@ test('daily binary boundaries recover midnight after a timezone midnight gap', (
   expect(gapDay.daily.map((day) => day.date)).toEqual(['2026-09-06']);
   expect(gapDay.hourly).toHaveLength(23);
 });
+
+test('reused dashboard aggregates refresh metadata and invalidate at exact accounting boundaries', () => {
+  const events = [
+    event({ id: 'current-edge', timestamp: '2026-10-08T12:00:00.000Z', sessionId: 'current-edge' }),
+    event({ id: 'previous-edge', timestamp: '2026-10-01T12:00:00.000Z', sessionId: 'previous-edge' }),
+    event({ id: 'future-edge', timestamp: '2026-10-15T12:00:01.000Z', sessionId: 'future-edge' }),
+  ];
+  const data = usage(events);
+  const query = { range: '7d' as const };
+  const at = (timestamp: string) => buildDashboard(data, query, new Date(timestamp));
+  const first = at('2026-10-15T11:59:59.000Z');
+  const reused = at('2026-10-15T11:59:59.001Z');
+  expect(reused.sessions).toBe(first.sessions);
+  expect(reused.generatedAt).toBe('2026-10-15T11:59:59.001Z');
+  for (const timestamp of [
+    '2026-10-15T12:00:00.000Z',
+    '2026-10-15T12:00:00.001Z',
+    '2026-10-15T12:00:00.999Z',
+    '2026-10-15T12:00:01.000Z',
+    '2026-10-15T12:00:01.001Z',
+    '2026-10-15T11:59:59.999Z',
+  ]) {
+    const now = new Date(timestamp);
+    expect(buildDashboard(data, query, now)).toEqual(buildDashboard(usage([...events]), query, now));
+  }
+  expect(at('2026-10-15T12:00:00.000Z').totals.tokens).toBe(100);
+  expect(at('2026-10-15T12:00:00.000Z').previous?.tokens).toBe(100);
+  expect(at('2026-10-15T12:00:00.001Z').totals.tokens).toBe(0);
+  expect(at('2026-10-15T12:00:00.001Z').previous?.tokens).toBe(100);
+  expect(at('2026-10-15T12:00:01.000Z').totals.tokens).toBe(100);
+
+  const warnings = ['A fresh collector warning.'];
+  const sources = [{ harness: 'codex' as const, path: '/fresh', files: 1, events: 3, status: 'ready' as const }];
+  const updated = buildDashboard(
+    { ...data, warnings, sources, pricingUpdatedAt: 'fresh-pricing' },
+    query,
+    new Date('2026-10-15T12:00:01.001Z'),
+    'Renamed machine',
+  );
+  expect(updated).toMatchObject({ machine: 'Renamed machine', pricing: { updatedAt: 'fresh-pricing' } });
+  expect(updated.warnings).toBe(warnings);
+  expect(updated.sources).toBe(sources);
+});
+
+test('aggregate reuse preserves calendar transitions, clock changes, filters, and immutable pricing snapshots', () => {
+  const events = [
+    event({ timestamp: '2026-11-01T08:30:00.000Z' }),
+    event({ id: 'second', timestamp: '2026-10-25T08:30:00.000Z', model: 'other-model' }),
+    event({ id: 'third', timestamp: '2026-10-18T08:30:00.000Z', model: 'other-model' }),
+  ];
+  const data = usage(events);
+  for (const range of ['today', '7d', '30d', '90d', '6m', 'all'] as const) {
+    const query = { range, timezone: 'America/Los_Angeles' };
+    for (const timestamp of [
+      '2026-11-01T08:29:59.999Z',
+      '2026-11-01T08:30:00.000Z',
+      '2026-11-01T08:30:00.001Z',
+      '2026-11-01T09:30:00.000Z',
+      '2026-11-01T09:30:00.001Z',
+      '2026-11-02T07:59:59.999Z',
+      '2026-11-02T08:00:00.000Z',
+      '2026-11-01T08:30:00.000Z',
+    ]) {
+      const now = new Date(timestamp);
+      expect(buildDashboard(data, query, now)).toEqual(buildDashboard(usage([...events]), query, now));
+    }
+  }
+  const now = new Date('2026-11-01T12:00:00.000Z');
+  const query = { range: 'all' as const, models: ['other-model'] };
+  const first = buildDashboard(data, query, now);
+  expect(buildDashboard(data, query, now).sessions).toBe(first.sessions);
+  query.models.length = 0;
+  expect(buildDashboard(data, query, now).totals.tokens).toBe(0);
+  const all = buildDashboard(data, { range: 'all' }, now);
+  expect(buildDashboard(usage([...events]), { range: 'all' }, now).sessions).not.toBe(all.sessions);
+  const policy = { catalog: { updatedAt: 'test', source: '', models: {} }, rules: [], revision: 'test' };
+  expect(buildDashboard(data, { range: 'all' }, now, 'Test', policy).sessions).not.toBe(all.sessions);
+  const invalidZone = buildDashboard(data, { range: 'all', timezone: 'unavailable/timezone' }, now);
+  const freshWarnings = ['Fresh warning'];
+  expect(
+    buildDashboard({ ...data, warnings: freshWarnings }, { range: 'all', timezone: 'unavailable/timezone' }, now)
+      .warnings,
+  ).toEqual([...freshWarnings, ...invalidZone.warnings]);
+});
+
+test('the copied-ID index bootstraps existing owners and tracks corrections, withdrawals, updates, and rollbacks', async () => {
+  const { directory, runtime } = await storeRuntime();
+  const secondDevice = { ...remoteDevice, id: 'second-owner' };
+  const thirdDevice = { ...remoteDevice, id: 'third-owner' };
+  const filename = join(directory, 'usage.sqlite');
+  const copied = () => {
+    const database = new Database(filename, { readonly: true });
+    try {
+      return database.query('SELECT id FROM usage_copied_ids ORDER BY id').all();
+    } finally {
+      database.close();
+    }
+  };
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const store = yield* UsageStore;
+      const first = yield* store.registerDevice(pairingSecret, remoteDevice);
+      const second = yield* store.registerDevice(pairingSecret, secondDevice);
+      const third = yield* store.registerDevice(pairingSecret, thirdDevice);
+      const original = event();
+      yield* store.syncUsage(remoteDevice.id, first.token, { device: remoteDevice, events: [original] });
+      expect(copied()).toEqual([]);
+      yield* store.syncUsage(secondDevice.id, second.token, { device: secondDevice, events: [original] });
+      expect(copied()).toEqual([{ id: original.id }]);
+      yield* store.syncUsage(thirdDevice.id, third.token, { device: thirdDevice, events: [original] });
+      yield* store.syncUsage(secondDevice.id, second.token, {
+        device: secondDevice,
+        events: [],
+        deletedIds: [original.id],
+      });
+      expect(copied()).toEqual([{ id: original.id }]);
+      yield* store.syncUsage(thirdDevice.id, third.token, {
+        device: thirdDevice,
+        events: [],
+        deletedIds: [original.id],
+      });
+      expect(copied()).toEqual([]);
+      yield* store.syncUsage(remoteDevice.id, first.token, {
+        device: remoteDevice,
+        events: [{ ...original, inputTokens: 200 }],
+      });
+      expect(copied()).toEqual([]);
+      yield* store.syncUsage(secondDevice.id, second.token, { device: secondDevice, events: [original] });
+    }),
+  );
+  await runtime.dispose();
+  const database = new Database(filename);
+  try {
+    database.exec(`DROP TRIGGER usage_copied_ids_insert;
+      DROP TRIGGER usage_copied_ids_delete;
+      DROP TRIGGER usage_copied_ids_update;
+      DROP TABLE usage_copied_ids;`);
+  } finally {
+    database.close();
+  }
+  const reopened = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }));
+  try {
+    expect((await reopened.runPromise(Effect.flatMap(UsageStore, (store) => store.getUsage()))).events).toHaveLength(2);
+    expect(copied()).toEqual([{ id: 'performance-request' }]);
+  } finally {
+    await reopened.dispose();
+  }
+  const updated = new Database(filename);
+  try {
+    updated.exec('BEGIN');
+    updated.query('UPDATE usage_events SET id = ? WHERE device_id = ?').run('renamed-request', secondDevice.id);
+    expect(copied()).toEqual([{ id: 'performance-request' }]);
+    expect(updated.query('SELECT id FROM usage_copied_ids').all()).toEqual([]);
+    updated.query('UPDATE usage_events SET id = ? WHERE device_id = ?').run('performance-request', secondDevice.id);
+    expect(updated.query('SELECT id FROM usage_copied_ids').all()).toEqual([{ id: 'performance-request' }]);
+    updated.query('DELETE FROM usage_events WHERE device_id = ?').run(secondDevice.id);
+    expect(updated.query('SELECT id FROM usage_copied_ids').all()).toEqual([]);
+    updated.exec('ROLLBACK');
+    expect(copied()).toEqual([{ id: 'performance-request' }]);
+  } finally {
+    updated.close();
+  }
+});

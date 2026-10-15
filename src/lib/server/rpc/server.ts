@@ -12,6 +12,7 @@ import { filePricing } from '../usage/pricing-runtime';
 import { HubPricing, LocalUsage, makeHubWebHandler } from './hub';
 import { getLocalDevice } from './identity';
 import { ServerConfiguration, UsageStore } from './store';
+import { compressRpcResponse } from './compression';
 
 export { LocalUsage } from './hub';
 
@@ -139,7 +140,7 @@ export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = loca
   // deployment's explicit public origin when one is configured.
   const publicOrigin = options.dashboardOrigin ?? process.env.ORIGIN?.trim();
   // Tailnet access is the dashboard's owner boundary in this personal mode.
-  return makeHubWebHandler(
+  const web = makeHubWebHandler(
     services,
     {
       trustBrowser: true,
@@ -148,6 +149,11 @@ export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = loca
     },
     downloads,
   );
+  return {
+    ...web,
+    handler: async (request: Request, collectorOnly = false) =>
+      compressRpcResponse(request, await web.handler(request, collectorOnly)),
+  };
 };
 
 let server: ReturnType<typeof makeRpcWebHandler> | undefined;

@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { Schema } from 'effect';
+  import { tick, untrack } from 'svelte';
   import { useSearchParams } from 'runed/kit';
   import { page } from '$app/state';
   import {
@@ -11,7 +10,7 @@
     normalizedDashboardParams,
     usageQueryFromParams,
   } from '#lib/client/dashboard-url.ts';
-  import { makeDashboardClient } from '#lib/client/rpc.ts';
+  import { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import {
     nativeThreadUrl,
     projectLabel,
@@ -20,12 +19,10 @@
     sessionDisplayName,
   } from '#lib/client/session-links.ts';
   import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
-  import { UsageQuery, type Breakdown, type DashboardResponse, type Device } from '#lib/shared/domain.ts';
+  import type { UsageQuery, Breakdown, DashboardResponse, Device } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
   import MultiSelect from '#lib/components/MultiSelect.svelte';
-  import PricingDialog from '#lib/components/PricingDialog.svelte';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';
-  import UsageChart from '#lib/components/UsageChart.svelte';
 
   const ranges = [
     { value: '6m', label: '6 months' },
@@ -44,9 +41,8 @@
   const date = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
   const params = useSearchParams(dashboardUrlSchema, { noScroll: true });
   let timezone = $state('UTC');
-  const queryKey = $derived(JSON.stringify(usageQueryFromParams(params, timezone)));
-  const decodeQuery = Schema.decodeUnknownSync(UsageQuery);
-  const query = $derived(decodeQuery(JSON.parse(queryKey)));
+  const query = $derived(usageQueryFromParams(params, timezone));
+  const queryKey = $derived(JSON.stringify(query));
   let data = $state.raw<DashboardResponse>();
   let devices = $state.raw<readonly Device[]>([]);
   let loading = $state(true);
@@ -59,7 +55,13 @@
   const sessionPage = $derived(params.page - 1);
   const sort = $derived(params.sort);
   let sourcesDialog: HTMLDialogElement;
-  let pricingDialog: { show: () => void };
+  let pricingDialog = $state.raw<{ show: () => void }>();
+  let PricingDialog = $state.raw<typeof import('#lib/components/PricingDialog.svelte').default>();
+  let UsageChart = $state.raw<typeof import('#lib/components/UsageChart.svelte').default>();
+  let pricingModule: Promise<typeof import('#lib/components/PricingDialog.svelte')> | undefined;
+  let chartModule: Promise<void> | undefined;
+  let chartError = $state('');
+  let mounted = false;
   let client = $state.raw<ReturnType<typeof makeDashboardClient>>();
   let request: AbortController | undefined;
   let requestVersion = 0;
@@ -135,22 +137,21 @@
     return remaining > 0 ? [...leading, { name: 'Other', value: remaining, color: 'var(--series-neutral)' }] : leading;
   });
   const sessionIndex = $derived(
-    (data?.sessions ?? []).map((session) => ({
-      session,
-      search:
+    new Map(
+      (data?.sessions ?? []).map((session) => [
+        session,
         `${session.sessionTitle ?? ''} ${session.projectName ?? ''} ${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''} ${session.t3ThreadId ?? ''}`.toLowerCase(),
-    })),
+      ]),
+    ),
   );
   const sortedSessions = $derived(
-    [...sessionIndex].sort((a, b) =>
-      sort === 'tokens'
-        ? b.session.tokens - a.session.tokens
-        : b.session.lastActiveAt.localeCompare(a.session.lastActiveAt),
+    [...(data?.sessions ?? [])].sort((a, b) =>
+      sort === 'tokens' ? b.tokens - a.tokens : b.lastActiveAt.localeCompare(a.lastActiveAt),
     ),
   );
   const filteredSessions = $derived.by(() => {
     const search = sessionSearch.toLowerCase();
-    return sortedSessions.filter((entry) => entry.search.includes(search)).map((entry) => entry.session);
+    return search ? sortedSessions.filter((session) => sessionIndex.get(session)?.includes(search)) : sortedSessions;
   });
   const pages = $derived(Math.max(1, Math.ceil(filteredSessions.length / 8)));
   const currentPage = $derived(Math.min(sessionPage, pages - 1));
@@ -238,6 +239,7 @@
   }
   async function refresh() {
     if (!client) return;
+    loadChart();
     request?.abort();
     const controller = new AbortController();
     request = controller;
@@ -289,20 +291,49 @@
     changeQuery({ ...query, [key]: query[key]?.length === 0 || remaining.length === 0 ? undefined : remaining });
   }
   function mountDashboard() {
+    mounted = true;
     untrack(() => {
       timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       client = makeDashboardClient();
+      loadChart();
     });
     const timer = setInterval(() => {
       if (!document.hidden) void refresh();
     }, 60000);
     return () => {
+      mounted = false;
       clearInterval(timer);
       request?.abort();
       params.cleanup();
       void client?.dispose();
       client = undefined;
     };
+  }
+  function loadChart() {
+    if (UsageChart || chartModule) return;
+    chartError = '';
+    chartModule = import('#lib/components/UsageChart.svelte').then(
+      (module) => {
+        chartModule = undefined;
+        if (mounted) UsageChart = module.default;
+      },
+      () => {
+        chartModule = undefined;
+        if (mounted) chartError = 'Could not load the chart. Try again.';
+      },
+    );
+  }
+  async function showPricing() {
+    try {
+      const module = await (pricingModule ??= import('#lib/components/PricingDialog.svelte'));
+      if (!mounted) return;
+      PricingDialog = module.default;
+      await tick();
+      pricingDialog?.show();
+    } catch {
+      pricingModule = undefined;
+      error = 'Could not load model pricing. Try again.';
+    }
   }
   function exportCsv() {
     if (!data) return;
@@ -516,7 +547,7 @@
               ? `Model pricing: ${unpricedModels} ${unpricedModels === 1 ? 'model needs' : 'models need'} pricing`
               : 'Model pricing'}
             title={unpriced > 0 ? `${compact.format(unpriced)} tokens need pricing` : 'Manage model aliases and prices'}
-            onclick={() => pricingDialog.show()}
+            onclick={() => void showPricing()}
             ><Icon name="info" size={14} />{#if unpriced > 0}<span>{unpricedModels} unpriced</span>{/if}</button
           ></span
         >
@@ -566,17 +597,16 @@
             </div>
           </div>
         </div>
-        {#if data}<UsageChart
+        {#if data && UsageChart}<UsageChart
             {data}
             mode={chartMode}
             {metric}
             grouping={params.chartBy}
             onGroupingChange={(chartBy) => params.update({ chartBy })}
           />{:else}<div class="chart-loading">
-            {#if error}<Icon name="warning" size={24} /><span>Usage is unavailable</span><button
-                class="text-button"
-                onclick={() => void refresh()}>Try again</button
-              >{:else}<span class="spinner"></span><span>Reading local usage</span>{/if}
+            {#if error || chartError}<Icon name="warning" size={24} /><span>{chartError || 'Usage is unavailable'}</span
+              ><button class="text-button" onclick={() => void refresh()}>Try again</button>{:else}<span class="spinner"
+              ></span><span>Reading local usage</span>{/if}
           </div>{/if}
         <div class="token-composition" aria-label="Token composition">
           <div class="composition-track" role="img" aria-label={composition.map(compositionTitle).join('; ')}>
@@ -806,7 +836,7 @@
         {#if page.data.passcodeEnabled}<form method="POST" action="/logout">
             <button type="submit">Sign out</button>
           </form>{/if}
-        <button onclick={() => pricingDialog.show()}>Model pricing<Icon name="arrow" size={14} /></button><button
+        <button onclick={() => void showPricing()}>Model pricing<Icon name="arrow" size={14} /></button><button
           onclick={() => sourcesDialog.showModal()}>Data sources<Icon name="arrow" size={14} /></button
         >
       </div>
@@ -814,7 +844,7 @@
   </main>
 </div>
 
-<PricingDialog bind:this={pricingDialog} {client} {query} onchange={refresh} />
+{#if PricingDialog}<PricingDialog bind:this={pricingDialog} {client} {query} onchange={refresh} />{/if}
 
 <dialog class="sources-dialog" bind:this={sourcesDialog}>
   <div class="dialog-heading">

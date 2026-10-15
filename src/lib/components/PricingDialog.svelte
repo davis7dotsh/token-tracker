@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
   import { createAliasValidation, rankCatalogMatches } from '#lib/client/pricing-editor.ts';
-  import type { makeDashboardClient } from '#lib/client/rpc.ts';
+  import type { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import type { UsageQuery } from '#lib/shared/domain.ts';
   import type { PricingInfo, PricingRule } from '#lib/shared/pricing.ts';
   import Icon from './Icon.svelte';

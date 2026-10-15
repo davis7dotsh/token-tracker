@@ -51,18 +51,17 @@ export type HubOptions = {
 // so a device remains independently inspectable.
 const uniqueEvents = (events: readonly UsageEvent[], localDeviceId: string, query: UsageQuery) => {
   const records = new Map<string, UsageEvent>();
+  const devices = query.devices && new Set(query.devices);
   for (const incoming of events) {
-    if (query.devices && !query.devices.includes(incoming.deviceId ?? 'local')) continue;
+    if (devices && !devices.has(incoming.deviceId ?? 'local')) continue;
     const key = `${incoming.harness}:${incoming.id}`;
     const existing = records.get(key);
     const preferredOwner =
       incoming.deviceId === localDeviceId ||
       (existing?.deviceId !== localDeviceId && (incoming.deviceId ?? '').localeCompare(existing?.deviceId ?? '') < 0);
-    if (
-      !existing ||
-      tokenTotal(incoming) > tokenTotal(existing) ||
-      (tokenTotal(incoming) === tokenTotal(existing) && preferredOwner)
-    )
+    const incomingTokens = tokenTotal(incoming);
+    const existingTokens = existing ? tokenTotal(existing) : -1;
+    if (!existing || incomingTokens > existingTokens || (incomingTokens === existingTokens && preferredOwner))
       records.set(key, incoming);
   }
   return [...records.values()];
@@ -114,7 +113,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         const endMillis = timeframe.end.epochMilliseconds;
         const localCandidates = current.events
           .filter((event) => {
-            const millis = Date.parse(event.timestamp);
+            const millis = eventMillis(event);
             return millis >= previousMillis && millis < endMillis;
           })
           .map((event) => event.id);
@@ -136,7 +135,45 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
             concurrency: 2,
           },
         );
-        return { remote, current, dimensions };
+        // Local histories repeat the same dimensions for every request. Keep
+        // only actual choices, and share them across pricing-only recalculation.
+        const seen = new Map<string, Map<string, Map<string, Set<string>>>>();
+        const choices: (typeof dimensions)[number][] = [];
+        const addDimension = (deviceId: string, harness: UsageEvent['harness'], model: string, project: string) => {
+          let harnesses = seen.get(deviceId);
+          if (!harnesses) {
+            harnesses = new Map();
+            seen.set(deviceId, harnesses);
+          }
+          let models = harnesses.get(harness);
+          if (!models) {
+            models = new Map();
+            harnesses.set(harness, models);
+          }
+          let projects = models.get(model);
+          if (!projects) {
+            projects = new Set();
+            models.set(model, projects);
+          }
+          if (projects.has(project)) return;
+          projects.add(project);
+          choices.push({ deviceId, harness, model, project });
+        };
+        for (const dimension of dimensions)
+          addDimension(dimension.deviceId, dimension.harness, dimension.model, dimension.project);
+        for (const event of current.events)
+          addDimension(
+            event.deviceId ?? 'local',
+            event.harness,
+            event.rawModel ?? event.model,
+            event.repository ?? event.project,
+          );
+        return {
+          remote,
+          current,
+          dimensions: choices,
+          unique: uniqueEvents([...remote.events, ...current.events], localDeviceId, query),
+        };
       });
       // A pricing edit invalidates calculated prices, not the underlying usage.
       // Reuse validated records so a save never rereads unchanged log history.
@@ -147,11 +184,14 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       const readSnapshot = Effect.fn('rpc.readSnapshot')(function* (key: string) {
         const { query, revision } = decodeReadKey(key);
         const state = yield* pricing.load;
-        const { remote, current, dimensions } = yield* Cache.get(rawSnapshots, JSON.stringify({ query, revision }));
-        const unique = uniqueEvents([...remote.events, ...current.events], localDeviceId, query);
+        const { remote, current, dimensions, unique } = yield* Cache.get(
+          rawSnapshots,
+          JSON.stringify({ query, revision }),
+        );
         const events: UsageEvent[] = [];
         for (let offset = 0; offset < unique.length; offset += 1_000) {
-          for (const event of unique.slice(offset, offset + 1_000)) events.push(repriceEvent(event, state.policy));
+          const end = Math.min(offset + 1_000, unique.length);
+          for (let index = offset; index < end; index++) events.push(repriceEvent(unique[index], state.policy));
           yield* Effect.yieldNow;
         }
         const policySnapshot = `${state.info.updatedAt} · ${state.info.revision.slice(0, 12)}`;
@@ -190,15 +230,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               : [];
         return {
           state,
-          dimensions: [
-            ...dimensions,
-            ...current.events.map((event) => ({
-              deviceId: event.deviceId ?? 'local',
-              harness: event.harness,
-              model: event.rawModel ?? event.model,
-              project: event.repository ?? event.project,
-            })),
-          ],
+          dimensions,
           data: {
             events,
             sources: [...current.sources, ...remote.sources],

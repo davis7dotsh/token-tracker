@@ -3,6 +3,7 @@ import { CollectionError } from '../../shared/domain';
 import { Effect, FileSystem, Path, Result, Stream } from 'effect';
 import { fileSignature, parsedCachePath, prepareParsedCache, readParsedCache, writeParsedCache } from './cache';
 import type { ParsedFile } from './parsers';
+import { readUsageDirectory } from './files';
 
 type MutableSource = { -readonly [K in keyof SourceStatus]: SourceStatus[K] };
 type Metadata = Record<string, unknown>;
@@ -147,6 +148,7 @@ const updateParser = (session: Session) => {
   let turn = 0;
   let model = session.model;
   const completed = new Map<string, number>();
+  const turnEvents = new Map<number, ParsedFile['events']>();
   const flush = (complete: boolean) => {
     if (length > maximumLength) parsed.malformed++;
     else {
@@ -180,9 +182,11 @@ const updateParser = (session: Session) => {
               appendUsage(replacement, object(update.usage), session, ordinal, stamp, model);
               parsed.malformed += replacement.malformed;
               if (existingTurn === undefined || !replacement.malformed) {
-                if (existingTurn !== undefined)
-                  parsed.events = parsed.events.filter((entry) => turnNumber(entry.event) !== ordinal);
-                parsed.events.push(...replacement.events);
+                // A native completion replay replaces the whole turn. Keep
+                // insertion order equivalent to removing then appending its
+                // rows, without rescanning all prior events for each replay.
+                if (existingTurn !== undefined) turnEvents.delete(ordinal);
+                turnEvents.set(ordinal, replacement.events);
               }
             }
           } else if (existingTurn !== undefined) parsed.malformed++;
@@ -208,6 +212,8 @@ const updateParser = (session: Session) => {
     },
     finish() {
       if (length) flush(false);
+      for (const events of turnEvents.values()) parsed.events.push(...events);
+      turnEvents.clear();
       return parsed;
     },
   };
@@ -257,18 +263,14 @@ export const collectGrokFiles = Effect.fn('usage.collectGrokFiles')(function* (
     directory: string,
     problem: { directories: number },
   ) {
-    const listed = yield* Effect.result(fs.readDirectory(directory));
+    const listed = yield* Effect.result(readUsageDirectory(directory));
     if (Result.isFailure(listed)) {
       problem.directories++;
       return [];
     }
     const results: string[] = [];
-    for (const name of listed.success) {
-      const child = path.join(directory, name);
-      if (Result.isSuccess(yield* Effect.result(fs.readLink(child)))) continue;
-      const info = yield* Effect.result(fs.stat(child));
-      if (Result.isFailure(info)) problem.directories++;
-      else if (info.success.type === 'Directory') results.push(child);
+    for (const entry of listed.success) {
+      if (entry.isDirectory()) results.push(path.join(directory, entry.name));
     }
     return results.sort();
   });

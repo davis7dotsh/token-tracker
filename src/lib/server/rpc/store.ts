@@ -195,6 +195,33 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         }),
       )
       .pipe(Effect.mapError(storageFailure));
+    // Only copied IDs need out-of-window owner checks. Maintain this small
+    // index transactionally instead of rescanning every historical ID after an
+    // upload. LIMIT/OFFSET uses the existing covering event-ID index.
+    yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const existing =
+            yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_copied_ids'`;
+          yield* sql.unsafe('CREATE TABLE IF NOT EXISTS usage_copied_ids (id TEXT PRIMARY KEY) WITHOUT ROWID');
+          if (!existing.length)
+            yield* sql.unsafe(`INSERT INTO usage_copied_ids
+              SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1`);
+          const addCopy = `INSERT OR IGNORE INTO usage_copied_ids (id)
+            SELECT NEW.id WHERE EXISTS (SELECT 1 FROM usage_events WHERE id = NEW.id LIMIT 1 OFFSET 1);`;
+          const removeCopy = `DELETE FROM usage_copied_ids WHERE id = OLD.id
+            AND NOT EXISTS (SELECT 1 FROM usage_events WHERE id = OLD.id LIMIT 1 OFFSET 1);`;
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_insert
+            AFTER INSERT ON usage_events BEGIN ${addCopy} END`);
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_delete
+            AFTER DELETE ON usage_events BEGIN ${removeCopy} END`);
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_update
+            AFTER UPDATE OF id, device_id ON usage_events
+            WHEN OLD.id IS NOT NEW.id OR OLD.device_id IS NOT NEW.device_id
+            BEGIN ${removeCopy} ${addCopy} END`);
+        }),
+      )
+      .pipe(Effect.mapError(storageFailure));
     let revision = 0;
     let ownerRevision = 0;
     let copiedRevision = -1;
@@ -425,7 +452,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         if (window.length) {
           if (copiedRevision !== ownerRevision) {
             const version = ownerRevision;
-            const copies = yield* sql<{ id: string }>`SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1`;
+            const copies = yield* sql<{ id: string }>`SELECT id FROM usage_copied_ids`;
             copiedIds = new Set(copies.map((row) => row.id));
             copiedRevision = version;
           }

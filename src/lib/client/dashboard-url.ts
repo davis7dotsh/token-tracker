@@ -1,40 +1,48 @@
-import { Effect, Option, Schema } from 'effect';
+import type { StandardSchemaV1 } from 'runed/kit';
 import type { UsageQuery } from '../shared/domain';
 
 export const filterKeys = ['harnesses', 'providers', 'models', 'devices', 'projects'] as const;
 export const breakdownGroups = ['harnesses', 'models', 'providers', 'devices', 'projects'] as const;
 export const chartGroups = ['harnesses', 'providers', 'models'] as const;
 
-const defaulted = <Value extends string | number | boolean>(schema: Schema.Codec<Value>, value: Value) =>
-  schema.pipe(
-    Schema.catchDecoding(() => Effect.succeed(Option.some(value))),
-    Schema.withDecodingDefaultKey(Effect.succeed(value)),
-  );
+const literal = <const Value extends string>(value: unknown, values: readonly Value[], fallback: Value) =>
+  values.find((entry) => entry === value) ?? fallback;
+const text = (value: unknown) => (typeof value === 'string' ? value : '');
+const validateDashboardParams = (input: unknown) => {
+  const value = typeof input === 'object' && input !== null ? input : {};
+  const field = (key: string) => (key in value ? Reflect.get(value, key) : undefined);
+  const page = field('page');
+  return {
+    range: literal(field('range'), ['6m', '30d', '7d', 'today'], '30d'),
+    harnesses: text(field('harnesses')),
+    providers: text(field('providers')),
+    models: text(field('models')),
+    devices: text(field('devices')),
+    projects: text(field('projects')),
+    metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
+    chart: literal(field('chart'), ['bar', 'line'], 'bar'),
+    breakdown: literal(field('breakdown'), breakdownGroups, 'harnesses'),
+    chartBy: literal(field('chartBy'), chartGroups, 'harnesses'),
+    expanded: field('expanded') === true,
+    search: text(field('search')),
+    sort: literal(field('sort'), ['tokens', 'lastActiveAt'], 'lastActiveAt'),
+    page: typeof page === 'number' && Number.isSafeInteger(page) && page >= 1 ? page : 1,
+  };
+};
+type DashboardUrlState = ReturnType<typeof validateDashboardParams>;
 
-export const DashboardUrlState = Schema.Struct({
-  range: defaulted(Schema.Literals(['6m', '30d', '7d', 'today']), '30d'),
-  harnesses: defaulted(Schema.String, ''),
-  providers: defaulted(Schema.String, ''),
-  models: defaulted(Schema.String, ''),
-  devices: defaulted(Schema.String, ''),
-  projects: defaulted(Schema.String, ''),
-  metric: defaulted(Schema.Literals(['tokens', 'cost']), 'tokens'),
-  chart: defaulted(Schema.Literals(['bar', 'line']), 'bar'),
-  breakdown: defaulted(Schema.Literals(breakdownGroups), 'harnesses'),
-  chartBy: defaulted(Schema.Literals(chartGroups), 'harnesses'),
-  expanded: defaulted(Schema.Boolean, false),
-  search: defaulted(Schema.String, ''),
-  sort: defaulted(Schema.Literals(['tokens', 'lastActiveAt']), 'lastActiveAt'),
-  page: defaulted(
-    Schema.Number.check(
-      Schema.isInt(),
-      Schema.isGreaterThanOrEqualTo(1),
-      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
-    ),
-    1,
-  ),
-});
-export const dashboardUrlSchema = Schema.toStandardSchemaV1(DashboardUrlState);
+// Runed only needs Standard Schema's synchronous validation interface. Keep
+// URL parsing independent of the server's Effect schema/runtime bundle.
+export const dashboardUrlSchema: StandardSchemaV1<unknown, DashboardUrlState> = {
+  '~standard': {
+    version: 1 as const,
+    vendor: 'token-tracker',
+    validate: (input: unknown) =>
+      typeof input !== 'object' || input === null || Array.isArray(input)
+        ? { issues: [{ path: [], message: 'Expected object' }] }
+        : { value: validateDashboardParams(input) },
+  },
+};
 
 export const decodeFilter = (value: string) => {
   if (value === '') return undefined;
@@ -70,7 +78,7 @@ export const encodeFilter = (values: readonly string[] | undefined) => {
     : unique.join(',');
 };
 
-export const usageQueryFromParams = (params: typeof DashboardUrlState.Type, timezone: string) =>
+export const usageQueryFromParams = (params: DashboardUrlState, timezone: string) =>
   ({
     range: params.range,
     timezone,
@@ -81,7 +89,7 @@ export const usageQueryFromParams = (params: typeof DashboardUrlState.Type, time
     projects: decodeFilter(params.projects),
   }) satisfies UsageQuery;
 
-export const normalizedDashboardParams = (params: typeof DashboardUrlState.Type) => ({
+export const normalizedDashboardParams = (params: DashboardUrlState) => ({
   range: params.range,
   harnesses: encodeFilter(decodeFilter(params.harnesses)),
   providers: encodeFilter(decodeFilter(params.providers)),

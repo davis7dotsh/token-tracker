@@ -16,6 +16,7 @@ import { loadPricing } from './pricing-runtime';
 import { makeRepositoryResolver } from './repository';
 import { collectGrokFiles } from './grok';
 import { readT3Metadata, t3MetadataKey } from './t3';
+import { readUsageDirectory } from './files';
 
 export { buildDashboard, provider, validateTimezone } from './dashboard';
 export { canonicalRepository, resolveRepository } from './repository';
@@ -126,23 +127,16 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     while (pending.length) {
       const directory = pending.pop();
       if (!directory) break;
-      const listed = yield* Effect.result(fs.readDirectory(directory));
+      const listed = yield* Effect.result(readUsageDirectory(directory));
       if (Result.isFailure(listed)) {
         unreadableDirectories++;
         continue;
       }
-      for (const name of listed.success) {
-        const file = path.join(directory, name);
+      for (const entry of listed.success) {
+        const file = path.join(directory, entry.name);
         // Resolve the configured root, but skip arbitrary nested symlinks.
-        const link = yield* Effect.result(fs.readLink(file));
-        if (Result.isSuccess(link)) continue;
-        const info = yield* Effect.result(fs.stat(file));
-        if (Result.isFailure(info)) {
-          unreadableDirectories++;
-          continue;
-        }
-        if (info.success.type === 'Directory') pending.push(file);
-        else if (info.success.type === 'File' && path.extname(file).toLowerCase() === '.jsonl') paths.push(file);
+        if (entry.isDirectory()) pending.push(file);
+        else if (entry.isFile() && path.extname(file).toLowerCase() === '.jsonl') paths.push(file);
       }
     }
     paths.sort();
