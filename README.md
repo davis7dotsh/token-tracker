@@ -139,16 +139,20 @@ bun run api:clickhouse        # http://0.0.0.0:8791, GET / lists every endpoint
 ```
 
 - Env: `CLICKHOUSE_URL` (`http://localhost:8123`), `CLICKHOUSE_DATABASE` (`token_tracker_bench`), `CLICKHOUSE_USERNAME` / `CLICKHOUSE_PASSWORD` (`token_tracker` / `token_tracker_dev`), `HOST` (`0.0.0.0`), `PORT` (`8791`).
-- `/health`, `/v1/schema`, `/v1/storage`, `/v1/devices`: server, schema, compression, and devices.
-- `/v1/summary`, `/v1/timeseries` (`bucket`, `group_by`), `/v1/breakdown` (`dimension`, `sort`, `limit`): aggregates over the latest live version of each record.
-- `/v1/sessions`, `/v1/sessions/:sessionId`, `/v1/events`: session lists, one session with its events, and decoded events.
-- Shared filters: `from`/`to` (ISO, `[from, to)`), `device_id`, `harness`, `model`, `provider`, `project`, `repository`, `session_id` (comma-separated or repeated), and `q` (text search). `debug=1` adds the generated SQL to `meta`.
-- `POST /v1/sql` runs one `SELECT`/`WITH` statement, capped at `limit` rows (default 1,000, max 10,000), with `readonly = 1`. Rows are returned raw, so UInt64 values arrive as strings.
+- `/health`, `/v1/schema`, `/v1/storage`, `/v1/devices`: server, schema, compression (physical rows plus `liveEvents`), and devices.
+- `/v1/summary` (totals plus distinct projects/repositories/models), `/v1/timeseries` (`bucket`, `group_by`, `tz`), `/v1/breakdown` (`dimension`, `sort`, plus `costShare`, `costPerMillionTokens`, `costPerMillionOutputTokens`): aggregates over the latest live version of each record.
+- `/v1/sessions`, `/v1/sessions/:sessionId` (`events_limit`, `events_offset`, `include_events=false`), `/v1/events`: session lists, one session with its events, and decoded events.
+- Shared filters: `from`/`to` (ISO, `[from, to)`) or `range=24h|7d|30d|90d|180d|all` (ends at the newest stored event), `device_id`, `harness`, `model`, `provider`, `project`, `repository`, `session_id` (comma-separated or repeated), and `q` (text search). `debug=1` adds the generated SQL to `meta`. Unknown parameters return 400 with the valid list.
+- Lists take `limit` and `offset`; `meta.total` and `meta.hasMore` show what is left. Breakdown allows up to 500 rows, sessions 200, events 1,000.
+- `POST /v1/sql` runs one `SELECT`/`WITH` statement, capped at `limit` rows (default 1,000, max 10,000), with `readonly = 1`. Numeric strings within double precision come back as numbers; larger integers stay strings.
+- Counting: a record is `(device_id, id)` and counts once, at its latest version, unless that version is a tombstone. The API creates the `usage_events_live` view on startup; count from it. Raw `usage_events` includes superseded versions and tombstones, and `FINAL` only merges rows sharing the full sorting key, so it misses corrections that change `timestamp`.
+- Units: `tokens` = input + output + cache read + cache write; `reasoningTokens` may overlap output and is not added. `costUsd` covers known-cost events only (`unpricedTokens` counts the rest). `project` is a per-device path; group by `repository` across devices. `requests` sums per-event request counts and can exceed `events`. `GET /` repeats these as `concepts`.
 
 ```sh
-curl 'http://localhost:8791/v1/summary?from=2026-09-15&harness=claude'
-curl 'http://localhost:8791/v1/timeseries?bucket=day&group_by=harness&from=2026-10-01'
-curl -X POST http://localhost:8791/v1/sql -d '{"query":"SELECT model, count() AS rows FROM usage_events GROUP BY model ORDER BY rows DESC"}'
+curl 'http://localhost:8791/v1/summary?range=30d&harness=claude'
+curl 'http://localhost:8791/v1/timeseries?bucket=day&group_by=harness&from=2026-10-01&tz=America/Chicago'
+curl 'http://localhost:8791/v1/breakdown?dimension=project&limit=100&offset=100'
+curl -X POST http://localhost:8791/v1/sql -d '{"query":"SELECT model, count() AS events FROM usage_events_live GROUP BY model ORDER BY events DESC"}'
 ```
 
 `bun run ch:down` stops the container and keeps its data. `docker compose down -v` also deletes the `token-tracker-clickhouse-data` volume and everything in it.
