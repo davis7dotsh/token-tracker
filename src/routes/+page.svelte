@@ -5,12 +5,15 @@
   import { page } from '$app/state';
   import {
     breakdownGroups,
-    dashboardUrlSchema,
+    dashboardRanges as ranges,
+    dashboardUrlSchemaFor,
     encodeFilter,
     filterKeys,
     normalizedDashboardParams,
+    readDefaultRange,
     usageQueryFromParams,
   } from '#lib/client/dashboard-url.ts';
+  import { relativeTime as relative } from '#lib/client/format.ts';
   import { makeDashboardClient } from '#lib/client/rpc.ts';
   import {
     nativeThreadUrl,
@@ -23,16 +26,9 @@
   import { UsageQuery, type Breakdown, type DashboardResponse, type Device } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
   import MultiSelect from '#lib/components/MultiSelect.svelte';
-  import PricingDialog from '#lib/components/PricingDialog.svelte';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';
   import UsageChart from '#lib/components/UsageChart.svelte';
 
-  const ranges = [
-    { value: '6m', label: '6 months' },
-    { value: '30d', label: '1 month' },
-    { value: '7d', label: '1 week' },
-    { value: 'today', label: '1 day' },
-  ] as const;
   const integer = new Intl.NumberFormat('en-US');
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
   const currency = new Intl.NumberFormat('en-US', {
@@ -42,7 +38,8 @@
     maximumFractionDigits: 2,
   });
   const date = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  const params = useSearchParams(dashboardUrlSchema, { noScroll: true });
+  // A URL without `range` uses this browser's default from Settings.
+  const params = useSearchParams(dashboardUrlSchemaFor(readDefaultRange()), { noScroll: true });
   let timezone = $state('UTC');
   const queryKey = $derived(JSON.stringify(usageQueryFromParams(params, timezone)));
   const decodeQuery = Schema.decodeUnknownSync(UsageQuery);
@@ -58,8 +55,6 @@
   const sessionSearch = $derived(params.search);
   const sessionPage = $derived(params.page - 1);
   const sort = $derived(params.sort);
-  let sourcesDialog: HTMLDialogElement;
-  let pricingDialog: { show: () => void };
   let client = $state.raw<ReturnType<typeof makeDashboardClient>>();
   let request: AbortController | undefined;
   let requestVersion = 0;
@@ -226,16 +221,6 @@
       ? 'Unpriced'
       : `${currency.format(row.costUSD)}${row.unpricedTokens > 0 ? '*' : ''}`;
   }
-  function relative(value: string) {
-    const minutes = Math.max(0, Math.round((Date.now() - Date.parse(value)) / 60000));
-    return minutes < 1
-      ? 'Just now'
-      : minutes < 60
-        ? `${minutes}m ago`
-        : minutes < 1440
-          ? `${Math.floor(minutes / 60)}h ago`
-          : `${Math.floor(minutes / 1440)}d ago`;
-  }
   async function refresh() {
     if (!client) return;
     request?.abort();
@@ -389,6 +374,7 @@
           class={['status-dot', error ? 'offline' : data ? 'online' : '']}
         ></span><span>{error ? 'Offline' : data ? 'Connected' : 'Connecting'}</span>
       </div>
+      <a class="icon-button" href="/settings" aria-label="Settings" title="Settings"><Icon name="settings" /></a>
       <ThemeToggle />
     </div>
   </header>
@@ -510,14 +496,14 @@
         <span class="metric-label">Estimated API cost</span><strong
           class={['metric-value', !data && loading && 'skeleton']}>{totals ? formatCost(totals) : '—'}</strong
         ><span class="metric-detail metric-pricing-detail"
-          ><span>At model API rates</span><button
+          ><span>At model API rates</span><a
             class={['pricing-control', unpriced > 0 && 'needs-pricing']}
+            href="/settings/pricing"
             aria-label={unpriced > 0
               ? `Model pricing: ${unpricedModels} ${unpricedModels === 1 ? 'model needs' : 'models need'} pricing`
               : 'Model pricing'}
             title={unpriced > 0 ? `${compact.format(unpriced)} tokens need pricing` : 'Manage model aliases and prices'}
-            onclick={() => pricingDialog.show()}
-            ><Icon name="info" size={14} />{#if unpriced > 0}<span>{unpricedModels} unpriced</span>{/if}</button
+            ><Icon name="info" size={14} />{#if unpriced > 0}<span>{unpricedModels} unpriced</span>{/if}</a
           ></span
         >
       </div>
@@ -797,7 +783,13 @@
     {#if devices.length}<div class="device-status" aria-label="Device sync status">
         <Icon name="network" size={16} />{#each devices as device (device.id)}<span
             ><b>{device.name}</b>
-            {device.lastSeen ? `synced ${relative(device.lastSeen)}` : 'awaiting first sync'}</span
+            {device.revokedAt
+              ? 'revoked'
+              : device.needsReconnect
+                ? 'needs reconnect'
+                : device.lastSeen
+                  ? `synced ${relative(device.lastSeen)}`
+                  : 'awaiting first sync'}</span
           >{/each}
       </div>{/if}
     <footer>
@@ -806,42 +798,10 @@
         {#if page.data.passcodeEnabled}<form method="POST" action="/logout">
             <button type="submit">Sign out</button>
           </form>{/if}
-        <button onclick={() => pricingDialog.show()}>Model pricing<Icon name="arrow" size={14} /></button><button
-          onclick={() => sourcesDialog.showModal()}>Data sources<Icon name="arrow" size={14} /></button
+        <a href="/settings/pricing">Model pricing<Icon name="arrow" size={14} /></a><a href="/settings/data"
+          >Data sources<Icon name="arrow" size={14} /></a
         >
       </div>
     </footer>
   </main>
 </div>
-
-<PricingDialog bind:this={pricingDialog} {client} {query} onchange={refresh} />
-
-<dialog class="sources-dialog" bind:this={sourcesDialog}>
-  <div class="dialog-heading">
-    <h2>Data sources & pricing</h2>
-    <button class="icon-button" aria-label="Close data sources" onclick={() => sourcesDialog.close()}
-      ><Icon name="close" /></button
-    >
-  </div>
-  <div class="sources-list">
-    {#each data?.sources ?? [] as source (`${source.harness}:${source.path}`)}<div class="source-row">
-        <div>
-          <strong
-            ><i class="category-swatch" style:background={seriesColor(source.harness, 'harnesses')} aria-hidden="true"
-            ></i>
-            {categoryNames[source.harness] ?? source.harness}</strong
-          ><span class={['source-status', source.status]}>{source.status}</span>
-        </div>
-        <code>{source.path}</code><span>{source.files} files · {integer.format(source.events)} usage records</span
-        >{#if source.error}<p>{source.error}</p>{/if}
-      </div>{/each}
-  </div>
-  {#if data}<div class="pricing-note">
-      <strong>Estimated API-equivalent cost</strong>
-      <p>
-        {data.pricing.method}. Pricing updated {data.pricing.updatedAt}. These estimates are separate from your
-        subscription bill.
-      </p>
-      {#each data.warnings as warning (warning)}<p>{warning}</p>{/each}
-    </div>{/if}
-</dialog>

@@ -287,6 +287,20 @@ test('browser and CLI use the actual Effect RPC HTTP wire with typed errors and 
     expect((await browser.getUsage({ devices: [copiedDevice.id] })).totals.tokens).toBe(325);
     const visibleDevices = await browser.getDevices();
     expect(visibleDevices.find((item) => item.id === copiedDevice.id)?.eventCount).toBe(1);
+    // The hub collects its own machine directly; that device cannot be changed.
+    expect(await browser.getAdminAccess()).toEqual({ secretRequired: false, localDeviceId: localDevice.id });
+    for (const change of [
+      () => browser.renameDevice(localDevice.id, 'Renamed hub', pairingSecret),
+      () => browser.revokeDevice(localDevice.id, pairingSecret),
+      () => browser.revokeDevice('local', pairingSecret),
+      () => browser.restoreDevice(localDevice.id, pairingSecret),
+    ])
+      expect(
+        await change().then(
+          () => null,
+          (error: unknown) => error,
+        ),
+      ).toMatchObject({ message: expect.stringContaining('own machine') });
     const readOnlyData = JSON.stringify({ dashboard: copiedDashboard, devices: visibleDevices });
     expect(readOnlyData).not.toContain(pairingSecret);
     expect(readOnlyData).not.toContain(registration.token);

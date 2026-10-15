@@ -14,6 +14,11 @@ import {
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
 
 const storageFailure = () => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' });
+const revokedFailure = () =>
+  new Unauthorized({
+    message: 'This device is revoked. Restore it in the dashboard’s device settings, then connect it again.',
+  });
+const StoredDevice = Schema.Struct({ ...Device.fields, needsReconnect: Schema.BooleanFromBit });
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const equalSecret = (left: string, right: string) =>
   timingSafeEqual(Buffer.from(digest(left)), Buffer.from(digest(right)));
@@ -116,9 +121,15 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       .unsafe(`CREATE TABLE IF NOT EXISTS devices (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL,
       token_hash TEXT NOT NULL, last_seen TEXT,
-      sources TEXT NOT NULL DEFAULT '[]', pricing_updated_at TEXT NOT NULL DEFAULT ''
+      sources TEXT NOT NULL DEFAULT '[]', pricing_updated_at TEXT NOT NULL DEFAULT '', revoked_at TEXT
     )`)
       .pipe(Effect.mapError(storageFailure));
+    const deviceColumns = yield* sql
+      .unsafe<{ name: string }>('PRAGMA table_info(devices)')
+      .pipe(Effect.mapError(storageFailure));
+    if (!deviceColumns.some((column) => column.name === 'revoked_at')) {
+      yield* sql.unsafe('ALTER TABLE devices ADD COLUMN revoked_at TEXT').pipe(Effect.mapError(storageFailure));
+    }
     yield* sql
       .unsafe(`CREATE TABLE IF NOT EXISTS usage_events (
       device_id TEXT NOT NULL, id TEXT NOT NULL, timestamp TEXT NOT NULL,
@@ -203,11 +214,12 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     const getDevices = Effect.fn('UsageStore.getDevices')(
       function* () {
         const rows = yield* sql`
-        SELECT d.id, d.name, d.platform, d.last_seen AS lastSeen,
+        SELECT d.id, d.name, d.platform, d.last_seen AS lastSeen, d.revoked_at AS revokedAt,
+          d.token_hash = '' AS needsReconnect,
           COALESCE((SELECT SUM(records) FROM usage_dimensions e WHERE e.device_id = d.id), 0) AS eventCount
         FROM devices d ORDER BY d.name
       `;
-        return yield* Schema.decodeUnknownEffect(Schema.Array(Device))(rows);
+        return yield* Schema.decodeUnknownEffect(Schema.Array(StoredDevice))(rows);
       },
       (effect) => Effect.mapError(effect, storageFailure),
     );
@@ -221,12 +233,17 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       }
       yield* validateDevice(device);
       const token = randomBytes(32).toString('base64url');
-      yield* sql`
+      // A revoked device stays blocked, even with the pairing secret, until the
+      // dashboard restores it. The conflict update skips it atomically.
+      const paired = yield* sql<{ id: string }>`
         INSERT INTO devices (id, name, platform, token_hash)
         VALUES (${device.id}, ${device.name}, ${device.platform}, ${digest(token)})
         ON CONFLICT (id) DO UPDATE SET name = excluded.name,
           platform = excluded.platform, token_hash = excluded.token_hash
+        WHERE devices.revoked_at IS NULL
+        RETURNING id
       `.pipe(Effect.mapError(storageFailure));
+      if (!paired.length) return yield* Effect.fail(revokedFailure());
       const devices = yield* getDevices();
       const registered = devices.find((item) => item.id === device.id);
       if (!registered) return yield* Effect.fail(storageFailure());
@@ -284,10 +301,16 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               yield* sql`INSERT INTO devices (id, name, platform, token_hash)
                 VALUES (${deviceId}, ${batch.device.name}, ${batch.device.platform}, ${digest(randomBytes(32).toString('base64url'))})
                 ON CONFLICT (id) DO NOTHING`;
+              const target = yield* sql<{
+                revoked_at: string | null;
+              }>`SELECT revoked_at FROM devices WHERE id = ${deviceId}`;
+              if (target[0]?.revoked_at) return yield* Effect.fail(revokedFailure());
             } else {
               const credentials = yield* sql<{
                 token_hash: string;
-              }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`;
+                revoked_at: string | null;
+              }>`SELECT token_hash, revoked_at FROM devices WHERE id = ${deviceId}`;
+              if (credentials[0]?.revoked_at) return yield* Effect.fail(revokedFailure());
               if (!credentials[0] || !equalSecret(digest(authorization.token), credentials[0].token_hash)) {
                 return yield* Effect.fail(
                   new Unauthorized({
@@ -378,7 +401,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
               deleted += rows.length;
             }
             const receivedAt = new Date().toISOString();
-            yield* sql`UPDATE devices SET name = ${batch.device.name}, platform = ${batch.device.platform}, last_seen = ${receivedAt},
+            // Pairing sets the name; later uploads keep any rename from the dashboard.
+            yield* sql`UPDATE devices SET platform = ${batch.device.platform}, last_seen = ${receivedAt},
               sources = COALESCE(${batch.sources ? JSON.stringify(batch.sources) : null}, sources),
               pricing_updated_at = COALESCE(${batch.pricingUpdatedAt || null}, pricing_updated_at) WHERE id = ${deviceId}`;
             return { accepted, updated, deleted, receivedAt };
@@ -606,27 +630,75 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       return yield* Effect.try({ try: () => decodeDimensions(rows), catch: storageFailure });
     });
 
-    const authorizePricing = (secret: string) =>
+    const authorizeAdmin = (secret: string, action = 'Pricing changes') =>
       equalSecret(secret, configuration.pairingSecret)
         ? Effect.void
-        : Effect.fail(new Unauthorized({ message: 'Pricing changes require the dashboard or its pairing secret.' }));
+        : Effect.fail(new Unauthorized({ message: `${action} require the dashboard or its pairing secret.` }));
     const authorizeDevice = Effect.fn('UsageStore.authorizeDevice')(function* (deviceId: string, token: string) {
       const credentials = yield* sql<{
         token_hash: string;
-      }>`SELECT token_hash FROM devices WHERE id = ${deviceId}`.pipe(Effect.mapError(storageFailure));
+      }>`SELECT token_hash FROM devices WHERE id = ${deviceId} AND revoked_at IS NULL`.pipe(
+        Effect.mapError(storageFailure),
+      );
       if (!credentials[0] || !equalSecret(digest(token), credentials[0].token_hash))
         return yield* new Unauthorized({ message: 'A connected device credential is required.' });
+    });
+    const deviceById = Effect.fn('UsageStore.deviceById')(function* (deviceId: string) {
+      const device = (yield* getDevices()).find((item) => item.id === deviceId);
+      if (!device)
+        return yield* new InvalidRequest({ message: 'This device is no longer connected to the dashboard.' });
+      return device;
+    });
+    // Renaming and revoking only change the device row. Usage history stays.
+    const renameDevice = Effect.fn('UsageStore.renameDevice')(function* (deviceId: string, name: string) {
+      const label = name.trim();
+      if (!label || label.length > 200)
+        return yield* new InvalidRequest({ message: 'Enter a device name of at most 200 characters.' });
+      const renamed = yield* sql<{
+        id: string;
+      }>`UPDATE devices SET name = ${label} WHERE id = ${deviceId} AND revoked_at IS NULL RETURNING id`.pipe(
+        Effect.mapError(storageFailure),
+      );
+      if (!renamed.length)
+        return yield* new InvalidRequest({ message: 'Only connected devices that are not revoked can be renamed.' });
+      revision++;
+      return yield* deviceById(deviceId);
+    });
+    const revokeDevice = Effect.fn('UsageStore.revokeDevice')(function* (deviceId: string) {
+      // Clearing the hash also invalidates the token; a digest never equals ''.
+      const revoked = yield* sql<{
+        id: string;
+      }>`UPDATE devices SET revoked_at = COALESCE(revoked_at, ${new Date().toISOString()}), token_hash = ''
+        WHERE id = ${deviceId} RETURNING id`.pipe(Effect.mapError(storageFailure));
+      if (!revoked.length)
+        return yield* new InvalidRequest({ message: 'This device is no longer connected to the dashboard.' });
+      return yield* deviceById(deviceId);
+    });
+    // Restoring only lifts the block. The old token stays discarded, so the
+    // device must pair again for a new one. Restoring an unrevoked device is a no-op.
+    const restoreDevice = Effect.fn('UsageStore.restoreDevice')(function* (deviceId: string) {
+      const restored = yield* sql<{
+        id: string;
+      }>`UPDATE devices SET revoked_at = NULL WHERE id = ${deviceId} RETURNING id`.pipe(
+        Effect.mapError(storageFailure),
+      );
+      if (!restored.length)
+        return yield* new InvalidRequest({ message: 'This device is no longer connected to the dashboard.' });
+      return yield* deviceById(deviceId);
     });
     return {
       getDevices,
       registerDevice,
+      renameDevice,
+      revokeDevice,
+      restoreDevice,
       syncUsage: (deviceId: string, token: string, batch: SyncBatch) => writeUsageBatch(deviceId, batch, { token }),
       importUsage: (pairingSecret: string, batch: SyncBatch) =>
         writeUsageBatch(batch.device.id, batch, { pairingSecret }),
       getUsage,
       getDimensions,
       getRevision: () => revision,
-      authorizePricing,
+      authorizeAdmin,
       authorizeDevice,
     };
   }),

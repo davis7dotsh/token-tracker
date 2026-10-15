@@ -178,6 +178,11 @@ export const Device = Schema.Struct({
   ...DeviceRegistration.fields,
   lastSeen: Schema.NullOr(Schema.String),
   eventCount: Schema.Number,
+  // A revoked device keeps its usage history but can no longer upload or pair
+  // again until it is restored. Revoking also discards its token, so a restored
+  // device needs to reconnect before it can upload.
+  revokedAt: Schema.NullOr(Schema.String),
+  needsReconnect: Schema.Boolean,
 });
 export type Device = typeof Device.Type;
 export const SyncBatch = Schema.Struct({

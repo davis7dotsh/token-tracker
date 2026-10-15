@@ -324,8 +324,9 @@ test('metadata heartbeats reuse remote records while corrections and deletions i
       expect(store.getRevision()).toBe(revision);
       const afterHeartbeat = yield* store.getUsage(undefined, options);
       expect(afterHeartbeat.events).toBe(before.events);
+      // Pairing sets a device's name; uploads never replace a dashboard rename.
       expect(afterHeartbeat.sources[0]).toMatchObject({
-        path: 'Renamed remote · /changed',
+        path: 'Remote · /changed',
         status: 'empty',
         events: 0,
       });

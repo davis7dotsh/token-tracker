@@ -29,9 +29,33 @@ export class InvalidRequest extends Schema.TaggedError<InvalidRequest>()('Invali
 
 const SyncFailure = Schema.Union([StorageFailure, Unauthorized, InvalidRequest]);
 
+// Browser administration: device and pricing changes use the same rule.
+export const AdminAccess = Schema.Struct({
+  secretRequired: Schema.Boolean,
+  // This hub's own machine is collected directly and cannot be renamed, revoked, or restored.
+  localDeviceId: Schema.NullOr(Schema.String),
+});
+export type AdminAccess = typeof AdminAccess.Type;
+
 export const UsageRpc = RpcGroup.make(
   Rpc.make('GetUsage', { payload: UsageQuery, success: DashboardResponse, error: UsageFailure }),
   Rpc.make('GetDevices', { success: Schema.Array(Device), error: StorageFailure }),
+  Rpc.make('GetAdminAccess', { success: AdminAccess }),
+  Rpc.make('RenameDevice', {
+    payload: { deviceId: Schema.String, name: Schema.String, adminSecret: Schema.String },
+    success: Device,
+    error: SyncFailure,
+  }),
+  Rpc.make('RevokeDevice', {
+    payload: { deviceId: Schema.String, adminSecret: Schema.String },
+    success: Device,
+    error: SyncFailure,
+  }),
+  Rpc.make('RestoreDevice', {
+    payload: { deviceId: Schema.String, adminSecret: Schema.String },
+    success: Device,
+    error: SyncFailure,
+  }),
   Rpc.make('GetPricing', {
     payload: UsageQuery,
     success: PricingSettings,

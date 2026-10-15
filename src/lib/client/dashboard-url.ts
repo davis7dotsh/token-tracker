@@ -11,30 +11,64 @@ const defaulted = <Value extends string | number | boolean>(schema: Schema.Codec
     Schema.withDecodingDefaultKey(Effect.succeed(value)),
   );
 
-export const DashboardUrlState = Schema.Struct({
-  range: defaulted(Schema.Literals(['6m', '30d', '7d', 'today']), '30d'),
-  harnesses: defaulted(Schema.String, ''),
-  providers: defaulted(Schema.String, ''),
-  models: defaulted(Schema.String, ''),
-  devices: defaulted(Schema.String, ''),
-  projects: defaulted(Schema.String, ''),
-  metric: defaulted(Schema.Literals(['tokens', 'cost']), 'tokens'),
-  chart: defaulted(Schema.Literals(['bar', 'line']), 'bar'),
-  breakdown: defaulted(Schema.Literals(breakdownGroups), 'harnesses'),
-  chartBy: defaulted(Schema.Literals(chartGroups), 'harnesses'),
-  expanded: defaulted(Schema.Boolean, false),
-  search: defaulted(Schema.String, ''),
-  sort: defaulted(Schema.Literals(['tokens', 'lastActiveAt']), 'lastActiveAt'),
-  page: defaulted(
-    Schema.Number.check(
-      Schema.isInt(),
-      Schema.isGreaterThanOrEqualTo(1),
-      Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+export const DashboardRange = Schema.Literals(['6m', '30d', '7d', 'today']);
+export type DashboardRange = typeof DashboardRange.Type;
+export const dashboardRanges = [
+  { value: '6m', label: '6 months' },
+  { value: '30d', label: '1 month' },
+  { value: '7d', label: '1 week' },
+  { value: 'today', label: '1 day' },
+] as const satisfies readonly { value: DashboardRange; label: string }[];
+
+// Runed omits schema defaults from the URL, so the browser's default range is
+// the schema default: a URL without `range` means that default, and any other
+// selection stays explicit in the URL.
+export const dashboardUrlState = (range: DashboardRange = '30d') =>
+  Schema.Struct({
+    range: defaulted(DashboardRange, range),
+    harnesses: defaulted(Schema.String, ''),
+    providers: defaulted(Schema.String, ''),
+    models: defaulted(Schema.String, ''),
+    devices: defaulted(Schema.String, ''),
+    projects: defaulted(Schema.String, ''),
+    metric: defaulted(Schema.Literals(['tokens', 'cost']), 'tokens'),
+    chart: defaulted(Schema.Literals(['bar', 'line']), 'bar'),
+    breakdown: defaulted(Schema.Literals(breakdownGroups), 'harnesses'),
+    chartBy: defaulted(Schema.Literals(chartGroups), 'harnesses'),
+    expanded: defaulted(Schema.Boolean, false),
+    search: defaulted(Schema.String, ''),
+    sort: defaulted(Schema.Literals(['tokens', 'lastActiveAt']), 'lastActiveAt'),
+    page: defaulted(
+      Schema.Number.check(
+        Schema.isInt(),
+        Schema.isGreaterThanOrEqualTo(1),
+        Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER),
+      ),
+      1,
     ),
-    1,
-  ),
-});
+  });
+export const DashboardUrlState = dashboardUrlState();
 export const dashboardUrlSchema = Schema.toStandardSchemaV1(DashboardUrlState);
+export const dashboardUrlSchemaFor = (range: DashboardRange) => Schema.toStandardSchemaV1(dashboardUrlState(range));
+
+const defaultRangeKey = 'token-tracker-default-range';
+const isDashboardRange = Schema.is(DashboardRange);
+export const readDefaultRange = (): DashboardRange => {
+  if (typeof window === 'undefined') return '30d';
+  try {
+    const stored = localStorage.getItem(defaultRangeKey);
+    return isDashboardRange(stored) ? stored : '30d';
+  } catch {
+    return '30d';
+  }
+};
+export const saveDefaultRange = (range: DashboardRange) => {
+  try {
+    localStorage.setItem(defaultRangeKey, range);
+  } catch {
+    /* The dashboard keeps its built-in default. */
+  }
+};
 
 export const decodeFilter = (value: string) => {
   if (value === '') return undefined;

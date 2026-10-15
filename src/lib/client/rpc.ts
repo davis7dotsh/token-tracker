@@ -36,7 +36,8 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
   const endpoint = typeof window === 'undefined' ? url : new URL(url, window.location.href).href;
   const runtime = ManagedRuntime.make(rpcClientLayer(endpoint));
   const timeout = Math.max(1, options.requestTimeoutMs ?? 10_000);
-  // Cold, wide-window reads need more time than metadata and pricing requests.
+  // Cold, wide-window reads need more time than metadata and pricing writes.
+  // Pricing settings scan usage for unpriced models, so they share this budget.
   const usageTimeout = Math.max(1, options.requestTimeoutMs ?? 30_000);
 
   const run = async <A, E>(program: Effect.Effect<A, E, UsageClient>, signal?: AbortSignal, deadline = timeout) => {
@@ -59,10 +60,22 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
         Effect.flatMap(UsageClient, (client) => client.GetDevices()),
         signal,
       ),
+    getAdminAccess: (signal?: AbortSignal) =>
+      run(
+        Effect.flatMap(UsageClient, (client) => client.GetAdminAccess()),
+        signal,
+      ),
+    renameDevice: (deviceId: string, name: string, adminSecret = '') =>
+      run(Effect.flatMap(UsageClient, (client) => client.RenameDevice({ deviceId, name, adminSecret }))),
+    revokeDevice: (deviceId: string, adminSecret = '') =>
+      run(Effect.flatMap(UsageClient, (client) => client.RevokeDevice({ deviceId, adminSecret }))),
+    restoreDevice: (deviceId: string, adminSecret = '') =>
+      run(Effect.flatMap(UsageClient, (client) => client.RestoreDevice({ deviceId, adminSecret }))),
     getPricing: (query: UsageQuery = {}, signal?: AbortSignal) =>
       run(
         Effect.flatMap(UsageClient, (client) => client.GetPricing(query)),
         signal,
+        usageTimeout,
       ),
     getPricingPolicy: (revision?: string) =>
       run(Effect.flatMap(UsageClient, (client) => client.GetPricingPolicy(revision === undefined ? {} : { revision }))),
