@@ -13,14 +13,14 @@ import {
 } from '../../shared/domain';
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
 
-const storageFailure = () => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' });
-const revokedFailure = () =>
+export const storageFailure = () => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' });
+export const revokedFailure = () =>
   new Unauthorized({
     message: 'This device is revoked. Restore it in the dashboard’s device settings, then connect it again.',
   });
-const StoredDevice = Schema.Struct({ ...Device.fields, needsReconnect: Schema.BooleanFromBit });
-const digest = (value: string) => createHash('sha256').update(value).digest('hex');
-const equalSecret = (left: string, right: string) =>
+export const StoredDevice = Schema.Struct({ ...Device.fields, needsReconnect: Schema.BooleanFromBit });
+export const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+export const equalSecret = (left: string, right: string) =>
   timingSafeEqual(Buffer.from(digest(left)), Buffer.from(digest(right)));
 // Durable Object SQLite accepts at most 100 bound parameters per statement.
 // Bulk ID lists travel as one JSON parameter; upserts bind six values per row.
@@ -35,7 +35,7 @@ export class ServerConfiguration extends Context.Service<
   }
 >()('token-tracker/ServerConfiguration') {}
 
-const validateDevice = (device: DeviceRegistration) => {
+export const validateDevice = (device: DeviceRegistration) => {
   if (
     !device.id.trim() ||
     !device.name.trim() ||
@@ -52,10 +52,10 @@ const validateDevice = (device: DeviceRegistration) => {
 const eventJson = Schema.fromJsonString(UsageEvent);
 const sourcesJson = Schema.fromJsonString(Schema.Array(SourceStatus));
 const decodeEvent = Schema.decodeUnknownSync(eventJson);
-const decodeSources = Schema.decodeUnknownSync(sourcesJson);
+export const decodeSources = Schema.decodeUnknownSync(sourcesJson);
 // Optional metadata can disappear temporarily when a collector cannot read
 // T3's database. Absence means unknown, rather than a request to erase it.
-const preserveSessionMetadata = (incoming: UsageEvent, previous?: SessionMetadata) => ({
+export const preserveSessionMetadata = (incoming: UsageEvent, previous?: SessionMetadata) => ({
   sessionTitle: incoming.sessionTitle ?? previous?.sessionTitle,
   projectName: incoming.projectName ?? previous?.projectName,
   t3ThreadId:
@@ -69,7 +69,7 @@ const preserveSessionMetadata = (incoming: UsageEvent, previous?: SessionMetadat
       ? previous?.t3ThreadUrl
       : undefined),
 });
-const preserveRepository = (incoming: UsageEvent, previous?: UsageEvent) =>
+export const preserveRepository = (incoming: UsageEvent, previous?: UsageEvent) =>
   previous?.t3ThreadId &&
   previous.repository &&
   !previous.repository.startsWith('local:') &&
@@ -87,7 +87,7 @@ const UsageDimension = Schema.Struct({
   model: Schema.String,
   project: Schema.String,
 });
-const decodeDimensions = Schema.decodeUnknownSync(Schema.Array(UsageDimension));
+export const decodeDimensions = Schema.decodeUnknownSync(Schema.Array(UsageDimension));
 export type UsageReadOptions = {
   start?: string;
   end?: string;
