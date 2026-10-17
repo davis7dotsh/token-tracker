@@ -71,6 +71,7 @@ export const UsageQuery = Schema.Struct({
   models: Schema.optionalKey(Schema.Array(Schema.String)),
   providers: Schema.optionalKey(Schema.Array(Schema.String)),
   projects: Schema.optionalKey(Schema.Array(Schema.String)),
+  excludedProjects: Schema.optionalKey(Schema.Array(Schema.String)),
   devices: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type UsageQuery = typeof UsageQuery.Type;

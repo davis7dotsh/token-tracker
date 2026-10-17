@@ -435,6 +435,33 @@ describe('dashboard aggregation', () => {
     expect(response.sessions.every((session) => session.repository === 'github.com/davis7/app')).toBe(true);
     expect(buildDashboard(data, { devices: ['mac'] }, new Date('2026-10-03T12:00:00Z')).totals.tokens).toBe(17);
   });
+  test('hidden projects leave every aggregate, win over selections, and stay listable', () => {
+    const now = new Date('2026-10-03T12:00:00Z');
+    const data = result([
+      event({ id: 'spike', repository: 'github.com/davis7/spike', sessionId: 'spike', inputTokens: 1_000 }),
+      event({ id: 'copy', project: '/Users/ben/spike', repository: 'github.com/davis7/spike', sessionId: 'copy' }),
+      event({ id: 'app', sessionId: 'app' }),
+    ]);
+    const visible = buildDashboard(data, { excludedProjects: ['github.com/davis7/spike'] }, now);
+    expect(visible.totals.tokens).toBe(17);
+    expect(visible.daily.reduce((sum, day) => sum + day.tokens, 0)).toBe(17);
+    expect(visible.projects.map((row) => row.name)).toEqual(['/work/app']);
+    expect(visible.sessions.map((session) => session.id)).toEqual(['app']);
+    expect(visible.filters.projects).toEqual(['/work/app', 'github.com/davis7/spike']);
+    // A local path matches the same way an included project does.
+    expect(
+      buildDashboard(data, { excludedProjects: ['/Users/ben/spike'] }, now)
+        .sessions.map(({ id }) => id)
+        .sort(),
+    ).toEqual(['app', 'spike']);
+    const selected = buildDashboard(
+      data,
+      { projects: ['github.com/davis7/spike', '/work/app'], excludedProjects: ['github.com/davis7/spike'] },
+      now,
+    );
+    expect(selected.totals.tokens).toBe(17);
+    expect(buildDashboard(data, { excludedProjects: [] }, now).totals.tokens).toBe(1_041);
+  });
   test('sessions use the latest available metadata while legacy records preserve accounting and project grouping', () => {
     const data = result([
       event({

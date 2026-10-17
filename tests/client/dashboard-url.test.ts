@@ -5,6 +5,7 @@ import {
   dashboardRanges,
   decodeFilter,
   encodeFilter,
+  encodeHidden,
   filterKeys,
   normalizedDashboardParams,
   usageQueryFromParams,
@@ -26,7 +27,19 @@ describe('dashboard URL state', () => {
   test('empty validation exposes every defaulted control key for Runed schema discovery', () => {
     const defaults = validate({});
     expect(Object.keys(defaults).sort()).toEqual(
-      [...filterKeys, 'range', 'metric', 'chart', 'breakdown', 'chartBy', 'expanded', 'search', 'sort', 'page'].sort(),
+      [
+        ...filterKeys,
+        'excludedProjects',
+        'range',
+        'metric',
+        'chart',
+        'breakdown',
+        'chartBy',
+        'expanded',
+        'search',
+        'sort',
+        'page',
+      ].sort(),
     );
     expect(defaults).toMatchObject({
       range: '30d',
@@ -39,12 +52,39 @@ describe('dashboard URL state', () => {
       sort: 'lastActiveAt',
       page: 1,
     });
-    expect(filterKeys.every((key) => defaults[key] === '')).toBe(true);
+    expect([...filterKeys, 'excludedProjects'].every((key) => Reflect.get(defaults, key) === '')).toBe(true);
     expect(usageQueryFromParams(defaults, 'America/Los_Angeles')).toMatchObject({
       range: '30d',
       timezone: 'America/Los_Angeles',
     });
     expect(filterKeys.every((key) => usageQueryFromParams(defaults, 'UTC')[key] === undefined)).toBe(true);
+    expect(usageQueryFromParams(defaults, 'UTC').excludedProjects).toBeUndefined();
+  });
+
+  test('stored hidden projects apply only when a link has no explicit hidden projects', () => {
+    const schema = dashboardUrlSchemaFor('30d', ['github.com/ben/spike', 'name,with,commas']);
+    const read = (input: Record<string, string>) => {
+      const result = schema['~standard'].validate(input);
+      if (result instanceof Promise || !('value' in result)) throw new Error('Expected synchronous validation.');
+      return usageQueryFromParams(result.value, 'UTC').excludedProjects;
+    };
+    expect(read({})).toEqual(['github.com/ben/spike', 'name,with,commas']);
+    expect(read({ excludedProjects: 'github.com/ben/other' })).toEqual(['github.com/ben/other']);
+    expect(read({ excludedProjects: '' })).toBeUndefined();
+    expect(read({ excludedProjects: 'none' })).toBeUndefined();
+    expect(validate({}).excludedProjects).toBe('');
+  });
+
+  test('hidden projects round-trip and canonicalize an empty list to no exclusions', () => {
+    const state = validate({
+      excludedProjects: encodeHidden(['github.com/ben/spike', 'none', 'github.com/ben/spike']),
+    });
+    expect(usageQueryFromParams(state, 'UTC').excludedProjects).toEqual(['github.com/ben/spike', 'none']);
+    const normalized = normalizedDashboardParams(state);
+    expect(usageQueryFromParams(normalized, 'UTC')).toEqual(usageQueryFromParams(state, 'UTC'));
+    expect(normalizedDashboardParams(normalized)).toEqual(normalized);
+    expect(encodeHidden([])).toBe('');
+    expect(normalizedDashboardParams(validate({ excludedProjects: 'none' })).excludedProjects).toBe('');
   });
 
   test.each(dashboardRanges.map(({ value }) => value))('browser default %s preserves explicit URL ranges', (value) => {
@@ -201,7 +241,7 @@ describe('dashboard URL state', () => {
     });
     const query = usageQueryFromParams(state, 'UTC');
     expect(usageQueryFromParams(next, 'UTC')).toEqual(query);
-    expect(Object.keys(query).sort()).toEqual(['range', 'timezone', ...filterKeys].sort());
+    expect(Object.keys(query).sort()).toEqual(['range', 'timezone', 'excludedProjects', ...filterKeys].sort());
     expect(JSON.stringify(usageQueryFromParams(next, 'UTC'))).toBe(JSON.stringify(query));
     expect(JSON.stringify(usageQueryFromParams(validate({ ...next, harnesses: 'codex' }), 'UTC'))).not.toBe(
       JSON.stringify(query),
