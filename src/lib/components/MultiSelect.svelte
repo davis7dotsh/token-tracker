@@ -9,6 +9,8 @@
     names = {},
     grouping,
     colors,
+    hidden,
+    ontogglehidden,
   }: {
     label: string;
     options: readonly string[];
@@ -17,6 +19,8 @@
     names?: Record<string, string>;
     grouping?: VisualGrouping;
     colors?: ReadonlyMap<string, string>;
+    hidden?: ReadonlySet<string>;
+    ontogglehidden?: (item: string) => void;
   } = $props();
   let open = $state(false);
   let search = $state('');
@@ -51,6 +55,15 @@
   }
 </script>
 
+{#snippet option(entry: (typeof searchable)[number])}
+  <label class="filter-option"
+    ><input type="checkbox" checked={selectedSet.has(entry.item)} onchange={() => toggle(entry.item)} />
+    {#if entry.color}<i class="category-swatch" style:background={entry.color} aria-hidden="true"></i>{/if}<span
+      title={entry.label}>{entry.label}</span
+    ></label
+  >
+{/snippet}
+
 <svelte:window onpointerdown={outside} onkeydown={keyboard} />
 <div class="filter-control" bind:this={wrapper}>
   <button
@@ -83,12 +96,18 @@
         >{/if}
       <div class="filter-options">
         {#each visible as entry (entry.item)}
-          <label class="filter-option"
-            ><input type="checkbox" checked={selectedSet.has(entry.item)} onchange={() => toggle(entry.item)} />
-            {#if entry.color}<i class="category-swatch" style:background={entry.color} aria-hidden="true"></i>{/if}<span
-              title={entry.label}>{entry.label}</span
-            ></label
-          >
+          {#if ontogglehidden}
+            {@const isHidden = hidden?.has(entry.item) ?? false}
+            <div class={['filter-option-row', isHidden && 'is-hidden']}>
+              {@render option(entry)}<button
+                class="visibility-toggle"
+                aria-label={`${isHidden ? 'Unhide' : 'Hide'} ${entry.label}`}
+                title={`${isHidden ? 'Unhide' : 'Hide'} ${entry.label}`}
+                onclick={() => ontogglehidden(entry.item)}
+                ><Icon name={isHidden ? 'eye' : 'eye-off'} size={14} /></button
+              >
+            </div>
+          {:else}{@render option(entry)}{/if}
         {:else}<p class="popover-empty">No matches</p>{/each}
       </div>
     </div>

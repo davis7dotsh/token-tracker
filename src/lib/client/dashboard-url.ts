@@ -16,62 +16,6 @@ export const dashboardRanges = [
 const literal = <const Value extends string>(value: unknown, values: readonly Value[], fallback: Value) =>
   values.find((entry) => entry === value) ?? fallback;
 const text = (value: unknown) => (typeof value === 'string' ? value : '');
-const validateDashboardParams = (input: unknown, range: DashboardRange = '30d') => {
-  const value = typeof input === 'object' && input !== null ? input : {};
-  const field = (key: string) => (key in value ? Reflect.get(value, key) : undefined);
-  const page = field('page');
-  return {
-    range: literal(field('range'), rangeValues, range),
-    harnesses: text(field('harnesses')),
-    providers: text(field('providers')),
-    models: text(field('models')),
-    devices: text(field('devices')),
-    projects: text(field('projects')),
-    metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
-    chart: literal(field('chart'), ['bar', 'line'], 'bar'),
-    breakdown: literal(field('breakdown'), breakdownGroups, 'harnesses'),
-    chartBy: literal(field('chartBy'), chartGroups, 'harnesses'),
-    expanded: field('expanded') === true,
-    search: text(field('search')),
-    sort: literal(field('sort'), ['tokens', 'lastActiveAt'], 'lastActiveAt'),
-    page: typeof page === 'number' && Number.isSafeInteger(page) && page >= 1 ? page : 1,
-  };
-};
-type DashboardUrlState = ReturnType<typeof validateDashboardParams>;
-
-// Runed only needs Standard Schema's synchronous validation interface. Keep
-// URL parsing independent of the server's Effect schema/runtime bundle.
-// Its defaults are omitted from the URL, so the browser's chosen default must
-// be used by the schema while other selections stay explicit in shared links.
-export const dashboardUrlSchemaFor = (range: DashboardRange): StandardSchemaV1<unknown, DashboardUrlState> => ({
-  '~standard': {
-    version: 1 as const,
-    vendor: 'token-tracker',
-    validate: (input: unknown) =>
-      typeof input !== 'object' || input === null || Array.isArray(input)
-        ? { issues: [{ path: [], message: 'Expected object' }] }
-        : { value: validateDashboardParams(input, range) },
-  },
-});
-export const dashboardUrlSchema = dashboardUrlSchemaFor('30d');
-
-const defaultRangeKey = 'token-tracker-default-range';
-export const readDefaultRange = (): DashboardRange => {
-  if (typeof window === 'undefined') return '30d';
-  try {
-    const stored = localStorage.getItem(defaultRangeKey);
-    return rangeValues.find((range) => range === stored) ?? '30d';
-  } catch {
-    return '30d';
-  }
-};
-export const saveDefaultRange = (range: DashboardRange) => {
-  try {
-    localStorage.setItem(defaultRangeKey, range);
-  } catch {
-    /* The dashboard keeps its built-in default. */
-  }
-};
 
 export const decodeFilter = (value: string) => {
   if (value === '') return undefined;
@@ -107,6 +51,94 @@ export const encodeFilter = (values: readonly string[] | undefined) => {
     : unique.join(',');
 };
 
+// An empty hidden list encodes to no param. A param that is present but
+// empty is instead an explicit "hide nothing" link: the page's URL cleanup
+// rewrites it to `none` so it survives reloads rather than falling back to
+// this browser's stored list.
+export const encodeHidden = (values: readonly string[] | undefined) => (values?.length ? encodeFilter(values) : '');
+const decodeHidden = (value: string) => {
+  const values = decodeFilter(value);
+  return values?.length ? values : undefined;
+};
+
+const validateDashboardParams = (input: unknown, range: DashboardRange = '30d') => {
+  const value = typeof input === 'object' && input !== null ? input : {};
+  const field = (key: string) => (key in value ? Reflect.get(value, key) : undefined);
+  const page = field('page');
+  return {
+    range: literal(field('range'), rangeValues, range),
+    harnesses: text(field('harnesses')),
+    providers: text(field('providers')),
+    models: text(field('models')),
+    devices: text(field('devices')),
+    projects: text(field('projects')),
+    excludedProjects: text(field('excludedProjects')),
+    metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
+    chart: literal(field('chart'), ['bar', 'line'], 'bar'),
+    breakdown: literal(field('breakdown'), breakdownGroups, 'harnesses'),
+    chartBy: literal(field('chartBy'), chartGroups, 'harnesses'),
+    expanded: field('expanded') === true,
+    search: text(field('search')),
+    sort: literal(field('sort'), ['tokens', 'lastActiveAt'], 'lastActiveAt'),
+    page: typeof page === 'number' && Number.isSafeInteger(page) && page >= 1 ? page : 1,
+  };
+};
+type DashboardUrlState = ReturnType<typeof validateDashboardParams>;
+
+// Runed only needs Standard Schema's synchronous validation interface. Keep
+// URL parsing independent of the server's Effect schema/runtime bundle.
+// Its defaults are omitted from the URL, so the browser's chosen default must
+// be used by the schema while other selections stay explicit in shared links.
+// Hidden projects always default to none: the dashboard writes this browser's
+// stored list into the URL on mount, so shared links carry it explicitly.
+export const dashboardUrlSchemaFor = (range: DashboardRange): StandardSchemaV1<unknown, DashboardUrlState> => ({
+  '~standard': {
+    version: 1 as const,
+    vendor: 'token-tracker',
+    validate: (input: unknown) =>
+      typeof input !== 'object' || input === null || Array.isArray(input)
+        ? { issues: [{ path: [], message: 'Expected object' }] }
+        : { value: validateDashboardParams(input, range) },
+  },
+});
+export const dashboardUrlSchema = dashboardUrlSchemaFor('30d');
+
+const defaultRangeKey = 'token-tracker-default-range';
+export const readDefaultRange = (): DashboardRange => {
+  if (typeof window === 'undefined') return '30d';
+  try {
+    const stored = localStorage.getItem(defaultRangeKey);
+    return rangeValues.find((range) => range === stored) ?? '30d';
+  } catch {
+    return '30d';
+  }
+};
+export const saveDefaultRange = (range: DashboardRange) => {
+  try {
+    localStorage.setItem(defaultRangeKey, range);
+  } catch {
+    /* The dashboard keeps its built-in default. */
+  }
+};
+
+const hiddenProjectsKey = 'token-tracker-hidden-projects';
+export const readHiddenProjects = (): readonly string[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(hiddenProjectsKey) ?? '[]');
+    return Array.isArray(stored) && stored.every((item) => typeof item === 'string') ? [...new Set(stored)] : [];
+  } catch {
+    return [];
+  }
+};
+export const saveHiddenProjects = (projects: readonly string[]) => {
+  try {
+    localStorage.setItem(hiddenProjectsKey, JSON.stringify([...new Set(projects)]));
+  } catch {
+    /* Hidden projects remain in the current URL. */
+  }
+};
+
 export const usageQueryFromParams = (params: DashboardUrlState, timezone: string) =>
   ({
     range: params.range,
@@ -116,6 +148,7 @@ export const usageQueryFromParams = (params: DashboardUrlState, timezone: string
     models: decodeFilter(params.models),
     devices: decodeFilter(params.devices),
     projects: decodeFilter(params.projects),
+    excludedProjects: decodeHidden(params.excludedProjects),
   }) satisfies UsageQuery;
 
 export const normalizedDashboardParams = (params: DashboardUrlState) => ({
@@ -125,6 +158,9 @@ export const normalizedDashboardParams = (params: DashboardUrlState) => ({
   models: encodeFilter(decodeFilter(params.models)),
   devices: encodeFilter(decodeFilter(params.devices)),
   projects: encodeFilter(decodeFilter(params.projects)),
+  // Preserve an explicit `none`; encoding it to '' would drop the param and
+  // let a reload fall back to the stored hidden list.
+  excludedProjects: params.excludedProjects === 'none' ? 'none' : encodeHidden(decodeHidden(params.excludedProjects)),
   metric: params.metric,
   chart: params.chart,
   breakdown: params.breakdown,

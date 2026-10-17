@@ -108,13 +108,15 @@ const addBucket = <Key>(
   addSeries(group.models, event.model, event, tokens);
 };
 const selected = (names: readonly string[] | undefined, value: string) => names === undefined || names.includes(value);
+const projectListed = (names: readonly string[], event: UsageEvent) =>
+  names.includes(event.repository ?? event.project) || names.includes(event.project);
+// Hidden projects win over an explicit project selection.
 export const matchesUsage = (query: UsageQuery, event: UsageEvent, eventProvider = provider(event.model)) =>
   selected(query.harnesses, event.harness) &&
   selected(query.models, event.model) &&
   selected(query.providers, eventProvider) &&
-  (query.projects === undefined ||
-    query.projects.includes(event.repository ?? event.project) ||
-    query.projects.includes(event.project)) &&
+  (query.projects === undefined || projectListed(query.projects, event)) &&
+  !(query.excludedProjects !== undefined && projectListed(query.excludedProjects, event)) &&
   selected(query.devices, event.deviceId ?? 'local');
 const dateString = (value: Temporal.ZonedDateTime) => value.toPlainDate().toString();
 const timestamp = (value: Temporal.ZonedDateTime) => value.toInstant().toString({ fractionalSecondDigits: 3 });

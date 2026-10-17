@@ -147,7 +147,7 @@ const normalizedQuery = (query: UsageQuery): UsageQuery => ({
   range: query.range ?? '30d',
   timezone: query.timezone ?? 'UTC',
   ...Object.fromEntries(
-    (['harnesses', 'models', 'providers', 'projects', 'devices'] as const).flatMap((field) =>
+    (['harnesses', 'models', 'providers', 'projects', 'excludedProjects', 'devices'] as const).flatMap((field) =>
       query[field] === undefined ? [] : [[field, [...new Set(query[field])].sort()]],
     ),
   ),

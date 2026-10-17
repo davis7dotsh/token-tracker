@@ -7,9 +7,12 @@
     dashboardRanges as ranges,
     dashboardUrlSchemaFor,
     encodeFilter,
+    encodeHidden,
     filterKeys,
     normalizedDashboardParams,
     readDefaultRange,
+    readHiddenProjects,
+    saveHiddenProjects,
     usageQueryFromParams,
   } from '#lib/client/dashboard-url.ts';
   import { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
@@ -23,6 +26,7 @@
   } from '#lib/client/session-links.ts';
   import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
   import type { UsageQuery, Breakdown, DashboardResponse, Device } from '#lib/shared/domain.ts';
+  import HiddenProjects from '#lib/components/HiddenProjects.svelte';
   import Icon from '#lib/components/Icon.svelte';
   import MultiSelect from '#lib/components/MultiSelect.svelte';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';
@@ -65,6 +69,8 @@
     distinctSeriesColors([...devices.map((device) => device.id), ...(data?.filters.devices ?? [])]),
   );
   const projectColors = $derived(distinctSeriesColors(data?.filters.projects ?? []));
+  const hiddenProjects = $derived(query.excludedProjects ?? []);
+  const hiddenSet = $derived(new Set(hiddenProjects));
 
   function categoryColor(name: string, group: VisualGrouping) {
     return (
@@ -76,7 +82,13 @@
   $effect(() => {
     const url = page.shallow?.url ?? page.url;
     untrack(() => {
-      const values = normalizedDashboardParams(params);
+      const normalized = normalizedDashboardParams(params);
+      // An explicit empty/`none` excludedProjects means "hide nothing" and
+      // must stay in the URL as `none`; normalizing it away would let a
+      // reload restore this browser's stored hidden projects.
+      const rawExcluded = url.searchParams.get('excludedProjects');
+      const values =
+        rawExcluded === '' || rawExcluded === 'none' ? { ...normalized, excludedProjects: 'none' } : normalized;
       const invalid = Object.entries(values).some(([key, value]) => {
         const present = url.searchParams.getAll(key);
         return present.length > 1 || (present.length === 1 && present[0] !== String(value));
@@ -270,6 +282,17 @@
       page: 1,
     });
   }
+  // Only explicit hide/unhide choices become this browser's default, so
+  // opening a shared link never replaces the stored hidden projects.
+  function setHiddenProjects(next: readonly string[]) {
+    saveHiddenProjects(next);
+    params.update({ excludedProjects: encodeHidden(next), page: 1 });
+  }
+  function toggleHidden(project: string) {
+    setHiddenProjects(
+      hiddenSet.has(project) ? hiddenProjects.filter((entry) => entry !== project) : [...hiddenProjects, project],
+    );
+  }
   function removeChip(key: (typeof filterKeys)[number], value: string) {
     const remaining = (query[key] ?? []).filter((entry) => entry !== value);
     changeQuery({ ...query, [key]: query[key]?.length === 0 || remaining.length === 0 ? undefined : remaining });
@@ -277,6 +300,12 @@
   function mountDashboard() {
     mounted = true;
     untrack(() => {
+      // A URL without `excludedProjects` hides the projects this browser last
+      // hid. Write them into the URL before the first load so copied links
+      // carry them explicitly instead of relying on the other browser's list.
+      const stored = readHiddenProjects();
+      if (stored.length && !new URLSearchParams(location.search).has('excludedProjects'))
+        params.update({ excludedProjects: encodeHidden(stored) }, { pushHistory: false });
       timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       client = makeDashboardClient();
       loadChart();
@@ -466,8 +495,17 @@
           grouping="projects"
           colors={projectColors}
           names={Object.fromEntries((data?.filters.projects ?? []).map((id) => [id, projectName(id)]))}
+          hidden={hiddenSet}
+          ontogglehidden={toggleHidden}
           onchange={(projects) => changeQuery({ ...query, projects })}
         />
+        {#if hiddenProjects.length}<HiddenProjects
+            projects={hiddenProjects}
+            name={projectName}
+            color={(project) => categoryColor(project, 'projects')}
+            onunhide={toggleHidden}
+            onunhideall={() => setHiddenProjects([])}
+          />{/if}
       </div>
       <span class="period-label"
         ><span class="usage-period">{period}</span><span
@@ -642,7 +680,12 @@
                 <span class="breakdown-name" title={row.name}
                   ><i class="category-swatch" style:background={categoryColor(row.name, grouping)} aria-hidden="true"
                   ></i><span class="breakdown-label">{breakdownName(row.name)}</span></span
-                ><b title={metric === 'tokens' ? `${integer.format(row.tokens)} tokens` : formatCost(row)}
+                >{#if grouping === 'projects'}<button
+                    class="visibility-toggle"
+                    aria-label={`Hide ${projectName(row.name)}`}
+                    title={`Hide ${projectName(row.name)}`}
+                    onclick={() => toggleHidden(row.name)}><Icon name="eye-off" size={14} /></button
+                  >{/if}<b title={metric === 'tokens' ? `${integer.format(row.tokens)} tokens` : formatCost(row)}
                   >{metric === 'tokens' ? compact.format(row.tokens) : formatCost(row)}</b
                 >
               </div>

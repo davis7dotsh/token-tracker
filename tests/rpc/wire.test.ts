@@ -88,6 +88,8 @@ test('legacy uploads gain session titles and T3 links through metadata-only RPC 
     const corrected = await browser.getUsage();
     expect(corrected.sessions[0]).toMatchObject({ ...metadata, sessionTitle: 'Renamed thread' });
     expect(corrected.totals).toMatchObject({ tokens: 205, sessions: 1 });
+    // Hidden projects cross the browser RPC boundary and the hub's query cache.
+    expect((await browser.getUsage({ excludedProjects: ['github.com/ben/app'] })).totals.tokens).toBe(0);
     // Scratch cwd fallbacks must not erase the saved attached repository when
     // an optional binding is temporarily absent, including older-client uploads.
     for (const repository of [null, 'local:/work/app']) {
