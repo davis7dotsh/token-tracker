@@ -51,7 +51,10 @@ export const encodeFilter = (values: readonly string[] | undefined) => {
     : unique.join(',');
 };
 
-// Hiding nothing is the absence of exclusions, not a `none` selection.
+// An empty hidden list encodes to no param. A param that is present but
+// empty is instead an explicit "hide nothing" link: the page's URL cleanup
+// rewrites it to `none` so it survives reloads rather than falling back to
+// this browser's stored list.
 export const encodeHidden = (values: readonly string[] | undefined) => (values?.length ? encodeFilter(values) : '');
 const decodeHidden = (value: string) => {
   const values = decodeFilter(value);
@@ -155,7 +158,9 @@ export const normalizedDashboardParams = (params: DashboardUrlState) => ({
   models: encodeFilter(decodeFilter(params.models)),
   devices: encodeFilter(decodeFilter(params.devices)),
   projects: encodeFilter(decodeFilter(params.projects)),
-  excludedProjects: encodeHidden(decodeHidden(params.excludedProjects)),
+  // Preserve an explicit `none`; encoding it to '' would drop the param and
+  // let a reload fall back to the stored hidden list.
+  excludedProjects: params.excludedProjects === 'none' ? 'none' : encodeHidden(decodeHidden(params.excludedProjects)),
   metric: params.metric,
   chart: params.chart,
   breakdown: params.breakdown,

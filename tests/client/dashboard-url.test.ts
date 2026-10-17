@@ -72,6 +72,9 @@ describe('dashboard URL state', () => {
     ]);
     expect(read({ excludedProjects: '' })).toBeUndefined();
     expect(read({ excludedProjects: 'none' })).toBeUndefined();
+    // An explicit `none` state survives validation untouched; the page's URL
+    // cleanup turns a present-but-empty param into it (see round-trip test).
+    expect(validate({ excludedProjects: 'none' }).excludedProjects).toBe('none');
   });
 
   test('hidden projects round-trip and canonicalize an empty list to no exclusions', () => {
@@ -87,7 +90,10 @@ describe('dashboard URL state', () => {
     expect(usageQueryFromParams(normalized, 'UTC')).toEqual(usageQueryFromParams(state, 'UTC'));
     expect(normalizedDashboardParams(normalized)).toEqual(normalized);
     expect(encodeHidden([])).toBe('');
-    expect(normalizedDashboardParams(validate({ excludedProjects: 'none' })).excludedProjects).toBe('');
+    const explicitNone = normalizedDashboardParams(validate({ excludedProjects: 'none' }));
+    expect(explicitNone.excludedProjects).toBe('none');
+    expect(normalizedDashboardParams(explicitNone)).toEqual(explicitNone);
+    expect(normalizedDashboardParams(validate({})).excludedProjects).toBe('');
   });
 
   test.each(dashboardRanges.map(({ value }) => value))('browser default %s preserves explicit URL ranges', (value) => {

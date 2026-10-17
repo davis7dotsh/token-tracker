@@ -82,7 +82,13 @@
   $effect(() => {
     const url = page.shallow?.url ?? page.url;
     untrack(() => {
-      const values = normalizedDashboardParams(params);
+      const normalized = normalizedDashboardParams(params);
+      // An explicit empty/`none` excludedProjects means "hide nothing" and
+      // must stay in the URL as `none`; normalizing it away would let a
+      // reload restore this browser's stored hidden projects.
+      const rawExcluded = url.searchParams.get('excludedProjects');
+      const values =
+        rawExcluded === '' || rawExcluded === 'none' ? { ...normalized, excludedProjects: 'none' } : normalized;
       const invalid = Object.entries(values).some(([key, value]) => {
         const present = url.searchParams.getAll(key);
         return present.length > 1 || (present.length === 1 && present[0] !== String(value));
