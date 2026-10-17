@@ -61,25 +61,28 @@ describe('dashboard URL state', () => {
     expect(usageQueryFromParams(defaults, 'UTC').excludedProjects).toBeUndefined();
   });
 
-  test('stored hidden projects apply only when a link has no explicit hidden projects', () => {
-    const schema = dashboardUrlSchemaFor('30d', ['github.com/ben/spike', 'name,with,commas']);
-    const read = (input: Record<string, string>) => {
-      const result = schema['~standard'].validate(input);
-      if (result instanceof Promise || !('value' in result)) throw new Error('Expected synchronous validation.');
-      return usageQueryFromParams(result.value, 'UTC').excludedProjects;
-    };
-    expect(read({})).toEqual(['github.com/ben/spike', 'name,with,commas']);
+  test('hidden projects come only from the URL, never a seeded default', () => {
+    const read = (input: Record<string, string>) => usageQueryFromParams(validate(input), 'UTC').excludedProjects;
+    expect(validate({}).excludedProjects).toBe('');
+    expect(read({})).toBeUndefined();
     expect(read({ excludedProjects: 'github.com/ben/other' })).toEqual(['github.com/ben/other']);
+    expect(read({ excludedProjects: encodeHidden(['github.com/ben/spike', 'name,with,commas']) })).toEqual([
+      'github.com/ben/spike',
+      'name,with,commas',
+    ]);
     expect(read({ excludedProjects: '' })).toBeUndefined();
     expect(read({ excludedProjects: 'none' })).toBeUndefined();
-    expect(validate({}).excludedProjects).toBe('');
   });
 
   test('hidden projects round-trip and canonicalize an empty list to no exclusions', () => {
     const state = validate({
-      excludedProjects: encodeHidden(['github.com/ben/spike', 'none', 'github.com/ben/spike']),
+      excludedProjects: encodeHidden(['github.com/ben/spike', 'none', 'name,with,commas', 'github.com/ben/spike']),
     });
-    expect(usageQueryFromParams(state, 'UTC').excludedProjects).toEqual(['github.com/ben/spike', 'none']);
+    expect(usageQueryFromParams(state, 'UTC').excludedProjects).toEqual([
+      'github.com/ben/spike',
+      'none',
+      'name,with,commas',
+    ]);
     const normalized = normalizedDashboardParams(state);
     expect(usageQueryFromParams(normalized, 'UTC')).toEqual(usageQueryFromParams(state, 'UTC'));
     expect(normalizedDashboardParams(normalized)).toEqual(normalized);

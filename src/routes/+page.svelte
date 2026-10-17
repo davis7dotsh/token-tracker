@@ -40,9 +40,8 @@
     maximumFractionDigits: 2,
   });
   const date = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  // A URL without `range` uses this browser's default from Settings, and one
-  // without `excludedProjects` hides the projects this browser last hid.
-  const params = useSearchParams(dashboardUrlSchemaFor(readDefaultRange(), readHiddenProjects()), { noScroll: true });
+  // A URL without `range` uses this browser's default from Settings.
+  const params = useSearchParams(dashboardUrlSchemaFor(readDefaultRange()), { noScroll: true });
   let timezone = $state('UTC');
   const query = $derived(usageQueryFromParams(params, timezone));
   const queryKey = $derived(JSON.stringify(query));
@@ -295,6 +294,12 @@
   function mountDashboard() {
     mounted = true;
     untrack(() => {
+      // A URL without `excludedProjects` hides the projects this browser last
+      // hid. Write them into the URL before the first load so copied links
+      // carry them explicitly instead of relying on the other browser's list.
+      const stored = readHiddenProjects();
+      if (stored.length && !new URLSearchParams(location.search).has('excludedProjects'))
+        params.update({ excludedProjects: encodeHidden(stored) }, { pushHistory: false });
       timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       client = makeDashboardClient();
       loadChart();

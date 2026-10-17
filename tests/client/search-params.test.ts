@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compileModule } from 'svelte/compiler';
+import { dashboardUrlSchema, encodeHidden, usageQueryFromParams } from '../../src/lib/client/dashboard-url';
 
 let directory: string;
 let runed: typeof import('runed/kit');
@@ -116,4 +117,14 @@ test('SSR initializes from the request URL and local updates preserve literal st
   params.reset();
   expect(params.range).toBe('week');
   expect(params.sessionSearch).toBe('');
+});
+
+test('JSON-encoded hidden projects reach the dashboard schema as a string', () => {
+  const excludedProjects = encodeHidden(['github.com/ben/spike', 'name,with,commas']);
+  expect(excludedProjects.startsWith('[')).toBe(true);
+  const url = new URL('https://tracker.test/');
+  url.searchParams.set('excludedProjects', excludedProjects);
+  const { data } = runed.validateSearchParams(url, dashboardUrlSchema);
+  expect(data.excludedProjects).toBe(excludedProjects);
+  expect(usageQueryFromParams(data, 'UTC').excludedProjects).toEqual(['github.com/ben/spike', 'name,with,commas']);
 });

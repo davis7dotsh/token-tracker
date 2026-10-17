@@ -58,7 +58,7 @@ const decodeHidden = (value: string) => {
   return values?.length ? values : undefined;
 };
 
-const validateDashboardParams = (input: unknown, range: DashboardRange = '30d', hiddenProjects = '') => {
+const validateDashboardParams = (input: unknown, range: DashboardRange = '30d') => {
   const value = typeof input === 'object' && input !== null ? input : {};
   const field = (key: string) => (key in value ? Reflect.get(value, key) : undefined);
   const page = field('page');
@@ -69,8 +69,7 @@ const validateDashboardParams = (input: unknown, range: DashboardRange = '30d', 
     models: text(field('models')),
     devices: text(field('devices')),
     projects: text(field('projects')),
-    // An explicit link, including an empty one, overrides this browser's hidden projects.
-    excludedProjects: 'excludedProjects' in value ? text(field('excludedProjects')) : hiddenProjects,
+    excludedProjects: text(field('excludedProjects')),
     metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
     chart: literal(field('chart'), ['bar', 'line'], 'bar'),
     breakdown: literal(field('breakdown'), breakdownGroups, 'harnesses'),
@@ -87,22 +86,18 @@ type DashboardUrlState = ReturnType<typeof validateDashboardParams>;
 // URL parsing independent of the server's Effect schema/runtime bundle.
 // Its defaults are omitted from the URL, so the browser's chosen default must
 // be used by the schema while other selections stay explicit in shared links.
-export const dashboardUrlSchemaFor = (
-  range: DashboardRange,
-  hiddenProjects: readonly string[] = [],
-): StandardSchemaV1<unknown, DashboardUrlState> => {
-  const hidden = encodeHidden(hiddenProjects);
-  return {
-    '~standard': {
-      version: 1 as const,
-      vendor: 'token-tracker',
-      validate: (input: unknown) =>
-        typeof input !== 'object' || input === null || Array.isArray(input)
-          ? { issues: [{ path: [], message: 'Expected object' }] }
-          : { value: validateDashboardParams(input, range, hidden) },
-    },
-  };
-};
+// Hidden projects always default to none: the dashboard writes this browser's
+// stored list into the URL on mount, so shared links carry it explicitly.
+export const dashboardUrlSchemaFor = (range: DashboardRange): StandardSchemaV1<unknown, DashboardUrlState> => ({
+  '~standard': {
+    version: 1 as const,
+    vendor: 'token-tracker',
+    validate: (input: unknown) =>
+      typeof input !== 'object' || input === null || Array.isArray(input)
+        ? { issues: [{ path: [], message: 'Expected object' }] }
+        : { value: validateDashboardParams(input, range) },
+  },
+});
 export const dashboardUrlSchema = dashboardUrlSchemaFor('30d');
 
 const defaultRangeKey = 'token-tracker-default-range';
