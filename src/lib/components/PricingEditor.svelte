@@ -88,10 +88,13 @@
   }
 
   function pickTarget(name: string) {
+    // mousedown and click both pick; ignore the repeat while the first save runs.
+    if (busy) return;
     target = name;
     targetOpen = false;
     targetHighlight = 0;
     editDraft();
+    void saveRule();
   }
 
   function targetOutside(event: PointerEvent) {
@@ -209,8 +212,12 @@
     if (mounted) void load(true, feedbackEditor);
   }
 
-  async function save(event: SubmitEvent) {
+  function submit(event: SubmitEvent) {
     event.preventDefault();
+    void saveRule();
+  }
+
+  async function saveRule() {
     if (!client || !canSave) return;
     const rawModel = model.trim();
     if (rawModel.length > 200 || rawModel === '') {
@@ -353,7 +360,7 @@
         >Add a rule</button
       >
     </div>
-    <form class="pricing-editor" onsubmit={save} oninput={editDraft}>
+    <form class="pricing-editor" onsubmit={submit} oninput={editDraft}>
       {#if editing}
         <label class="pricing-field"
           >Model ID<input
