@@ -88,8 +88,9 @@
   }
 
   function pickTarget(name: string) {
-    // mousedown and click both pick; ignore the repeat while the first save runs.
-    if (busy) return;
+    // mousedown and click both pick; the first pick closes the list, so the
+    // repeat call lands here with it closed and must not save a second time.
+    if (busy || !targetOpen) return;
     target = name;
     targetOpen = false;
     targetHighlight = 0;
