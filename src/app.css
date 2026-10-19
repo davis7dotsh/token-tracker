@@ -1431,6 +1431,9 @@ footer > button {
 .pricing-field input:disabled {
   opacity: 0.6;
 }
+.pricing-field input[readonly] {
+  color: var(--muted);
+}
 .pricing-target {
   position: relative;
   display: block;
@@ -1501,11 +1504,7 @@ footer > button {
   display: flex;
   align-items: center;
   gap: 17px;
-}
-.pricing-save {
-  border-color: #4dabf770;
-  background: #4dabf714;
-  color: var(--accent);
+  min-height: 37px;
 }
 .pricing-editor-empty {
   display: flex;

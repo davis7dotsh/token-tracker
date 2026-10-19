@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sharedPricingSaves } from '#lib/client/pricing-saves.ts';
   import { getSettings } from '#lib/client/settings.svelte.ts';
   import PricingEditor from '#lib/components/PricingEditor.svelte';
 
@@ -8,4 +9,4 @@
 </script>
 
 <h1 class="settings-title">Pricing</h1>
-<PricingEditor client={settings.client} {query} bind:adminSecret={settings.adminSecret} />
+<PricingEditor client={settings.client} saves={sharedPricingSaves()} {query} bind:adminSecret={settings.adminSecret} />

@@ -121,3 +121,13 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
     },
   };
 };
+
+let tab: ReturnType<typeof makeDashboardClient> | undefined;
+// Settings writes outlive the page that started them: leaving Settings disposes
+// its client and aborts reads, but writes sent through this one still reach the
+// hub. It is never disposed. One per browser tab.
+export const tabClient = () => {
+  if (typeof window === 'undefined') return undefined;
+  tab ??= makeDashboardClient();
+  return tab;
+};

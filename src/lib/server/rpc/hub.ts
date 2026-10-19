@@ -7,7 +7,14 @@ import { InvalidRequest, UsageFailure, UsageRpc, type PricingSettings } from '..
 import type { PricingPolicy } from '../../shared/pricing';
 import { UsageQuery, type CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
 import { tokenTotal } from '../usage/parsers';
-import { repriceEvent, resolveDisplayModel } from '../usage/pricing';
+import {
+  describePricingGaps,
+  PricingGap,
+  pricingGaps,
+  repriceEvent,
+  resolveDisplayModel,
+  retainsRecordedCost,
+} from '../usage/pricing';
 import { makePricingRuntime, pricingRefreshDue, sqlPricingStorage, type PricingState } from '../usage/pricing-store';
 import {
   buildDashboardSnapshot,
@@ -303,23 +310,24 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         const { remote, current, dimensions, unique } = yield* Cache.get(rawSnapshots, JSON.stringify(rawKey));
         const events: UsageEvent[] = [];
         const unknownLocalModels = new Set<string>();
+        // Records without pricing metadata keep a reported cost; saved rules
+        // can still estimate them when none was reported, and free rules always apply.
+        const retained = new Set<UsageEvent>();
         for (let offset = 0; offset < unique.length; offset += 1_000) {
           const end = Math.min(offset + 1_000, unique.length);
           for (let index = offset; index < end; index++) {
             const event = repriceEvent(unique[index], state.policy);
             events.push(event);
+            if (retainsRecordedCost(unique[index], state.policy)) retained.add(event);
             if ((event.deviceId ?? '') === localDeviceId && !event.costKnown)
               unknownLocalModels.add(event.rawModel ?? event.model);
           }
           yield* Effect.yieldNow;
         }
         const policySnapshot = `${state.info.updatedAt} · ${state.info.revision.slice(0, 12)}`;
-        const modern = (event: UsageEvent) =>
-          event.serviceTier !== undefined && (event.cacheWriteTokens === 0 || event.cacheWrite1hTokens !== undefined);
         const legacyKeys = new Set<string>();
-        for (const event of events)
-          if (event.costKnown && !modern(event) && event.deviceId !== localDeviceId)
-            legacyKeys.add(`${event.deviceId}:${event.id}`);
+        for (const event of retained)
+          if (event.deviceId !== localDeviceId) legacyKeys.add(`${event.deviceId}:${event.id}`);
         const snapshotsByRecord = new Map<string, string>();
         if (legacyKeys.size)
           for (const snapshot of remote.pricingSnapshots) {
@@ -330,7 +338,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         for (const event of events)
           if (event.costKnown)
             snapshotSet.add(
-              (modern(event)
+              (!retained.has(event)
                 ? policySnapshot
                 : event.deviceId === localDeviceId
                   ? current.pricingUpdatedAt
@@ -503,7 +511,8 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               );
               cached = pricingResults.get(input.resultKey);
               if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
-                const groups = new Map<string, { tokens: number; legacy: boolean }>();
+                const groups = new Map<string, { tokens: number; gaps: number; tiers: Set<string> }>();
+                const policy = result.state.policy;
                 const timeframe = input.timeframe;
                 const start = timeframe.start.epochMilliseconds;
                 const now = input.now.getTime();
@@ -530,26 +539,17 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
                   }
                   if ((timeframe.range !== 'all' && millis < start) || millis >= end) continue;
                   const raw = event.rawModel ?? event.model;
-                  const group = groups.get(raw) ?? { tokens: 0, legacy: false };
+                  const group = groups.get(raw) ?? { tokens: 0, gaps: 0, tiers: new Set<string>() };
+                  const gaps = pricingGaps(event, policy);
                   group.tokens += tokenTotal(event);
-                  group.legacy ||=
-                    event.serviceTier === undefined ||
-                    (event.cacheWriteTokens > 0 && event.cacheWrite1hTokens === undefined);
+                  group.gaps |= gaps;
+                  if (gaps & PricingGap.tier) group.tiers.add(event.serviceTier ?? '');
                   groups.set(raw, group);
                 }
                 const unresolved = [...groups]
-                  .flatMap(([model, { tokens, legacy }]) => {
-                    if (!tokens) return [];
-                    return [
-                      {
-                        model,
-                        tokens,
-                        reason: legacy
-                          ? 'This device needs to sync with the updated collector before all rates can be applied.'
-                          : 'Choose an existing model or supply the missing input, output, cache, or service-tier rates.',
-                      },
-                    ];
-                  })
+                  .flatMap(([model, { tokens, gaps, tiers }]) =>
+                    tokens ? [{ model, tokens, reason: describePricingGaps(model, gaps, tiers, policy) }] : [],
+                  )
                   .sort((left, right) => right.tokens - left.tokens || left.model.localeCompare(right.model));
                 cached = { unresolved, validity };
               }

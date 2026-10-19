@@ -1,12 +1,14 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { page } from '$app/state';
+  import { sharedDeviceChanges, type DeviceChange, type DeviceChangeResult } from '#lib/client/device-changes.ts';
   import { failureMessage, getSettings, relativeTime } from '#lib/client/settings.svelte.ts';
   import type { Device } from '#lib/shared/domain.ts';
   import type { AdminAccess } from '#lib/shared/rpc.ts';
   import Icon from '#lib/components/Icon.svelte';
 
   const settings = getSettings();
+  const changes = sharedDeviceChanges();
   const integer = new Intl.NumberFormat('en-US');
   let devices = $state.raw<readonly Device[]>();
   let access = $state.raw<AdminAccess>();
@@ -15,7 +17,9 @@
   let editing = $state('');
   let draft = $state('');
   let confirming = $state('');
-  let busy = $state('');
+  // Changes run through a tab-level client, so one can still be in flight from
+  // a previous visit.
+  let busy = $state(changes?.state().inFlight?.device.id ?? '');
   let feedback = $state.raw<{ message: string; failed: boolean }>();
   let request: AbortController | undefined;
 
@@ -39,12 +43,15 @@
     request = controller;
     loading = true;
     loadError = '';
+    const since = changes?.state().generation;
     try {
       const [nextDevices, nextAccess] = await Promise.all([
         client.getDevices(controller.signal),
         client.getAdminAccess(controller.signal),
       ]);
       if (controller.signal.aborted) return;
+      // A change that settled mid-read may not be in it.
+      if (changes?.state().generation !== since) return void load();
       devices = nextDevices;
       access = nextAccess;
     } catch (failure) {
@@ -55,8 +62,20 @@
   }
 
   function mount() {
-    untrack(() => void load());
-    return () => request?.abort();
+    const unsubscribe = changes?.subscribe((state, result) => {
+      busy = state.inFlight?.device.id ?? '';
+      if (result) settled(result);
+    });
+    untrack(() => {
+      const missed = changes?.takeUnseen();
+      if (missed?.ok === false)
+        feedback = { message: `${missedAction(missed.change)}. ${missed.message}`, failed: true };
+      void load();
+    });
+    return () => {
+      unsubscribe?.();
+      request?.abort();
+    };
   }
 
   function startRename(device: Device) {
@@ -83,26 +102,36 @@
     restore: (device: Device) => `Restored ${device.name}. Connect it again with the command below to resume syncing.`,
   };
 
-  async function change(device: Device, action: keyof typeof succeeded) {
-    const client = settings.client;
-    if (!client || busy) return;
-    busy = device.id;
-    feedback = undefined;
-    try {
-      const updated =
-        action === 'rename'
-          ? await client.renameDevice(device.id, draft, settings.adminSecret)
-          : action === 'revoke'
-            ? await client.revokeDevice(device.id, settings.adminSecret)
-            : await client.restoreDevice(device.id, settings.adminSecret);
-      devices = devices?.map((item) => (item.id === updated.id ? updated : item));
+  // Failures that settled after leaving Settings say which change they were.
+  const missedAction = (change: DeviceChange) =>
+    change.action === 'rename'
+      ? `Could not rename ${change.device.name} to ${change.name}`
+      : `Could not ${change.action} ${change.device.name}`;
+
+  function settled(result: DeviceChangeResult) {
+    if (result.ok) {
+      devices = devices?.map((item) => (item.id === result.device.id ? result.device : item));
       cancel();
-      feedback = { message: succeeded[action](updated), failed: false };
-    } catch (failure) {
-      feedback = { message: failureMessage(failure, 'Could not update this device. Try again.'), failed: true };
-    } finally {
-      busy = '';
-    }
+      feedback = { message: succeeded[result.change.action](result.device), failed: false };
+    } else feedback = { message: result.message, failed: true };
+  }
+
+  function change(device: Device, action: keyof typeof succeeded) {
+    if (!changes || busy) return;
+    feedback = undefined;
+    changes.submit(
+      action === 'rename' ? { action, device, name: draft.trim() } : { action, device },
+      settings.adminSecret,
+    );
+  }
+
+  // Renames save on Enter or blur; Escape, an empty name, or the same name
+  // leave the device unchanged.
+  function commitRename(device: Device) {
+    if (editing !== device.id || busy) return;
+    const name = draft.trim();
+    if (!name || name === device.name) cancel();
+    else change(device, 'rename');
   }
 
   function renameKeyboard(event: KeyboardEvent, device: Device) {
@@ -111,7 +140,7 @@
       cancel();
     } else if (event.key === 'Enter') {
       event.preventDefault();
-      void change(device, 'rename');
+      commitRename(device);
     }
   }
 
@@ -155,6 +184,7 @@
               disabled={busy === device.id}
               autocomplete="off"
               onkeydown={(event) => renameKeyboard(event, device)}
+              onblur={() => commitRename(device)}
               {@attach focusInput}
             />{:else}<strong class="device-name" title={device.name}>{device.name}</strong>{/if}
           {#if confirming === device.id}<span class="device-meta device-warning"
@@ -167,20 +197,16 @@
         </div>
         <span class={['device-state', deviceStatus.tone]}><i aria-hidden="true"></i>{deviceStatus.label}</span>
         <div class="device-actions">
-          {#if editing === device.id}<button
-              class="button pricing-save"
-              disabled={busy === device.id || !draft.trim()}
-              onclick={() => void change(device, 'rename')}>{busy === device.id ? 'Saving…' : 'Save'}</button
-            ><button class="text-button" disabled={busy === device.id} onclick={cancel}>Cancel</button
-            >{:else if confirming === device.id}<button
+          {#if editing === device.id}{#if busy === device.id}<span class="device-meta">Saving…</span
+              >{/if}{:else if confirming === device.id}<button
               class="button device-revoke-confirm"
               disabled={busy === device.id}
-              onclick={() => void change(device, 'revoke')}>{busy === device.id ? 'Revoking…' : 'Revoke'}</button
+              onclick={() => change(device, 'revoke')}>{busy === device.id ? 'Revoking…' : 'Revoke'}</button
             ><button class="text-button" disabled={busy === device.id} onclick={cancel}>Cancel</button
             >{:else if device.revokedAt}<button
               class="text-button"
               disabled={Boolean(busy)}
-              onclick={() => void change(device, 'restore')}>{busy === device.id ? 'Restoring…' : 'Restore'}</button
+              onclick={() => change(device, 'restore')}>{busy === device.id ? 'Restoring…' : 'Restore'}</button
             >{:else if !isLocal(device)}<button
               class="icon-button"
               aria-label={`Rename ${device.name}`}

@@ -39,9 +39,15 @@ const customPrice = (rule: Extract<PricingRule, { kind: 'rates' }>) => {
   return fields;
 };
 
+// `aliased` marks catalog prices reached through a saved alias. Saved rules
+// mean "price it like this", so they fall back within the rule rather than
+// staying unknown; catalog-only models keep strict, fail-closed pricing.
 type ResolvedPrice =
   | { model: string; kind: 'free' }
-  | { model: string; kind: 'custom' | 'rates'; rates: Readonly<Record<string, number>> };
+  | { model: string; kind: 'custom'; rates: Readonly<Record<string, number>> }
+  | { model: string; kind: 'rates'; rates: Readonly<Record<string, number>>; aliased: boolean };
+const ruleResolved = (resolved: ResolvedPrice | undefined) =>
+  resolved !== undefined && (resolved.kind !== 'rates' || resolved.aliased);
 const policyResolvers = new WeakMap<
   PricingPolicy,
   { rules: Map<string, PricingRule>; models: Map<string, ResolvedPrice | undefined> }
@@ -58,20 +64,25 @@ const resolverFor = (policy: PricingPolicy) => {
 
 // Policies are immutable snapshots. Resolve each raw model once per snapshot,
 // including alias chains and unknown models, rather than once per token record.
+// Alias names and their terminal model are cached separately because only the
+// aliases carry rule fallbacks.
 const resolveRule = (model: string, policy: PricingPolicy) => {
   const resolver = resolverFor(policy);
   if (resolver.models.has(model)) return resolver.models.get(model);
-  const visited = new Set<string>();
+  // Keep malformed or unusually varied model names from retaining unbounded
+  // memory in a long-running server. Existing resolved prices remain correct.
+  if (resolver.models.size > 4096) resolver.models.clear();
+  const aliases = new Set<string>();
   let current = model;
   let resolved: ResolvedPrice | undefined;
-  while (!visited.has(current)) {
+  while (!aliases.has(current)) {
     if (resolver.models.has(current)) {
       resolved = resolver.models.get(current);
       break;
     }
-    visited.add(current);
     const rule = resolver.rules.get(current);
     if (rule?.kind === 'alias') {
+      aliases.add(current);
       current = rule.target;
       continue;
     }
@@ -80,15 +91,15 @@ const resolveRule = (model: string, policy: PricingPolicy) => {
       resolved = { model: rule.nickname ?? current, kind: 'custom', rates: customPrice(rule) };
     else {
       const rates = catalogPrice(current, policy);
-      if (rates) resolved = { model: current, kind: 'rates', rates };
+      if (rates) resolved = { model: current, kind: 'rates', rates, aliased: false };
     }
+    resolver.models.set(current, resolved);
     break;
   }
-  // Keep malformed or unusually varied model names from retaining unbounded
-  // memory in a long-running server. Existing resolved prices remain correct.
-  if (resolver.models.size > 4096) resolver.models.clear();
-  for (const name of visited) resolver.models.set(name, resolved);
-  return resolved;
+  if (!aliases.size) return resolved;
+  const viaAlias = resolved?.kind === 'rates' && !resolved.aliased ? { ...resolved, aliased: true } : resolved;
+  for (const name of aliases) resolver.models.set(name, viaAlias);
+  return viaAlias;
 };
 
 export const resolveDisplayModel = (rawModel: string, policy: PricingPolicy = bundledPolicy) =>
@@ -122,6 +133,9 @@ export const validatePricingRules = (catalog: typeof PriceSnapshot.Type, rules: 
 // Reasoning is already contained in output. Catalog estimates never borrow
 // standard rates for a different service tier. Explicit custom rates override
 // the catalog for every tier and context size; missing cache rates stay unknown.
+// Saved rules fall back within the rule instead: a missing 1-hour write uses
+// the same tier's 5-minute write, other missing tier rates use standard rates,
+// and an aliased catalog entry without cache rates bills those tokens as input.
 const tiers: Readonly<Record<string, string>> = {
   '': '',
   default: '',
@@ -140,21 +154,51 @@ const costFields = [
   'cache_creation_input_token_cost',
   'cache_creation_input_token_cost_above_1hr',
 ] as const;
+const tierSuffixOf = (tier: string) => {
+  const normalized = tier.trim().toLowerCase();
+  return Object.hasOwn(tiers, normalized) ? tiers[normalized] : undefined;
+};
+type Fallback = 'none' | 'variants' | 'buckets';
+const validRate = (rate: number | undefined) =>
+  rate !== undefined && Number.isFinite(rate) && rate >= 0 ? rate : undefined;
 const preparedRates = new WeakMap<Readonly<Record<string, number>>, Map<string, readonly (number | undefined)[]>>();
-const ratesFor = (price: Readonly<Record<string, number>>, contextSuffix: string, tierSuffix: string) => {
+const ratesFor = (
+  price: Readonly<Record<string, number>>,
+  contextSuffix: string,
+  tierSuffix: string,
+  fallback: Fallback,
+) => {
   let variants = preparedRates.get(price);
   if (!variants) {
     variants = new Map();
     preparedRates.set(price, variants);
   }
   const suffix = contextSuffix + tierSuffix;
-  const cached = variants.get(suffix);
+  const key = `${suffix}:${fallback}`;
+  const cached = variants.get(key);
   if (cached) return cached;
-  const rates = costFields.map((field) => {
-    const rate = price[field + suffix] ?? (contextSuffix ? price[field + tierSuffix] : undefined);
-    return rate !== undefined && Number.isFinite(rate) && rate >= 0 ? rate : undefined;
-  });
-  variants.set(suffix, rates);
+  const lookup = (tier: string) =>
+    costFields.map((field) =>
+      validRate(price[field + contextSuffix + tier] ?? (contextSuffix ? price[field + tier] : undefined)),
+    );
+  const own = lookup(tierSuffix);
+  let rates = own;
+  if (fallback !== 'none') {
+    // Stay in the tier first: a missing 1-hour write uses the tier's 5-minute
+    // write before standard rates. Billing cache tokens as input is the last resort.
+    const standard = tierSuffix ? lookup('') : own;
+    const input = own[0] ?? standard[0];
+    const bucket = (rate: number | undefined) => rate ?? (fallback === 'buckets' ? input : undefined);
+    const write = own[3] ?? standard[3];
+    rates = [
+      input,
+      own[1] ?? standard[1],
+      bucket(own[2] ?? standard[2]),
+      bucket(write),
+      bucket(own[4] ?? own[3] ?? standard[4] ?? write),
+    ];
+  }
+  variants.set(key, rates);
   return rates;
 };
 const ratesForEvent = (
@@ -169,10 +213,11 @@ const ratesForEvent = (
     contextSuffix = '_above_200k_tokens';
   if (input > 272_000 && price.input_cost_per_token_above_272k_tokens !== undefined)
     contextSuffix = '_above_272k_tokens';
-  const normalizedTier = tier.trim().toLowerCase();
-  const tierSuffix =
-    resolved.kind === 'custom' ? '' : Object.hasOwn(tiers, normalizedTier) ? tiers[normalizedTier] : undefined;
-  return tierSuffix === undefined ? undefined : ratesFor(price, contextSuffix, tierSuffix);
+  if (resolved.kind === 'custom') return ratesFor(price, contextSuffix, '', 'variants');
+  const tierSuffix = tierSuffixOf(tier) ?? (resolved.aliased ? '' : undefined);
+  return tierSuffix === undefined
+    ? undefined
+    : ratesFor(price, contextSuffix, tierSuffix, resolved.aliased ? 'buckets' : 'none');
 };
 const missingRates = (event: UsageEvent, write: number, write1h: number, rates: readonly (number | undefined)[]) =>
   (event.inputTokens > 0 && rates[0] === undefined) ||
@@ -183,6 +228,21 @@ const missingRates = (event: UsageEvent, write: number, write1h: number, rates: 
 const hasPricingMetadata = (event: UsageEvent, resolved: ResolvedPrice | undefined) =>
   (resolved?.kind === 'custom' || event.serviceTier !== undefined) &&
   (event.cacheWriteTokens === 0 || event.cacheWrite1hTokens !== undefined);
+const cacheWriteSplit = (event: UsageEvent, cacheWrite1h: number) => {
+  const write1h = Math.min(Math.max(0, cacheWrite1h), event.cacheWriteTokens);
+  return [event.cacheWriteTokens - write1h, write1h] as const;
+};
+// Shared by estimates and attribution so both always select the same rates.
+const completeRates = (
+  event: UsageEvent,
+  write: number,
+  write1h: number,
+  tier: string,
+  resolved: Extract<ResolvedPrice, { kind: 'custom' | 'rates' }>,
+) => {
+  const rates = ratesForEvent(event, tier, resolved);
+  return rates && !missingRates(event, write, write1h, rates) ? rates : undefined;
+};
 const estimateResolvedCost = (
   event: UsageEvent,
   cacheWrite1h: number,
@@ -191,11 +251,9 @@ const estimateResolvedCost = (
 ) => {
   if (!resolved) return { costUsd: 0, costKnown: false };
   if (resolved.kind === 'free') return { costUsd: 0, costKnown: true };
-  const rates = ratesForEvent(event, tier, resolved);
+  const [write, write1h] = cacheWriteSplit(event, cacheWrite1h);
+  const rates = completeRates(event, write, write1h, tier, resolved);
   if (!rates) return { costUsd: 0, costKnown: false };
-  const write1h = Math.min(Math.max(0, cacheWrite1h), event.cacheWriteTokens);
-  const write = event.cacheWriteTokens - write1h;
-  if (missingRates(event, write, write1h, rates)) return { costUsd: 0, costKnown: false };
   const costUsd =
     event.inputTokens * (rates[0] ?? 0) +
     event.outputTokens * (rates[1] ?? 0) +
@@ -217,6 +275,12 @@ const reportedGrokCost = (event: UsageEvent) => {
     : { costUsd: 0, costKnown: false };
 };
 
+// Saved rules price records without tier or cache-duration metadata as
+// standard tier with 5-minute writes. Catalog-only models and records with a
+// retained legacy cost still need that metadata before they are repriced.
+const estimable = (event: UsageEvent, resolved: ResolvedPrice | undefined) =>
+  resolved?.kind === 'free' || hasPricingMetadata(event, resolved) || (ruleResolved(resolved) && !event.costKnown);
+
 const freeTokenCosts = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 // Attribution is available only when the same policy can explain the already
 // priced total. Native ledger and retained legacy costs have no bucket prices.
@@ -224,12 +288,10 @@ export const tokenCostParts = (event: UsageEvent, policy: PricingPolicy = bundle
   if (!event.costKnown || usesReportedGrokCost(event, policy)) return undefined;
   const resolved = resolveRule(event.rawModel ?? event.model, policy);
   if (resolved?.kind === 'free') return event.costUsd === 0 ? freeTokenCosts : undefined;
-  if (!resolved || !hasPricingMetadata(event, resolved)) return undefined;
-  const rates = ratesForEvent(event, event.serviceTier ?? '', resolved);
+  if (!resolved || (!ruleResolved(resolved) && !hasPricingMetadata(event, resolved))) return undefined;
+  const [write, write1h] = cacheWriteSplit(event, event.cacheWrite1hTokens ?? 0);
+  const rates = completeRates(event, write, write1h, event.serviceTier ?? '', resolved);
   if (!rates) return undefined;
-  const write1h = Math.min(Math.max(0, event.cacheWrite1hTokens ?? 0), event.cacheWriteTokens);
-  const write = event.cacheWriteTokens - write1h;
-  if (missingRates(event, write, write1h, rates)) return undefined;
   const input = event.inputTokens * (rates[0] ?? 0);
   const output = event.outputTokens * (rates[1] ?? 0);
   const cacheRead = event.cacheReadTokens * (rates[2] ?? 0);
@@ -251,6 +313,13 @@ export const estimateCost = (event: UsageEvent, cacheWrite1h = 0, tier = '', pol
   return estimateResolvedCost(event, cacheWrite1h, tier, resolved);
 };
 
+// Whether repricing keeps the record's collector-reported cost, rather than
+// estimating it from this policy (free rules and estimable records reprice).
+export const retainsRecordedCost = (event: UsageEvent, policy: PricingPolicy) =>
+  event.costKnown &&
+  !usesReportedGrokCost(event, policy) &&
+  !estimable(event, resolveRule(event.rawModel ?? event.model, policy));
+
 export const repriceEvent = (event: UsageEvent, policy: PricingPolicy): UsageEvent => {
   const rawModel = event.rawModel ?? event.model;
   const resolved = resolveRule(rawModel, policy);
@@ -260,7 +329,7 @@ export const repriceEvent = (event: UsageEvent, policy: PricingPolicy): UsageEve
   // Legacy records retain reported costs until this metadata is available.
   const cost = usesReportedGrokCost(event, policy)
     ? reportedGrokCost(event)
-    : hasPricingMetadata(event, resolved) || resolved?.kind === 'free'
+    : estimable(event, resolved)
       ? estimateResolvedCost(event, event.cacheWrite1hTokens ?? 0, event.serviceTier ?? '', resolved)
       : retainedCost(event);
   // Unchanged immutable records can be shared across dashboard snapshots.
@@ -272,4 +341,75 @@ export const repriceEvent = (event: UsageEvent, policy: PricingPolicy): UsageEve
   )
     return event;
   return { ...event, rawModel, model, ...cost };
+};
+
+// Why a record stays unpriced, as bit flags so the pricing settings can merge
+// every unknown record of a raw model without allocating per record.
+export const PricingGap = {
+  price: 1,
+  reportedCost: 2,
+  metadata: 4,
+  tier: 8,
+  input: 16,
+  output: 32,
+  cacheRead: 64,
+  cacheWrite: 128,
+  cacheWrite1h: 256,
+} as const;
+
+export const pricingGaps = (event: UsageEvent, policy: PricingPolicy) => {
+  if (usesReportedGrokCost(event, policy)) return PricingGap.reportedCost;
+  const resolved = resolveRule(event.rawModel ?? event.model, policy);
+  if (!resolved) return PricingGap.price;
+  if (resolved.kind === 'free') return 0;
+  if (!estimable(event, resolved)) return PricingGap.metadata;
+  const tier = event.serviceTier ?? '';
+  const rates = ratesForEvent(event, tier, resolved);
+  if (!rates) return PricingGap.tier;
+  const [write, write1h] = cacheWriteSplit(event, event.cacheWrite1hTokens ?? 0);
+  const buckets =
+    (event.inputTokens > 0 && rates[0] === undefined ? PricingGap.input : 0) |
+    (event.outputTokens > 0 && rates[1] === undefined ? PricingGap.output : 0) |
+    (event.cacheReadTokens > 0 && rates[2] === undefined ? PricingGap.cacheRead : 0) |
+    (write > 0 && rates[3] === undefined ? PricingGap.cacheWrite : 0) |
+    (write1h > 0 && rates[4] === undefined ? PricingGap.cacheWrite1h : 0);
+  // Rule fallbacks already use standard rates, so only catalog tiers are named.
+  return buckets && resolved.kind === 'rates' && !resolved.aliased && tierSuffixOf(tier)
+    ? buckets | PricingGap.tier
+    : buckets;
+};
+
+const gapLabels = [
+  [PricingGap.input, 'input'],
+  [PricingGap.output, 'output'],
+  [PricingGap.cacheRead, 'cache read'],
+  [PricingGap.cacheWrite, 'cache write'],
+  [PricingGap.cacheWrite1h, '1-hour cache write'],
+] as const;
+const listed = (items: readonly string[]) =>
+  items.length < 2 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} or ${items.at(-1)}`;
+
+// `tiers` are the service tiers of the records whose gaps include `tier`.
+export const describePricingGaps = (rawModel: string, gaps: number, tiers: Iterable<string>, policy: PricingPolicy) => {
+  const rule = resolverFor(policy).rules.get(rawModel);
+  const resolved = resolveRule(rawModel, policy);
+  const saved = rule !== undefined;
+  const next = saved ? 'pick another model or set custom rates.' : 'pick an existing model or set custom rates.';
+  if (gaps & PricingGap.metadata)
+    return 'This device needs to sync with the updated collector before all rates can be applied.';
+  if (gaps & PricingGap.reportedCost) return `Grok reported no cost for these requests — ${next}`;
+  if (gaps & PricingGap.price || !resolved || resolved.kind === 'free')
+    return saved ? `The saved rule has no known price — ${next}` : `No catalog price for ${rawModel} — ${next}`;
+  const tierNames = gaps & PricingGap.tier ? [...new Set([...tiers].map((tier) => tier.trim() || 'standard'))] : [];
+  const buckets = gapLabels.flatMap(([gap, label]) => (gaps & gap ? [label] : []));
+  if (!buckets.length && !tierNames.length)
+    return 'Choose an existing model or supply the missing input, output, cache, or service-tier rates.';
+  const missing = buckets.length
+    ? `no ${tierNames.length ? `${listed(tierNames)} ` : ''}${listed(buckets)} rate`
+    : `no rates for the ${listed(tierNames)} service tier`;
+  if (resolved.kind === 'custom')
+    return `The saved custom rates have ${missing} — fill ${buckets.length > 1 ? 'them' : 'it'} in or pick a model.`;
+  return saved
+    ? `The saved rule uses ${resolved.model}, which has ${missing} — ${next}`
+    : `${resolved.model} has ${missing} — ${next}`;
 };
