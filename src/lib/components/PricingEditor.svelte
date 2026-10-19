@@ -13,6 +13,7 @@
     isIdle,
     pendingWrite,
     type PricingSaves,
+    type PricingWrite,
     type PricingWriteResult,
   } from '#lib/client/pricing-saves.ts';
   import type { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
@@ -72,6 +73,10 @@
   // A failed save for a model that is not open stays visible until it is retried.
   const otherFailure = $derived(
     [...(saveState?.failures ?? [])].find(([key]) => key !== draft.model && key !== catalogKey),
+  );
+  // The failed save the feedback row is showing, if any.
+  const shownFailure = $derived(
+    editing && currentFailure ? currentFailure : !error && !refreshFailure ? otherFailure?.[1] : undefined,
   );
   const listed = $derived(new Set([...unresolved.map((entry) => entry.model), ...saved.map((rule) => rule.model)]));
   // A new model is in neither list until the hub stores its rule, so its
@@ -287,7 +292,13 @@
   }
 
   function written(result: PricingWriteResult) {
-    if (!result.ok) return;
+    if (!result.ok) {
+      // A kept failure of the open draft is unsaved again, so blur, Enter or
+      // switching retries it. Discarded or superseded writes keep no failure.
+      const write = result.write;
+      if (editing && write.type === 'set' && saveState?.failures.get(draft.model)?.write === write) dirty = true;
+      return;
+    }
     if (settings) settings = { ...settings, info: result.info };
     const write = result.write;
     if (write.type === 'refresh') {
@@ -326,6 +337,15 @@
       saves?.discard(draft.model);
       selectModel(draft.model);
     } else if (saves && saves.submit({ type: 'delete', model: draft.model.trim() }, adminSecret)) success = '';
+  }
+
+  // Retry sends with the pairing secret as entered now. The open model's
+  // draft goes when complete, since it may have been edited since it failed.
+  function retry(write: PricingWrite) {
+    if (write.type === 'set' && write.rule.model === draft.model && draftRule) {
+      dirty = true;
+      flushAutosave();
+    } else if (saves && saves.submit(write, adminSecret)) success = '';
   }
 
   function refreshCatalog() {
@@ -583,7 +603,10 @@
       >{:else if settings?.info.refreshError}<span>{settings.info.refreshError}</span>{:else if loading || saving}<span
         >{resetting ? 'Resetting…' : refreshing ? 'Updating prices…' : saving ? 'Saving…' : 'Updating…'}</span
       >{/if}
-    {#if loadFailed}<button class="text-button" onclick={() => void load()}>Retry</button>{/if}
+    {#if loadFailed}<button class="text-button" onclick={() => void load()}>Retry</button>{:else if shownFailure}<button
+        class="text-button"
+        onclick={() => shownFailure && retry(shownFailure.write)}>Retry</button
+      >{/if}
   </div>
   <div class="pricing-footer">
     {#if settings?.secretRequired}<input
