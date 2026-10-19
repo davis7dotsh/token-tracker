@@ -443,6 +443,89 @@ test('pricing rules merge aliases in dashboard reads, reprice history, and survi
   }
 });
 
+test('saved aliases resolve models whose catalog target lacks their tier or cache-write rates', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-partial-alias-wire-'));
+  directories.push(directory);
+  const atlas: UsageEvent = {
+    ...localEvent,
+    id: 'atlas-request',
+    harness: 'codex',
+    model: 'atlas-alpha',
+    cacheWriteTokens: 40,
+    costKnown: false,
+    costUsd: 0,
+    serviceTier: 'ultrafast',
+    cacheWrite1hTokens: 20,
+  };
+  const {
+    serviceTier: _tier,
+    cacheWrite1hTokens: _ttl,
+    ...grokAggregate
+  } = {
+    ...atlas,
+    id: 'grok-request',
+    harness: 'grok' as const,
+    model: 'grok-4.7-build',
+    requests: 3,
+  };
+  const localLayer = Layer.succeed(LocalUsage, {
+    device: localDevice,
+    collect: Effect.succeed({ ...localData, events: [atlas, grokAggregate] }),
+  });
+  const handler = makeRpcWebHandler({ dataDirectory: directory, pairingSecret }, localLayer);
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const browser = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  try {
+    const before = await browser.getPricing();
+    expect(before.unresolved.map((entry) => entry.model).sort()).toEqual(['atlas-alpha', 'grok-4.7-build']);
+    await browser.setPricingRule({ model: 'atlas-alpha', kind: 'alias', target: 'gpt-5.6-terra' }, pairingSecret);
+    await browser.setPricingRule({ model: 'grok-4.7-build', kind: 'alias', target: 'grok-4.7' }, pairingSecret);
+    expect((await browser.getPricing()).unresolved).toEqual([]);
+    const usage = await browser.getUsage();
+    expect(usage.totals.unpricedTokens).toBe(0);
+    expect(usage.totals.costUSD).toBeGreaterThan(0);
+  } finally {
+    await browser.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
+test('free rules reprice legacy records without a mixed-snapshot warning', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-free-snapshot-wire-'));
+  directories.push(directory);
+  const legacy: UsageEvent = { ...localEvent, id: 'legacy-request', model: 'legacy-rule', costUsd: 9 };
+  const modern: UsageEvent = {
+    ...legacy,
+    id: 'modern-request',
+    model: 'modern-rule',
+    serviceTier: '',
+    cacheWrite1hTokens: 0,
+  };
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, {
+      device: localDevice,
+      collect: Effect.succeed({ ...localData, events: [legacy, modern], pricingUpdatedAt: 'old-collector' }),
+    }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const browser = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  try {
+    expect((await browser.getUsage()).pricing.updatedAt).toBe('old-collector');
+    for (const model of ['legacy-rule', 'modern-rule'])
+      await browser.setPricingRule({ model, kind: 'free' }, pairingSecret);
+    const usage = await browser.getUsage();
+    expect(usage.totals.costUSD).toBe(0);
+    expect(usage.pricing.updatedAt).not.toContain('old-collector');
+    expect(usage.warnings.some((warning) => warning.includes('different snapshots'))).toBe(false);
+  } finally {
+    await browser.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
 test('pricing writes require a same-origin dashboard request or pairing secret', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'token-tracker-pricing-auth-'));
   directories.push(directory);

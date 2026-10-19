@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { createAliasValidation, rankCatalogMatches } from '../../src/lib/client/pricing-editor';
+import {
+  createAliasValidation,
+  draftFromRule,
+  draftIssue,
+  rankCatalogMatches,
+  ruleFromDraft,
+  sameRule,
+} from '../../src/lib/client/pricing-editor';
 import type { PricingRule } from '../../src/lib/shared/pricing';
 
 const catalogModels = ['gpt-6-astra', 'gpt-6-sol', 'openai/catalog-only', 'claude-fable-5'];
@@ -138,5 +145,62 @@ describe('pricing alias editor validation', () => {
     expect(validate('new-proxy', limit)).toBeUndefined();
     expect(validate('new-proxy', ` ${limit} `)).toBeUndefined();
     expect(validate('new-proxy', overLimit)).toBeDefined();
+  });
+});
+
+describe('pricing editor autosave drafts', () => {
+  const validate = validation();
+  const rates = {
+    model: 'proxy',
+    kind: 'rates',
+    nickname: 'Proxy',
+    rates: { inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 0 },
+  } as const;
+
+  test('saved rules round-trip through drafts unchanged, so loading never autosaves', () => {
+    const rules: PricingRule[] = [
+      { model: 'proxy', kind: 'alias', target: 'gpt-6-astra' },
+      { model: 'proxy', kind: 'free' },
+      rates,
+      { model: 'proxy', kind: 'rates', rates: { inputPerMillion: 0, outputPerMillion: 0 } },
+    ];
+    for (const rule of rules) expect(sameRule(ruleFromDraft(draftFromRule('proxy', rule), validate), rule)).toBe(true);
+  });
+
+  test('incomplete or invalid drafts produce no rule and explain what is missing', () => {
+    const empty = draftFromRule('proxy', undefined);
+    expect(ruleFromDraft(empty, validate)).toBeUndefined();
+    expect(ruleFromDraft({ ...empty, target: 'gpt-6-as' }, validate)).toBeUndefined();
+    expect(ruleFromDraft({ ...empty, model: ' ', target: 'gpt-6-astra' }, validate)).toBeUndefined();
+    expect(draftIssue({ ...empty, model: '' }, validate)).toContain('model ID');
+    const custom = { ...empty, kind: 'rates' as const };
+    expect(draftIssue({ ...custom, rates: { ...custom.rates, input: 1 } }, validate)).toContain('input and output');
+    expect(draftIssue({ ...custom, rates: { ...custom.rates, input: 1, output: -1 } }, validate)).toContain('zero');
+    expect(draftIssue({ ...custom, kind: 'free' }, validate)).toBeUndefined();
+  });
+
+  test('drafts trim names and omit blank optional rates', () => {
+    const draft = { ...draftFromRule(' proxy ', rates), nickname: ' Proxy ', target: ' ignored ' };
+    expect(ruleFromDraft({ ...draft, rates: { ...draft.rates, cacheRead: null } }, validate)).toEqual({
+      model: 'proxy',
+      kind: 'rates',
+      nickname: 'Proxy',
+      rates: { inputPerMillion: 1, outputPerMillion: 2 },
+    });
+    expect(ruleFromDraft({ ...draft, kind: 'alias', target: ' gpt-6-sol ' }, validate)).toEqual({
+      model: 'proxy',
+      kind: 'alias',
+      target: 'gpt-6-sol',
+    });
+  });
+
+  test('rule equality compares every saved field', () => {
+    expect(sameRule(rates, { ...rates, rates: { ...rates.rates, cacheReadPerMillion: 1 } })).toBe(false);
+    expect(sameRule(rates, { ...rates, nickname: undefined })).toBe(false);
+    expect(sameRule({ model: 'a', kind: 'free' }, { model: 'b', kind: 'free' })).toBe(false);
+    expect(sameRule(undefined, rates)).toBe(false);
+    expect(sameRule({ model: 'a', kind: 'alias', target: 'x' }, { model: 'a', kind: 'alias', target: 'y' })).toBe(
+      false,
+    );
   });
 });

@@ -8,7 +8,9 @@ import { PricingRule, type PricingPolicy } from '../../src/lib/shared/pricing';
 import type { UsageEvent } from '../../src/lib/shared/domain';
 import {
   bundledPolicy,
+  describePricingGaps,
   estimateCost,
+  pricingGaps,
   repriceEvent,
   resolveDisplayModel,
   tokenCostParts,
@@ -482,9 +484,197 @@ test('prepared alias chains stay independent across snapshots and preserve missi
   expect(repriceEvent(request, free)).toMatchObject({ model: 'quasar-alpha', costUsd: 0, costKnown: true });
   expect(repriceEvent(request, policy(rules))).toMatchObject({ model: 'proxy-0', costKnown: false });
   const catalog = policy([{ model: 'proxy-0', kind: 'alias', target: 'gpt-6.1-sol' }]);
-  expect(estimateCost(request, 0, 'constructor', catalog).costKnown).toBe(false);
+  // Saved aliases price unrecognized tiers at standard rates without reading
+  // prototype keys; catalog-only models still refuse them.
+  expect(estimateCost(request, 0, 'constructor', catalog)).toEqual(estimateCost(request, 0, '', catalog));
+  expect(estimateCost(request, 0, '', catalog).costKnown).toBe(true);
+  expect(estimateCost(event({ model: 'gpt-6.1-sol' }), 0, 'constructor').costKnown).toBe(false);
   expect(estimateCost(event({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 }), 0, 'constructor').costKnown).toBe(
     false,
+  );
+});
+
+// Mirrors catalog entries that only partly cover a model's usage: no
+// ultrafast or 1-hour write rates, and (xAI-style) no cache-write rate.
+const partialPolicy = (rules: readonly PricingRule[]): PricingPolicy => ({
+  catalog: {
+    ...bundledPolicy.catalog,
+    models: {
+      'gpt-6-terra': {
+        input_cost_per_token: 2e-6,
+        output_cost_per_token: 12e-6,
+        cache_read_input_token_cost: 0.2e-6,
+        cache_creation_input_token_cost: 2.5e-6,
+        input_cost_per_token_priority: 4e-6,
+        output_cost_per_token_priority: 24e-6,
+        cache_read_input_token_cost_priority: 0.4e-6,
+        cache_creation_input_token_cost_priority: 5e-6,
+      },
+      'xai/grok-6': { input_cost_per_token: 2e-6, output_cost_per_token: 6e-6, cache_read_input_token_cost: 0.5e-6 },
+      'no-cache-read': { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+    },
+  },
+  rules,
+  revision: `partial:${rules.length}`,
+});
+const terraAlias = partialPolicy([{ model: 'atlas-alpha', kind: 'alias', target: 'gpt-6-terra' }]);
+const tokens = { inputTokens: 1_000_000, outputTokens: 1_000_000, cacheReadTokens: 1_000_000 };
+
+test('saved aliases fall back to standard tier rates for missing or unrecognized tiers', () => {
+  const standard = repriceEvent(event({ model: 'atlas-alpha', ...tokens }), terraAlias);
+  expect(standard).toMatchObject({ model: 'gpt-6-terra', costKnown: true });
+  expect(standard.costUsd).toBeCloseTo(14.2, 12);
+  for (const serviceTier of ['ultrafast', 'unknown-new-tier', 'constructor']) {
+    const priced = repriceEvent(event({ model: 'atlas-alpha', serviceTier, ...tokens }), terraAlias);
+    expect(priced).toMatchObject({ costKnown: true, costUsd: standard.costUsd });
+    expect(tokenCostParts(priced, terraAlias)).toBeDefined();
+  }
+  // Available tier variants still win over the fallback.
+  const priority = repriceEvent(event({ model: 'atlas-alpha', serviceTier: 'priority', ...tokens }), terraAlias);
+  expect(priority.costUsd).toBeCloseTo(28.4, 12);
+});
+
+test('saved aliases price 1-hour writes at the 5-minute rate and missing cache rates at the input rate', () => {
+  const writes = event({ model: 'atlas-alpha', ...tokens, cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 400_000 });
+  const terra = repriceEvent(writes, terraAlias);
+  expect(terra.costKnown).toBe(true);
+  expect(terra.costUsd).toBeCloseTo(14.2 + 2.5, 12);
+  const parts = tokenCostParts(terra, terraAlias);
+  expect(parts?.cacheWrite).toBeCloseTo(2.5, 12);
+
+  const grok = partialPolicy([
+    { model: 'grok-6-build', kind: 'alias', target: 'grok-6' },
+    { model: 'cheap-proxy', kind: 'alias', target: 'no-cache-read' },
+  ]);
+  const grokWrites = repriceEvent({ ...writes, model: 'grok-6-build', cacheWrite1hTokens: 0 }, grok);
+  expect(grokWrites).toMatchObject({ model: 'grok-6', costKnown: true });
+  expect(grokWrites.costUsd).toBeCloseTo(2 + 6 + 0.5 + 2, 12);
+  const cheap = repriceEvent({ ...writes, model: 'cheap-proxy' }, grok);
+  expect(cheap.costUsd).toBeCloseTo(1 + 2 + 1 + 1, 12);
+  expect(tokenCostParts(cheap, grok)?.cacheRead).toBeCloseTo(1, 12);
+});
+
+test('saved aliases stay in the tier for 1-hour writes before borrowing standard rates', () => {
+  // Shaped like claude-sonnet-4-6: batch has 5-minute writes, only standard has
+  // 1-hour writes, and the cache-read-less tier mirrors many partial tiers.
+  const sonnet = {
+    input_cost_per_token: 3e-6,
+    output_cost_per_token: 15e-6,
+    cache_read_input_token_cost: 0.3e-6,
+    cache_creation_input_token_cost: 3.75e-6,
+    cache_creation_input_token_cost_above_1hr: 6e-6,
+    input_cost_per_token_batches: 1.5e-6,
+    output_cost_per_token_batches: 7.5e-6,
+    cache_creation_input_token_cost_batches: 1.875e-6,
+    input_cost_per_token_flex: 1.5e-6,
+    output_cost_per_token_flex: 7.5e-6,
+  };
+  const pricing: PricingPolicy = {
+    catalog: { ...bundledPolicy.catalog, models: { 'sonnet-like': sonnet } },
+    rules: [{ model: 'review-alias', kind: 'alias', target: 'sonnet-like' }],
+    revision: 'tier-precedence',
+  };
+  const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  const price = (serviceTier: string, extra: Partial<UsageEvent>) =>
+    repriceEvent(event({ model: 'review-alias', serviceTier, ...zero, ...extra }), pricing).costUsd;
+  const hourWrites = { cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 1_000_000 };
+  // Batch 5-minute write, not the standard 1-hour write.
+  expect(price('batch', hourWrites)).toBeCloseTo(1.875, 12);
+  expect(price('', hourWrites)).toBeCloseTo(6, 12);
+  // No tier write at all: standard 1-hour, then standard 5-minute.
+  expect(price('flex', hourWrites)).toBeCloseTo(6, 12);
+  // Missing tier cache reads borrow the standard cache-read rate before input.
+  expect(price('flex', { cacheReadTokens: 1_000_000 })).toBeCloseTo(0.3, 12);
+  // Attribution follows the same selection.
+  const priced = repriceEvent(event({ model: 'review-alias', serviceTier: 'batch', ...zero, ...hourWrites }), pricing);
+  expect(tokenCostParts(priced, pricing)?.cacheWrite).toBeCloseTo(1.875, 12);
+});
+
+test('a saved rule prices Grok aggregates without tier or cache-duration metadata', () => {
+  const {
+    serviceTier: _tier,
+    cacheWrite1hTokens: _ttl,
+    ...aggregate
+  } = event({
+    harness: 'grok',
+    model: 'grok-6-build',
+    ...tokens,
+    cacheWriteTokens: 1_000_000,
+    requests: 4,
+  });
+  expect(repriceEvent(aggregate, partialPolicy([]))).toMatchObject({ costKnown: false, costUsd: 0 });
+  const pricing = partialPolicy([{ model: 'grok-6-build', kind: 'alias', target: 'grok-6' }]);
+  const priced = repriceEvent(aggregate, pricing);
+  expect(priced).toMatchObject({ model: 'grok-6', costKnown: true });
+  expect(priced.costUsd).toBeCloseTo(10.5, 12);
+  expect(tokenCostParts(priced, pricing)).toBeDefined();
+  // A retained legacy cost is still kept rather than replaced by a default-tier estimate.
+  expect(repriceEvent({ ...aggregate, costKnown: true, costUsd: 9 }, pricing)).toMatchObject({ costUsd: 9 });
+});
+
+test('catalog-only models with the same gaps stay unpriced and name what is missing', () => {
+  const direct = partialPolicy([]);
+  const writes = { ...tokens, cacheWriteTokens: 1_000_000, cacheWrite1hTokens: 400_000 };
+  const ultrafast = event({ model: 'gpt-6-terra', serviceTier: 'ultrafast', ...tokens });
+  const cases = [
+    [ultrafast, 'gpt-6-terra has no ultrafast input, output or cache read rate'],
+    [event({ model: 'gpt-6-terra', serviceTier: 'scale', ...tokens }), 'no rates for the scale service tier'],
+    [event({ model: 'gpt-6-terra', ...writes }), 'gpt-6-terra has no 1-hour cache write rate'],
+    [event({ model: 'grok-6', ...writes, cacheWrite1hTokens: 0 }), 'grok-6 has no cache write rate'],
+    [event({ model: 'no-cache-read', ...tokens }), 'no-cache-read has no cache read rate'],
+    [event({ model: 'mystery' }), 'No catalog price for mystery'],
+  ] as const;
+  for (const [request, reason] of cases) {
+    const priced = repriceEvent(request, direct);
+    expect(priced).toMatchObject({ costKnown: false, costUsd: 0 });
+    const gaps = pricingGaps(priced, direct);
+    expect(describePricingGaps(request.model, gaps, [request.serviceTier ?? ''], direct)).toContain(reason);
+  }
+  const { serviceTier: _tier, ...legacy } = event({ model: 'gpt-6-terra' });
+  expect(describePricingGaps('gpt-6-terra', pricingGaps(legacy, direct), [], direct)).toContain('needs to sync');
+});
+
+test('custom rates keep blank cache rates unknown and saved rules name their remaining gap', () => {
+  const custom = partialPolicy([
+    {
+      model: 'quasar-alpha',
+      kind: 'rates',
+      rates: { inputPerMillion: 1, outputPerMillion: 2, cacheWritePerMillion: 3 },
+    },
+  ]);
+  const reads = repriceEvent(event(), custom);
+  expect(reads).toMatchObject({ costKnown: false, costUsd: 0 });
+  expect(describePricingGaps('quasar-alpha', pricingGaps(reads, custom), [], custom)).toBe(
+    'The saved custom rates have no cache read rate — fill it in or pick a model.',
+  );
+  // The 1-hour write falls back to the 5-minute rate the user supplied.
+  const writes = repriceEvent(
+    event({
+      cacheReadTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheWriteTokens: 1_000_000,
+      cacheWrite1hTokens: 1_000_000,
+    }),
+    custom,
+  );
+  expect(writes).toMatchObject({ costKnown: true, costUsd: 3 });
+
+  const brokenTarget = { ...custom, catalog: { ...custom.catalog, models: {} } };
+  const alias = { ...brokenTarget, rules: [{ model: 'atlas-alpha', kind: 'alias', target: 'gpt-6-terra' } as const] };
+  const stuck = repriceEvent(event({ model: 'atlas-alpha' }), alias);
+  expect(stuck.costKnown).toBe(false);
+  expect(describePricingGaps('atlas-alpha', pricingGaps(stuck, alias), [], alias)).toContain(
+    'The saved rule has no known price',
+  );
+  const noOutput = partialPolicy([{ model: 'atlas-alpha', kind: 'alias', target: 'grok-6' }]);
+  const outputless = {
+    ...noOutput,
+    catalog: { ...noOutput.catalog, models: { 'xai/grok-6': { input_cost_per_token: 2e-6 } } },
+  };
+  const missingOutput = repriceEvent(event({ model: 'atlas-alpha' }), outputless);
+  expect(describePricingGaps('atlas-alpha', pricingGaps(missingOutput, outputless), [], outputless)).toBe(
+    'The saved rule uses grok-6, which has no output rate — pick another model or set custom rates.',
   );
 });
 

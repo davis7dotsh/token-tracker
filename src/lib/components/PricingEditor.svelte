@@ -1,6 +1,20 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { createAliasValidation, rankCatalogMatches } from '#lib/client/pricing-editor.ts';
+  import {
+    createAliasValidation,
+    draftFromRule,
+    draftIssue,
+    rankCatalogMatches,
+    ruleFromDraft,
+  } from '#lib/client/pricing-editor.ts';
+  import {
+    catalogKey,
+    intendedRule,
+    isIdle,
+    pendingWrite,
+    type PricingSaves,
+    type PricingWriteResult,
+  } from '#lib/client/pricing-saves.ts';
   import type { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import type { UsageQuery } from '#lib/shared/domain.ts';
   import type { PricingInfo, PricingRule } from '#lib/shared/pricing.ts';
@@ -8,10 +22,12 @@
 
   let {
     client,
+    saves,
     query,
     adminSecret = $bindable(''),
   }: {
     client: ReturnType<typeof makeDashboardClient> | undefined;
+    saves: PricingSaves | undefined;
     query: UsageQuery;
     adminSecret?: string;
   } = $props();
@@ -21,65 +37,112 @@
     unresolved: readonly { model: string; tokens: number; reason: string }[];
     secretRequired: boolean;
   }>();
+  let saveState = $state.raw(untrack(() => saves?.state()));
   let loading = $state(false);
-  let busy = $state('');
   let error = $state('');
   let loadFailed = $state(false);
   let success = $state('');
-  let model = $state('');
   let editing = $state(false);
-  let kind = $state<PricingRule['kind']>('alias');
-  let target = $state('');
+  let draft = $state(draftFromRule('', undefined));
   let targetOpen = $state(false);
   let targetHighlight = $state(0);
   let targetWrapper = $state.raw<HTMLElement>();
-  let nickname = $state('');
-  let inputRate = $state<number | null | undefined>();
-  let outputRate = $state<number | null | undefined>();
-  let cacheReadRate = $state<number | null | undefined>();
-  let cacheWriteRate = $state<number | null | undefined>();
-  let cacheWrite1hRate = $state<number | null | undefined>();
   let request: AbortController | undefined;
   let requestVersion = 0;
-  let mutationVersion = 0;
-  let editorVersion = 0;
-  let mounted = false;
+  let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+  // Edited since it was last submitted or selected. Blur only saves real edits,
+  // so focus leaving a control that a reset just disabled cannot undo the reset.
+  let dirty = false;
 
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
-  const validRate = (value: number | null | undefined) => value == null || (Number.isFinite(value) && value >= 0);
   const saved = $derived(settings?.info.rules ?? []);
   const unresolved = $derived(settings?.unresolved ?? []);
-  const currentRule = $derived(saved.find((rule) => rule.model === model));
-  const currentUnknown = $derived(unresolved.find((entry) => entry.model === model));
+  const pending = $derived(saveState ? pendingWrite(saveState, draft.model) : undefined);
+  const resetting = $derived(pending?.type === 'delete');
+  const hasRule = $derived(resetting || pending?.type === 'set' || saved.some((rule) => rule.model === draft.model));
+  const refreshing = $derived(
+    Boolean(saveState && [saveState.inFlight, ...saveState.queued].some((write) => write?.type === 'refresh')),
+  );
+  const saving = $derived(Boolean(saveState && !isIdle(saveState)));
+  const currentFailure = $derived(saveState?.failures.get(draft.model));
+  const refreshFailure = $derived(saveState?.failures.get(catalogKey));
+  // A failed save for a model that is not open stays visible until it is retried.
+  const otherFailure = $derived(
+    [...(saveState?.failures ?? [])].find(([key]) => key !== draft.model && key !== catalogKey),
+  );
+  const listed = $derived(new Set([...unresolved.map((entry) => entry.model), ...saved.map((rule) => rule.model)]));
+  // A new model is in neither list until the hub stores its rule, so its
+  // failed or pending save is listed here to be reopened, retried or discarded.
+  const failedNew = $derived(
+    [...(saveState?.failures.keys() ?? [])].filter((key): key is string => typeof key === 'string' && !listed.has(key)),
+  );
+  const savingNew = $derived([
+    ...new Map(
+      (saveState ? [saveState.inFlight, ...saveState.queued] : []).flatMap((write) =>
+        write?.type === 'set' && !listed.has(write.rule.model) ? [[write.rule.model, write.rule] as const] : [],
+      ),
+    ).values(),
+  ]);
+  const currentUnknown = $derived(unresolved.find((entry) => entry.model === draft.model));
   const validateAlias = $derived(settings ? createAliasValidation(settings.info) : undefined);
-  const aliasIssue = $derived(validateAlias?.(model, target));
+  const issue = $derived(validateAlias ? draftIssue(draft, validateAlias) : undefined);
+  const draftRule = $derived(validateAlias && !loadFailed ? ruleFromDraft(draft, validateAlias) : undefined);
+  // Hint only once the user has entered something the rule needs.
+  const touched = $derived(
+    draft.kind === 'alias'
+      ? Boolean(draft.target.trim())
+      : draft.kind === 'rates' && (Object.values(draft.rates).some((rate) => rate != null) || Boolean(draft.nickname)),
+  );
   const catalogMatches = $derived(
-    rankCatalogMatches(settings?.info.models ?? [], target, 8, (name) => validateAlias?.(model, name) === undefined),
-  );
-  const highlightedIndex = $derived(Math.min(targetHighlight, Math.max(catalogMatches.length - 1, 0)));
-  const validRates = $derived(
-    inputRate != null &&
-      outputRate != null &&
-      [inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate].every(validRate),
-  );
-  const canSave = $derived(
-    Boolean(
-      model.trim() &&
-      model.trim().length <= 200 &&
-      settings &&
-      !busy &&
-      !loadFailed &&
-      (kind === 'alias' ? !aliasIssue : kind === 'free' || (validRates && nickname.trim().length <= 200)),
+    rankCatalogMatches(
+      settings?.info.models ?? [],
+      draft.target,
+      8,
+      (name) => validateAlias?.(draft.model, name) === undefined,
     ),
   );
+  const highlightedIndex = $derived(Math.min(targetHighlight, Math.max(catalogMatches.length - 1, 0)));
 
   const messageFor = (failure: unknown) =>
     failure instanceof Error ? failure.message : 'Could not update pricing. Try again.';
 
   function editDraft() {
-    editorVersion += 1;
-    error = '';
+    dirty = true;
     success = '';
+  }
+
+  const summary = (rule: PricingRule) =>
+    rule.kind === 'alias' ? `→ ${rule.target}` : rule.kind === 'free' ? 'Free' : (rule.nickname ?? 'Custom rates');
+
+  function cancelAutosave() {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = undefined;
+  }
+
+  // Typing in rates or the display name saves after a pause; blur, Enter,
+  // picks, kind changes and switching models save immediately.
+  function scheduleAutosave() {
+    cancelAutosave();
+    autosaveTimer = setTimeout(flushAutosave, 600);
+  }
+
+  function flushAutosave() {
+    cancelAutosave();
+    if (!dirty || !saves || !draftRule) return;
+    dirty = false;
+    if (saves.submit({ type: 'set', rule: draftRule }, adminSecret)) success = '';
+  }
+
+  function editorFocusOut(event: FocusEvent) {
+    // Discard must clear the draft before a blur can submit it.
+    if (event.relatedTarget instanceof Element && event.relatedTarget.closest('[data-discard]')) return;
+    flushAutosave();
+  }
+
+  function saveOnEnter(event: KeyboardEvent) {
+    if (event.key !== 'Enter' || event.defaultPrevented) return;
+    event.preventDefault();
+    flushAutosave();
   }
 
   function openTarget() {
@@ -90,12 +153,18 @@
   function pickTarget(name: string) {
     // mousedown and click both pick; the first pick closes the list, so the
     // repeat call lands here with it closed and must not save a second time.
-    if (busy || !targetOpen) return;
-    target = name;
+    if (resetting || !targetOpen) return;
+    draft.target = name;
     targetOpen = false;
     targetHighlight = 0;
     editDraft();
-    void saveRule();
+    flushAutosave();
+  }
+
+  function chooseKind(kind: PricingRule['kind']) {
+    editDraft();
+    draft.kind = kind;
+    flushAutosave();
   }
 
   function targetOutside(event: PointerEvent) {
@@ -134,25 +203,37 @@
       event.preventDefault();
       event.stopPropagation();
       targetOpen = false;
-    }
+    } else saveOnEnter(event);
   }
 
+  // Pending and failed edits are restored, so returning to a model shows what
+  // will be saved rather than what the hub last acknowledged.
   function selectModel(value: string) {
-    model = value;
+    cancelAutosave();
     targetOpen = false;
     targetHighlight = 0;
     editing = true;
-    editDraft();
+    success = '';
     loadFailed = false;
-    const rule = saved.find((entry) => entry.model === value);
-    kind = rule?.kind ?? 'alias';
-    target = rule?.kind === 'alias' ? rule.target : '';
-    nickname = rule?.kind === 'rates' ? (rule.nickname ?? '') : '';
-    inputRate = rule?.kind === 'rates' ? rule.rates.inputPerMillion : undefined;
-    outputRate = rule?.kind === 'rates' ? rule.rates.outputPerMillion : undefined;
-    cacheReadRate = rule?.kind === 'rates' ? rule.rates.cacheReadPerMillion : undefined;
-    cacheWriteRate = rule?.kind === 'rates' ? rule.rates.cacheWritePerMillion : undefined;
-    cacheWrite1hRate = rule?.kind === 'rates' ? rule.rates.cacheWrite1hPerMillion : undefined;
+    draft = draftFromRule(
+      value,
+      saveState ? intendedRule(saveState, value) : saved.find((entry) => entry.model === value),
+    );
+    // A failed edit is still unsaved, so leaving it again retries.
+    dirty = Boolean(saveState?.failures.has(value));
+  }
+
+  // Entering the ID of a model with a saved, pending or failed rule into a
+  // blank draft opens that rule rather than starting over. On change, not
+  // input, so a shorter ID passed while typing cannot lend its rule.
+  function typeModel(value: string) {
+    if (draft.kind === 'alias' && !draft.target && saveState && intendedRule(saveState, value)) selectModel(value);
+  }
+
+  // Keep a pending edit for the previous model before replacing the draft.
+  function switchModel(value: string) {
+    flushAutosave();
+    selectModel(value);
   }
 
   function cancelLoad() {
@@ -162,18 +243,21 @@
     loading = false;
   }
 
-  async function load(background = false, feedbackEditor = editorVersion) {
+  async function load(background = false) {
     if (!client) return;
     cancelLoad();
     const controller = new AbortController();
     request = controller;
     const version = ++requestVersion;
+    const since = saves?.state().generation ?? 0;
     loading = true;
     error = '';
     loadFailed = false;
     try {
       const next = await client.getPricing({ ...query }, controller.signal);
       if (controller.signal.aborted || version !== requestVersion) return;
+      // A write that settled during this read reloads once the queue is idle.
+      if (saves && !saves.acknowledge(next.info.rules, since)) return;
       settings = next;
       if (!editing) {
         const first = next.unresolved[0]?.model ?? next.info.rules[0]?.model;
@@ -181,142 +265,58 @@
       }
     } catch (failure) {
       if (!controller.signal.aborted && version === requestVersion) {
-        if (feedbackEditor === editorVersion) {
-          error = background ? `Changes saved. ${messageFor(failure)}` : messageFor(failure);
-          loadFailed = !background;
-        }
+        error = background ? `Changes saved. ${messageFor(failure)}` : messageFor(failure);
+        loadFailed = !background;
       }
     } finally {
       if (version === requestVersion) loading = false;
     }
   }
 
+  function written(result: PricingWriteResult) {
+    if (!result.ok) return;
+    if (settings) settings = { ...settings, info: result.info };
+    const write = result.write;
+    if (write.type === 'refresh') {
+      if (!result.info.refreshError) success = 'Catalog updated';
+    } else if ((write.type === 'set' ? write.rule.model : write.model) === draft.model && saveState) {
+      if (write.type === 'delete' && !pendingWrite(saveState, draft.model)) selectModel(draft.model);
+      success = write.type === 'set' ? 'Saved' : 'Reset to catalog pricing';
+    }
+  }
+
   function mountEditor() {
-    mounted = true;
+    const unsubscribe = saves?.subscribe((state, result) => {
+      saveState = state;
+      if (result) written(result);
+      // The writes have persisted. Keep editing responsive while the
+      // unresolved-model list catches up; the dashboard rereads usage when opened.
+      if (result && isIdle(state)) void load(true);
+    });
     untrack(() => void load());
     return () => {
-      mounted = false;
+      // Leaving settings still persists the last complete edit; the shared
+      // queue keeps sending after this editor is gone.
+      flushAutosave();
+      unsubscribe?.();
       cancelLoad();
-      editDraft();
     };
   }
 
-  function pricingChanged(info: PricingInfo, message: string, feedbackEditor: number, resetEditor = false) {
-    if (settings) settings = { ...settings, info };
-    if (feedbackEditor === editorVersion && mounted) {
-      if (resetEditor) selectModel(model);
-      feedbackEditor = editorVersion;
-      success = message;
-    }
-    // The mutation has already persisted. Keep editing responsive while the
-    // unresolved-model list catches up; the dashboard rereads usage when opened.
-    if (mounted) void load(true, feedbackEditor);
+  // Reset and refresh queue behind any save started by the blur of their
+  // click, so a reset always lands after (and supersedes) that edit.
+  // A failed new model has nothing to reset, so its draft is discarded instead.
+  function resetRule() {
+    cancelAutosave();
+    dirty = false;
+    if (!hasRule) {
+      saves?.discard(draft.model);
+      selectModel(draft.model);
+    } else if (saves && saves.submit({ type: 'delete', model: draft.model.trim() }, adminSecret)) success = '';
   }
 
-  function submit(event: SubmitEvent) {
-    event.preventDefault();
-    void saveRule();
-  }
-
-  async function saveRule() {
-    if (!client || !canSave) return;
-    const rawModel = model.trim();
-    if (rawModel.length > 200 || rawModel === '') {
-      error = 'Enter a model name under 200 characters.';
-      return;
-    }
-    let rule: PricingRule;
-    if (kind === 'alias') {
-      const canonical = target.trim();
-      if (aliasIssue) {
-        error = aliasIssue;
-        return;
-      }
-      rule = { model: rawModel, kind: 'alias', target: canonical };
-    } else if (kind === 'free') {
-      rule = { model: rawModel, kind: 'free' };
-    } else {
-      if (
-        inputRate == null ||
-        outputRate == null ||
-        ![inputRate, outputRate, cacheReadRate, cacheWriteRate, cacheWrite1hRate].every(validRate)
-      ) {
-        error = 'Enter nonnegative input and output rates. Leave unavailable cache rates blank.';
-        return;
-      }
-      if (nickname.trim().length > 200) {
-        error = 'Keep the display name under 200 characters.';
-        return;
-      }
-      rule = {
-        model: rawModel,
-        kind: 'rates',
-        ...(nickname.trim() ? { nickname: nickname.trim() } : {}),
-        rates: {
-          inputPerMillion: inputRate,
-          outputPerMillion: outputRate,
-          ...(cacheReadRate == null ? {} : { cacheReadPerMillion: cacheReadRate }),
-          ...(cacheWriteRate == null ? {} : { cacheWritePerMillion: cacheWriteRate }),
-          ...(cacheWrite1hRate == null ? {} : { cacheWrite1hPerMillion: cacheWrite1hRate }),
-        },
-      };
-    }
-    cancelLoad();
-    const version = ++mutationVersion;
-    const editor = editorVersion;
-    busy = 'Saving…';
-    error = '';
-    loadFailed = false;
-    success = '';
-    try {
-      const info = await client.setPricingRule(rule, adminSecret);
-      if (version === mutationVersion) pricingChanged(info, 'Saved', editor);
-    } catch (failure) {
-      if (version === mutationVersion && editor === editorVersion && mounted) error = messageFor(failure);
-    } finally {
-      if (version === mutationVersion) busy = '';
-    }
-  }
-
-  async function resetRule() {
-    if (!client || !currentRule || busy) return;
-    cancelLoad();
-    const version = ++mutationVersion;
-    const editor = editorVersion;
-    busy = 'Resetting…';
-    error = '';
-    loadFailed = false;
-    success = '';
-    try {
-      const info = await client.deletePricingRule(currentRule.model, adminSecret);
-      if (version === mutationVersion) pricingChanged(info, 'Reset to catalog pricing', editor, true);
-    } catch (failure) {
-      if (version === mutationVersion && editor === editorVersion && mounted) error = messageFor(failure);
-    } finally {
-      if (version === mutationVersion) busy = '';
-    }
-  }
-
-  async function refreshCatalog() {
-    if (!client || busy) return;
-    cancelLoad();
-    const version = ++mutationVersion;
-    const editor = editorVersion;
-    busy = 'Updating prices…';
-    error = '';
-    loadFailed = false;
-    success = '';
-    try {
-      const refreshed = await client.refreshPricing(adminSecret);
-      if (version === mutationVersion) {
-        pricingChanged(refreshed, 'Catalog updated', editor);
-        if (editor === editorVersion && mounted && refreshed.refreshError) error = refreshed.refreshError;
-      }
-    } catch (failure) {
-      if (version === mutationVersion && editor === editorVersion && mounted) error = messageFor(failure);
-    } finally {
-      if (version === mutationVersion) busy = '';
-    }
+  function refreshCatalog() {
+    if (saves && saves.submit({ type: 'refresh' }, adminSecret)) success = '';
   }
 </script>
 
@@ -325,52 +325,69 @@
   <div class="pricing-catalog-meta">
     <span>{settings ? `Catalog updated ${settings.info.updatedAt}` : 'Loading model prices…'}</span><button
       class="text-button"
-      disabled={Boolean(busy) || loading}
-      onclick={() => void refreshCatalog()}>Refresh prices</button
+      disabled={!saves || refreshing}
+      onclick={refreshCatalog}>Refresh prices</button
     >
   </div>
-  <div class="pricing-body" aria-busy={loading || Boolean(busy)}>
+  <div class="pricing-body" aria-busy={loading || resetting || refreshing}>
     <div class="pricing-rule-list">
+      {#if failedNew.length}<div class="pricing-list-label">Not saved <span>{failedNew.length}</span></div>{/if}
+      {#each failedNew as model (model)}<button
+          class={['pricing-model-row', draft.model === model && 'selected']}
+          onclick={() => switchModel(model)}><strong>{model}</strong><span>Save failed</span></button
+        >{/each}
       {#if unresolved.length}<div class="pricing-list-label">Needs pricing <span>{unresolved.length}</span></div>{/if}
       {#each unresolved as entry (entry.model)}<button
-          class={['pricing-model-row', model === entry.model && 'selected']}
-          disabled={Boolean(busy)}
-          onclick={() => selectModel(entry.model)}
-          ><strong>{entry.model}</strong><span>{compact.format(entry.tokens)} tokens · {entry.reason}</span></button
-        >{/each}
-      {#if saved.length}<div class="pricing-list-label">Saved rules <span>{saved.length}</span></div>{/if}
-      {#each saved as rule (rule.model)}<button
-          class={['pricing-model-row', model === rule.model && 'selected']}
-          disabled={Boolean(busy)}
-          onclick={() => selectModel(rule.model)}
-          ><strong>{rule.model}</strong><span
-            >{rule.kind === 'alias'
-              ? `→ ${rule.target}`
-              : rule.kind === 'free'
-                ? 'Free'
-                : (rule.nickname ?? 'Custom rates')}</span
+          class={['pricing-model-row', draft.model === entry.model && 'selected']}
+          onclick={() => switchModel(entry.model)}
+          ><strong>{entry.model}</strong><span
+            >{saveState?.failures.has(entry.model)
+              ? 'Save failed'
+              : `${compact.format(entry.tokens)} tokens · ${entry.reason}`}</span
           ></button
         >{/each}
-      {#if settings && !unresolved.length && !saved.length}<p class="pricing-list-empty">
+      {#if saved.length || savingNew.length}<div class="pricing-list-label">
+          Saved rules <span>{saved.length + savingNew.length}</span>
+        </div>{/if}
+      {#each saved as rule (rule.model)}<button
+          class={['pricing-model-row', draft.model === rule.model && 'selected']}
+          onclick={() => switchModel(rule.model)}
+          ><strong>{rule.model}</strong><span
+            >{saveState?.failures.has(rule.model) ? 'Save failed' : summary(rule)}</span
+          ></button
+        >{/each}
+      {#each savingNew as rule (rule.model)}<button
+          class={['pricing-model-row', draft.model === rule.model && 'selected']}
+          onclick={() => switchModel(rule.model)}><strong>{rule.model}</strong><span>Saving…</span></button
+        >{/each}
+      {#if settings && !failedNew.length && !unresolved.length && !saved.length && !savingNew.length}<p
+          class="pricing-list-empty"
+        >
           All models have catalog prices.
         </p>{/if}
       {#if loading && !settings}<div class="pricing-list-loading">
           <span class="spinner"></span><span>Loading models</span>
         </div>{/if}
-      <button class="text-button pricing-add" disabled={!settings || Boolean(busy)} onclick={() => selectModel('')}
-        >Add a rule</button
-      >
+      <button class="text-button pricing-add" disabled={!settings} onclick={() => switchModel('')}>Add a rule</button>
     </div>
-    <form class="pricing-editor" onsubmit={submit} oninput={editDraft}>
+    <form
+      class="pricing-editor"
+      onsubmit={(event) => event.preventDefault()}
+      oninput={editDraft}
+      onfocusout={editorFocusOut}
+    >
       {#if editing}
         <label class="pricing-field"
           >Model ID<input
             aria-label="Model ID"
-            bind:value={model}
+            bind:value={draft.model}
             maxlength="200"
             required
-            disabled={Boolean(busy)}
+            disabled={resetting}
             placeholder="ID from your usage logs"
+            oninput={cancelAutosave}
+            onchange={(event) => typeModel(event.currentTarget.value)}
+            onkeydown={saveOnEnter}
             autocomplete="off"
           /></label
         >
@@ -380,17 +397,16 @@
         <div class="pricing-kind segmented" aria-label="Pricing rule type">
           {#each [{ value: 'alias', label: 'Model alias' }, { value: 'rates', label: 'Custom rates' }, { value: 'free', label: 'Free' }] as option (option.value)}<button
               type="button"
-              class={kind === option.value ? 'active' : ''}
-              disabled={Boolean(busy)}
-              aria-pressed={kind === option.value}
+              class={draft.kind === option.value ? 'active' : ''}
+              disabled={resetting}
+              aria-pressed={draft.kind === option.value}
               onclick={() => {
-                editDraft();
                 if (option.value === 'alias' || option.value === 'rates' || option.value === 'free')
-                  kind = option.value;
+                  chooseKind(option.value);
               }}>{option.label}</button
             >{/each}
         </div>
-        {#if kind === 'alias'}
+        {#if draft.kind === 'alias'}
           <div class="pricing-field">
             <label for="pricing-target-model">Actual model</label>
             <span class="pricing-target" bind:this={targetWrapper} onfocusout={targetFocusOut}
@@ -399,24 +415,27 @@
                 role="combobox"
                 aria-label="Actual model"
                 aria-autocomplete="list"
-                aria-expanded={targetOpen && !busy && catalogMatches.length > 0}
-                aria-controls={targetOpen && !busy && catalogMatches.length ? 'pricing-catalog' : undefined}
-                aria-activedescendant={targetOpen && !busy && catalogMatches.length
+                aria-expanded={targetOpen && !resetting && catalogMatches.length > 0}
+                aria-controls={targetOpen && !resetting && catalogMatches.length ? 'pricing-catalog' : undefined}
+                aria-activedescendant={targetOpen && !resetting && catalogMatches.length
                   ? `pricing-catalog-option-${highlightedIndex}`
                   : undefined}
-                aria-invalid={Boolean(target.trim() && aliasIssue)}
+                aria-invalid={Boolean(touched && issue)}
                 aria-describedby="pricing-feedback"
-                bind:value={target}
+                bind:value={draft.target}
                 maxlength="200"
                 required
-                disabled={Boolean(busy)}
+                disabled={resetting}
                 placeholder="Search catalog models"
                 autocomplete="off"
                 onfocus={openTarget}
                 onclick={openTarget}
-                oninput={openTarget}
+                oninput={() => {
+                  cancelAutosave();
+                  openTarget();
+                }}
                 onkeydown={targetKeyboard}
-              />{#if targetOpen && !busy && catalogMatches.length}<span
+              />{#if targetOpen && !resetting && catalogMatches.length}<span
                   class="pricing-target-list"
                   id="pricing-catalog"
                   role="listbox"
@@ -439,13 +458,15 @@
             >
           </div>
           <p class="pricing-field-help">Uses this model’s rates and combines its usage in the dashboard.</p>
-        {:else if kind === 'rates'}
+        {:else if draft.kind === 'rates'}
           <label class="pricing-field"
             >Display name <span class="pricing-optional">optional</span><input
               aria-label="Display name"
-              bind:value={nickname}
+              bind:value={draft.nickname}
               maxlength="200"
-              disabled={Boolean(busy)}
+              disabled={resetting}
+              oninput={scheduleAutosave}
+              onkeydown={saveOnEnter}
               placeholder="Name shown in the dashboard"
               autocomplete="off"
             /></label
@@ -455,11 +476,13 @@
               >Input<input
                 type="number"
                 aria-label="Input price per million tokens"
-                bind:value={inputRate}
+                bind:value={draft.rates.input}
+                oninput={scheduleAutosave}
+                onkeydown={saveOnEnter}
                 min="0"
                 step="any"
                 required
-                disabled={Boolean(busy)}
+                disabled={resetting}
                 placeholder="$/1M"
               /></label
             >
@@ -467,11 +490,13 @@
               >Output<input
                 type="number"
                 aria-label="Output price per million tokens"
-                bind:value={outputRate}
+                bind:value={draft.rates.output}
+                oninput={scheduleAutosave}
+                onkeydown={saveOnEnter}
                 min="0"
                 step="any"
                 required
-                disabled={Boolean(busy)}
+                disabled={resetting}
                 placeholder="$/1M"
               /></label
             >
@@ -479,10 +504,12 @@
               >Cache read<input
                 type="number"
                 aria-label="Cache read price per million tokens"
-                bind:value={cacheReadRate}
+                bind:value={draft.rates.cacheRead}
+                oninput={scheduleAutosave}
+                onkeydown={saveOnEnter}
                 min="0"
                 step="any"
-                disabled={Boolean(busy)}
+                disabled={resetting}
                 placeholder="Unknown"
               /></label
             >
@@ -490,10 +517,12 @@
               >Cache write, 5 min<input
                 type="number"
                 aria-label="Cache write price per million tokens"
-                bind:value={cacheWriteRate}
+                bind:value={draft.rates.cacheWrite}
+                oninput={scheduleAutosave}
+                onkeydown={saveOnEnter}
                 min="0"
                 step="any"
-                disabled={Boolean(busy)}
+                disabled={resetting}
                 placeholder="Unknown"
               /></label
             >
@@ -501,10 +530,12 @@
               >Cache write, 1 hour<input
                 type="number"
                 aria-label="One hour cache write price per million tokens"
-                bind:value={cacheWrite1hRate}
+                bind:value={draft.rates.cacheWrite1h}
+                oninput={scheduleAutosave}
+                onkeydown={saveOnEnter}
                 min="0"
                 step="any"
-                disabled={Boolean(busy)}
+                disabled={resetting}
                 placeholder="Unknown"
               /></label
             >
@@ -514,12 +545,12 @@
           </p>
         {:else}<p class="pricing-field-help">All token types for this model will count at $0.</p>{/if}
         <div class="pricing-editor-actions">
-          <button class="button pricing-save" type="submit" disabled={!canSave}>{busy || 'Save rule'}</button
-          >{#if currentRule}<button
+          {#if hasRule || currentFailure}<button
               class="text-button"
               type="button"
-              disabled={Boolean(busy) || loading}
-              onclick={() => void resetRule()}>Reset rule</button
+              data-discard={!hasRule ? '' : undefined}
+              disabled={resetting}
+              onclick={resetRule}>{hasRule ? 'Reset rule' : 'Discard'}</button
             >{/if}
         </div>
       {:else}<div class="pricing-editor-empty">
@@ -529,13 +560,16 @@
     </form>
   </div>
   <div id="pricing-feedback" class="pricing-feedback" aria-live="polite">
-    {#if error}<span role="alert">{error}</span
-      >{:else if kind === 'alias' && editing && target.trim() && aliasIssue}<span>{aliasIssue}</span
-      >{:else if success}<span class="pricing-success"><Icon name="check" size={15} />{success}</span
-      >{:else if settings?.info.refreshError}<span>{settings.info.refreshError}</span>{:else if loading || busy}<span
-        >{busy || 'Updating…'}</span
+    {#if editing && currentFailure}<span role="alert">{currentFailure.message}</span>{:else if error}<span role="alert"
+        >{error}</span
+      >{:else if refreshFailure}<span role="alert">{refreshFailure.message}</span>{:else if otherFailure}<span
+        role="alert">Could not update {String(otherFailure[0])}. {otherFailure[1].message}</span
+      >{:else if editing && touched && issue}<span>{issue}</span>{:else if success}<span class="pricing-success"
+        ><Icon name="check" size={15} />{success}</span
+      >{:else if settings?.info.refreshError}<span>{settings.info.refreshError}</span>{:else if loading || saving}<span
+        >{resetting ? 'Resetting…' : refreshing ? 'Updating prices…' : saving ? 'Saving…' : 'Updating…'}</span
       >{/if}
-    {#if loadFailed}<button class="text-button" disabled={Boolean(busy)} onclick={() => void load()}>Retry</button>{/if}
+    {#if loadFailed}<button class="text-button" onclick={() => void load()}>Retry</button>{/if}
   </div>
   <div class="pricing-footer">
     {#if settings?.secretRequired}<input
@@ -543,7 +577,6 @@
         type="password"
         aria-label="Pairing secret"
         bind:value={adminSecret}
-        disabled={Boolean(busy)}
         placeholder="Pairing secret"
         autocomplete="current-password"
       />{:else}<span>Changes apply across this dashboard.</span>{/if}
