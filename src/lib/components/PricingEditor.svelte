@@ -53,6 +53,9 @@
   // Edited since it was last submitted or selected. Blur only saves real edits,
   // so focus leaving a control that a reset just disabled cannot undo the reset.
   let dirty = false;
+  // The model this draft was opened for or last submitted under. Locking
+  // follows it rather than the typed ID, so typing cannot lock the field.
+  let identity = $state('');
 
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
   const saved = $derived(settings?.info.rules ?? []);
@@ -84,6 +87,9 @@
     ).values(),
   ]);
   const currentUnknown = $derived(unresolved.find((entry) => entry.model === draft.model));
+  // The model ID names an existing rule or usage, so an edit would save a
+  // second rule rather than rename this one.
+  const modelLocked = $derived(draft.model === identity && (hasRule || Boolean(currentUnknown)));
   const validateAlias = $derived(settings ? createAliasValidation(settings.info) : undefined);
   const issue = $derived(validateAlias ? draftIssue(draft, validateAlias) : undefined);
   const draftRule = $derived(validateAlias && !loadFailed ? ruleFromDraft(draft, validateAlias) : undefined);
@@ -130,7 +136,9 @@
     cancelAutosave();
     if (!dirty || !saves || !draftRule) return;
     dirty = false;
-    if (saves.submit({ type: 'set', rule: draftRule }, adminSecret)) success = '';
+    const rule = draftRule;
+    draft.model = identity = rule.model;
+    if (saves.submit({ type: 'set', rule }, adminSecret)) success = '';
   }
 
   function editorFocusOut(event: FocusEvent) {
@@ -215,6 +223,7 @@
     editing = true;
     success = '';
     loadFailed = false;
+    identity = value;
     draft = draftFromRule(
       value,
       saveState ? intendedRule(saveState, value) : saved.find((entry) => entry.model === value),
@@ -243,7 +252,8 @@
     loading = false;
   }
 
-  async function load(background = false) {
+  // A background load follows writes settling; `persisted` is whether the last one did.
+  async function load(persisted?: boolean) {
     if (!client) return;
     cancelLoad();
     const controller = new AbortController();
@@ -265,8 +275,11 @@
       }
     } catch (failure) {
       if (!controller.signal.aborted && version === requestVersion) {
-        error = background ? `Changes saved. ${messageFor(failure)}` : messageFor(failure);
-        loadFailed = !background;
+        // The failed write's own message stays visible over a stale list.
+        if (persisted === false && settings) return;
+        error = persisted ? `Changes saved. ${messageFor(failure)}` : messageFor(failure);
+        // Without settings there is nothing to edit, so any failed load offers Retry.
+        loadFailed = persisted === undefined || !settings;
       }
     } finally {
       if (version === requestVersion) loading = false;
@@ -289,9 +302,9 @@
     const unsubscribe = saves?.subscribe((state, result) => {
       saveState = state;
       if (result) written(result);
-      // The writes have persisted. Keep editing responsive while the
+      // The writes have settled. Keep editing responsive while the
       // unresolved-model list catches up; the dashboard rereads usage when opened.
-      if (result && isIdle(state)) void load(true);
+      if (result && isIdle(state)) void load(result.ok);
     });
     untrack(() => void load());
     return () => {
@@ -383,6 +396,7 @@
             bind:value={draft.model}
             maxlength="200"
             required
+            readonly={modelLocked}
             disabled={resetting}
             placeholder="ID from your usage logs"
             oninput={cancelAutosave}

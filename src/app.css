@@ -1431,6 +1431,9 @@ footer > button {
 .pricing-field input:disabled {
   opacity: 0.6;
 }
+.pricing-field input[readonly] {
+  color: var(--muted);
+}
 .pricing-target {
   position: relative;
   display: block;
