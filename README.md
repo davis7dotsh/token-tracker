@@ -2,7 +2,7 @@
 
 A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), and Muse. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
 
-The dashboard runs on Nexus at [https://nexus.otter-hawksbill.ts.net:10007](https://nexus.otter-hawksbill.ts.net:10007), available on the same Tailscale network.
+The dashboard runs on Conflux at [https://conflux.otter-hawksbill.ts.net:10007](https://conflux.otter-hawksbill.ts.net:10007), available on the same Tailscale network.
 
 ## Setup
 
@@ -44,7 +44,7 @@ bun run deploy:local
 - Rerun `bun run deploy:local` after pulling changes; it rebuilds and restarts only when sources changed. The installed copy is independent of the checkout, so switching branches or deleting a worktree does not affect the running service.
 - `bun run destroy:local` stops and removes the service and the installed app. Usage data stays in the data directory.
 - On Linux, enable lingering (`loginctl enable-linger`) so user services keep running after logout.
-- To require dashboard login in local development or on an HTTPS self-hosted server (as on Nexus), set `TOKEN_TRACKER_DASHBOARD_PASSCODE` before starting or deploying it. Without this variable, access remains private to your local network or tailnet.
+- To require dashboard login in local development or on an HTTPS self-hosted server (as on Conflux), set `TOKEN_TRACKER_DASHBOARD_PASSCODE` before starting or deploying it. Without this variable, access remains private to your local network or tailnet.
 - Other stages get separate services and install directories: `bun alchemy deploy --config alchemy.local.ts --stage test` installs `token-tracker-dashboard-test`.
 
 ### Cloudflare
@@ -107,7 +107,7 @@ Use that secret on the client machine:
 
 ```sh
 export TOKEN_TRACKER_PAIRING_SECRET='the-secret-from-your-dashboard-machine'
-bun run cli connect https://nexus.otter-hawksbill.ts.net:10007
+bun run cli connect https://conflux.otter-hawksbill.ts.net:10007
 unset TOKEN_TRACKER_PAIRING_SECRET
 ```
 
@@ -158,8 +158,8 @@ npx --yes --package ./davis7-token-tracker-0.4.0.tgz token-tracker check --range
 The dashboard also hosts the package for a quick check from another machine on the tailnet:
 
 ```sh
-bunx --package https://nexus.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
-npx --yes --allow-remote=root --package https://nexus.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+bunx --package https://conflux.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+npx --yes --allow-remote=root --package https://conflux.otter-hawksbill.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
 ```
 
 The `--allow-remote=root` option permits this URL package on npm 12.
@@ -228,31 +228,31 @@ bun run update:pricing
 
 ## Tailscale access
 
-Nexus runs the self-hosted dashboard. Bun listens on `127.0.0.1:8787`; Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves Nexus's other HTTPS services untouched. The public origin lets browser pricing edits pass the same-origin check:
+Conflux runs the self-hosted dashboard. Bun listens on `127.0.0.1:8787`; Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves Conflux's other HTTPS services untouched. The public origin lets browser pricing edits pass the same-origin check:
 
 ```sh
-ORIGIN=https://nexus.otter-hawksbill.ts.net:10007 \
+ORIGIN=https://conflux.otter-hawksbill.ts.net:10007 \
 TOKEN_TRACKER_DOWNLOAD_DIR=/home/davis/services/token-tracker/artifacts/downloads \
 bun run deploy:local
 tailscale serve --bg --https=10007 http://127.0.0.1:8787
 tailscale serve status
-curl -fsS https://nexus.otter-hawksbill.ts.net:10007/api/health
+curl -fsS https://conflux.otter-hawksbill.ts.net:10007/api/health
 ```
 
-To switch Nexus from the previous hand-installed unit, stop it first (`systemctl --user disable --now token-tracker.service`), then deploy. Both use the same data directory, so no data moves.
+To switch Conflux from the previous hand-installed unit, stop it first (`systemctl --user disable --now token-tracker.service`), then deploy. Both use the same data directory, so no data moves.
 
 The hub's durable state is `usage.sqlite`, `pairing-secret`, and `pricing-state.json` in `${XDG_DATA_HOME:-~/.local/share}/token-tracker`, or `TOKEN_TRACKER_DATA_DIR` when configured. Keep an immutable migration backup separate from the live data directory. Stop the old hub before taking the final SQLite backup so no acknowledged uploads arrive after the snapshot; use SQLite's backup API or copy only after the database has closed, accounting for any WAL files.
 
 When moving an existing hub, migrate its database, pairing secret, and pricing state together. Each client retains its own `device-id`, connection token, and checkpoint digests. Pause scheduled and interactive sync before atomically changing `connection.json.url`, `checkpoint.json.remote`, and matching `checkpoint-journal.jsonl` entries to the new canonical URL, then resume the existing schedule. Changing only the connection URL safely replays available history but loses incremental checkpoint matching; reconnecting also rotates that client's token.
 
-Keep Nexus's existing device identity distinct from Enceladus's; do not copy the old host's client configuration onto Nexus. The dashboard collects its host's own logs directly and excludes that same device's stored rows. Verify those logs cover its stored history before changing hosts. Enceladus continues as a scheduled client so its local usage remains visible on Nexus, alongside the other devices.
+Keep Conflux's existing device identity distinct from Enceladus's; do not copy the old host's client configuration onto Conflux. The dashboard collects its host's own logs directly and excludes that same device's stored rows. Verify those logs cover its stored history before changing hosts. Enceladus continues as a scheduled client so its local usage remains visible on Conflux, alongside the other devices.
 
 ## Verification and structure
 
 See [PERFORMANCE.md](PERFORMANCE.md) for the performance audit and measurements. To measure the running dashboard without changing its data:
 
 ```sh
-bun run bench https://nexus.otter-hawksbill.ts.net:10007
+bun run bench https://conflux.otter-hawksbill.ts.net:10007
 ```
 
 ```sh

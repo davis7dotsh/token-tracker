@@ -19,7 +19,7 @@ const props = {
   host: '127.0.0.1',
   port: 8787,
   environment: {
-    ORIGIN: 'https://nexus.example.ts.net:10007',
+    ORIGIN: 'https://tracker.example.ts.net:10007',
     TOKEN_TRACKER_CONFIG_DIR: '/home/ben/.config/token-tracker',
   },
 };
@@ -30,7 +30,7 @@ test('the local dashboard runs its installed build with a pinned Bun on Linux an
   expect(unit).toContain(
     'ExecStart="/home/ben/.local/share/vite-plus/bun/bin/bun.native" "/home/ben/.local/share/token-tracker-dashboard 100%%/build/index.js"',
   );
-  expect(unit).toContain('Environment="ORIGIN=https://nexus.example.ts.net:10007"');
+  expect(unit).toContain('Environment="ORIGIN=https://tracker.example.ts.net:10007"');
   expect(unit).toContain('Environment="PORT=8787"');
   expect(unit).toContain('UMask=0077');
 
