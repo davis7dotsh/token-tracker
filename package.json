@@ -11,7 +11,6 @@
     "build",
     "patches",
     "README.md",
-    "PERFORMANCE.md",
     "THIRD_PARTY_NOTICES.md"
   ],
   "type": "module",

@@ -249,7 +249,7 @@ Keep Conflux's existing device identity distinct from Enceladus's; do not copy t
 
 ## Verification and structure
 
-See [PERFORMANCE.md](PERFORMANCE.md) for the performance audit and measurements. To measure the running dashboard without changing its data:
+To measure the running dashboard without changing its data:
 
 ```sh
 bun run bench https://conflux.otter-hawksbill.ts.net:10007
