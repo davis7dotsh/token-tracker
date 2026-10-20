@@ -29,7 +29,7 @@ test('repository links use canonical remote identities and leave local-only repo
 });
 
 test('session names prefer the thread title, then attached project, then existing repository or directory label', () => {
-  const session = { project: '/home/davis/.t3/scratch/date-task-id', repository: 'github.com/team/app' };
+  const session = { project: '/home/user/.t3/scratch/date-task-id', repository: 'github.com/team/app' };
   expect(sessionDisplayName({ ...session, sessionTitle: 'Improve session links', projectName: 'Token tracker' })).toBe(
     'Improve session links',
   );

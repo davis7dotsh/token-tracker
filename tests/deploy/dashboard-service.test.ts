@@ -14,21 +14,21 @@ const props = {
   name: 'token-tracker-dashboard',
   build: 'build',
   revision: 'abc',
-  appDirectory: '/home/ben/.local/share/token-tracker-dashboard 100%',
-  bun: '/home/ben/.local/share/vite-plus/bun/bin/bun.native',
+  appDirectory: '/home/user/.local/share/token-tracker-dashboard 100%',
+  bun: '/home/user/.local/share/vite-plus/bun/bin/bun.native',
   host: '127.0.0.1',
   port: 8787,
   environment: {
     ORIGIN: 'https://tracker.example.ts.net:10007',
-    TOKEN_TRACKER_CONFIG_DIR: '/home/ben/.config/token-tracker',
+    TOKEN_TRACKER_CONFIG_DIR: '/home/user/.config/token-tracker',
   },
 };
 
 test('the local dashboard runs its installed build with a pinned Bun on Linux and macOS', () => {
   const unit = dashboardSystemdUnit(props);
-  expect(unit).toContain('WorkingDirectory=/home/ben/.local/share/token-tracker-dashboard 100%%\n');
+  expect(unit).toContain('WorkingDirectory=/home/user/.local/share/token-tracker-dashboard 100%%\n');
   expect(unit).toContain(
-    'ExecStart="/home/ben/.local/share/vite-plus/bun/bin/bun.native" "/home/ben/.local/share/token-tracker-dashboard 100%%/build/index.js"',
+    'ExecStart="/home/user/.local/share/vite-plus/bun/bin/bun.native" "/home/user/.local/share/token-tracker-dashboard 100%%/build/index.js"',
   );
   expect(unit).toContain('Environment="ORIGIN=https://tracker.example.ts.net:10007"');
   expect(unit).toContain('Environment="PORT=8787"');

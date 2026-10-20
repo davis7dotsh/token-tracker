@@ -424,14 +424,14 @@ describe('dashboard aggregation', () => {
   test('repository grouping combines machines while sessions and device filtering stay distinct', () => {
     const data = result([
       event({ repository: 'github.com/davis7/app', deviceId: 'linux' }),
-      event({ repository: 'github.com/davis7/app', project: '/Users/ben/app', deviceId: 'mac' }),
+      event({ repository: 'github.com/davis7/app', project: '/Users/user/app', deviceId: 'mac' }),
     ]);
     const response = buildDashboard(data, { projects: ['github.com/davis7/app'] }, new Date('2026-10-03T12:00:00Z'));
     expect(response.projects).toHaveLength(1);
     expect(response.projects[0].tokens).toBe(34);
     expect(response.totals.sessions).toBe(2);
     expect(response.sessions.find((session) => session.deviceId === 'linux')?.project).toBe('/work/app');
-    expect(response.sessions.find((session) => session.deviceId === 'mac')?.project).toBe('/Users/ben/app');
+    expect(response.sessions.find((session) => session.deviceId === 'mac')?.project).toBe('/Users/user/app');
     expect(response.sessions.every((session) => session.repository === 'github.com/davis7/app')).toBe(true);
     expect(buildDashboard(data, { devices: ['mac'] }, new Date('2026-10-03T12:00:00Z')).totals.tokens).toBe(17);
   });
@@ -439,7 +439,7 @@ describe('dashboard aggregation', () => {
     const now = new Date('2026-10-03T12:00:00Z');
     const data = result([
       event({ id: 'spike', repository: 'github.com/davis7/spike', sessionId: 'spike', inputTokens: 1_000 }),
-      event({ id: 'copy', project: '/Users/ben/spike', repository: 'github.com/davis7/spike', sessionId: 'copy' }),
+      event({ id: 'copy', project: '/Users/user/spike', repository: 'github.com/davis7/spike', sessionId: 'copy' }),
       event({ id: 'app', sessionId: 'app' }),
     ]);
     const visible = buildDashboard(data, { excludedProjects: ['github.com/davis7/spike'] }, now);
@@ -450,7 +450,7 @@ describe('dashboard aggregation', () => {
     expect(visible.filters.projects).toEqual(['/work/app', 'github.com/davis7/spike']);
     // A local path matches the same way an included project does.
     expect(
-      buildDashboard(data, { excludedProjects: ['/Users/ben/spike'] }, now)
+      buildDashboard(data, { excludedProjects: ['/Users/user/spike'] }, now)
         .sessions.map(({ id }) => id)
         .sort(),
     ).toEqual(['app', 'spike']);

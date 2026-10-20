@@ -19,7 +19,7 @@ const fixture = async () => {
   temporary.push(home);
   const dataDirectory = join(home, '.t3', 'userdata');
   await mkdir(dataDirectory, { recursive: true });
-  await writeFile(join(dataDirectory, 'environment-id'), 'environment:enceladus\n');
+  await writeFile(join(dataDirectory, 'environment-id'), 'environment:test-host\n');
   const database = new Database(join(dataDirectory, 'statev2.sqlite'));
   database.exec(`
     CREATE TABLE projection_projects (project_id TEXT PRIMARY KEY, title TEXT, workspace_root TEXT);
@@ -93,13 +93,13 @@ describe('T3 session metadata', () => {
       const metadata = await Effect.runPromise(
         runT3DatabaseProcess(queryT3Databases, {
           filenames: [join(dataDirectory, 'statev2.sqlite')],
-          environmentId: 'environment:enceladus',
+          environmentId: 'environment:test-host',
           baseUrl: 'https://app.t3.codes',
         }),
       );
       expect(metadata.get('claude:test-session')?.sessionTitle).toBe('Make sessions useful');
       expect(metadata.get('claude:test-session')?.t3ThreadUrl).toBe(
-        'https://app.t3.codes/environment%3Aenceladus/thread%3Aoriginal',
+        'https://app.t3.codes/environment%3Atest-host/thread%3Aoriginal',
       );
     } finally {
       await server.close();
@@ -119,7 +119,7 @@ describe('T3 session metadata', () => {
       sessionTitle: 'Make sessions useful',
       projectName: 'Token tracker',
       t3ThreadId: 'thread:original',
-      t3ThreadUrl: 'https://app.t3.codes/environment%3Aenceladus/thread%3Aoriginal',
+      t3ThreadUrl: 'https://app.t3.codes/environment%3Atest-host/thread%3Aoriginal',
       repositoryPaths: ['/work/token-tracker-worktree', '/work/token-tracker'],
     });
     expect(metadata.get('codex:test-session')?.t3ThreadId).toBe('thread:codex');
@@ -170,7 +170,7 @@ describe('T3 session metadata', () => {
     database.close();
     const custom = await read('/unrelated/home', { dataDirectory, url: 'https://t3.example.test/app/' });
     expect(custom.get('claude:test-session')?.t3ThreadUrl).toBe(
-      'https://t3.example.test/app/environment%3Aenceladus/thread%3Aoriginal',
+      'https://t3.example.test/app/environment%3Atest-host/thread%3Aoriginal',
     );
     for (const url of ['https://user:secret@example.test', 'javascript:alert(1)', 'https://example.test/?token=secret'])
       expect((await read(home, { url })).get('claude:test-session')?.t3ThreadUrl).toBeUndefined();
@@ -262,10 +262,10 @@ describe('T3 session metadata', () => {
       `);
       const before = await read(home);
       expect(before.get('codex:legacy-session')?.t3ThreadUrl).toBe(
-        'https://app.t3.codes/environment%3Aenceladus/legacy',
+        'https://app.t3.codes/environment%3Atest-host/legacy',
       );
       expect(before.get('claude:legacy-secondary')?.t3ThreadUrl).toBe(
-        'https://app.t3.codes/environment%3Aenceladus/legacy',
+        'https://app.t3.codes/environment%3Atest-host/legacy',
       );
       legacy.exec("UPDATE projection_threads SET deleted_at = '2026-10-10'");
       if (legacy !== database) legacy.close();

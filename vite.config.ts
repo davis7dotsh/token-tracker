@@ -24,5 +24,5 @@ export default defineConfig({
   },
   plugins: [sveltekit({ adapter: adapter(), compilerOptions: { experimental: { async: true } } })],
   ssr: { external: ['bun:sqlite'] },
-  server: { port: 5173, allowedHosts: ['enceladus.otter-hawksbill.ts.net'] },
+  server: { port: 5173, allowedHosts: ['.ts.net'] },
 });

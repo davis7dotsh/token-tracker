@@ -199,16 +199,16 @@ test('one collection has a shared metadata deadline and retains completed reposi
 });
 
 test('Darwin protected project paths are rejected before any filesystem operation', async () => {
-  const home = '/Users/Davis';
+  const home = '/Users/User';
   const projects = [
     `${home}/Documents/project`,
     `${home}/DESKTOP/project`,
     `${home}/downloads/project`,
     `${home}/Library/Mobile Documents/com~apple~CloudDocs/project`,
     `${home}/Library/CloudStorage/iCloud Drive/project`,
-    '/users/davis/dOcUmEnTs/project',
+    '/users/user/dOcUmEnTs/project',
     `/System/Volumes/Data${home}/Documents/project`,
-    '/SYSTEM/VOLUMES/DATA/users/davis/downloads/project',
+    '/SYSTEM/VOLUMES/DATA/users/user/downloads/project',
     `${home}/Developer/../Documents/project`,
   ];
   for (const project of projects) {

@@ -1,6 +1,6 @@
 import { makeDashboardClient } from '../src/lib/client/dashboard-rpc';
 
-const base = process.argv[2] ?? 'http://enceladus.otter-hawksbill.ts.net:5182';
+const base = process.argv[2] ?? 'http://127.0.0.1:5182';
 const ranges = ['today', '7d', '30d', '90d', '6m', 'all'] as const;
 const range = ranges.find((value) => value === (process.argv[3] ?? '30d'));
 const iterations = Number(process.argv[4] ?? 5);
