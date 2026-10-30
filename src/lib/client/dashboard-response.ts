@@ -48,7 +48,8 @@ const bucket = (value: unknown): value is Record<string, unknown> =>
   fields(value, ['tokens', 'costUSD'], number) &&
   array(value.harnesses, breakdown) &&
   optional(value.providers, (items) => array(items, series)) &&
-  optional(value.models, (items) => array(items, series));
+  optional(value.models, (items) => array(items, series)) &&
+  optional(value.projects, (items) => array(items, series));
 const session = (value: unknown) =>
   record(value) &&
   totals(value) &&
@@ -69,6 +70,13 @@ const filters = (value: unknown) =>
   optional(value.selectedModels, strings) &&
   array(value.modelProviders, (item) => record(item) && fields(item, ['model', 'provider'], string));
 const cost = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const projectInsight = (value: unknown) =>
+  record(value) &&
+  string(value.name) &&
+  fields(value, ['tokens', 'costUSD', 'unpricedTokens', 'sessions'], number) &&
+  strings(value.paths) &&
+  strings(value.projectNames) &&
+  optional(value.lastActiveAt, string);
 const tokenCostPart = (value: unknown) =>
   record(value) &&
   cost(value.costUSD) &&
@@ -92,6 +100,7 @@ export const isDashboardResponse = (value: unknown): value is DashboardResponse 
   totals(value.totals) &&
   (value.previous === null || totals(value.previous)) &&
   optional(value.tokenCosts, tokenCosts) &&
+  optional(value.projectInsights, (items) => array(items, projectInsight)) &&
   array(value.daily, (item) => bucket(item) && string(item.date)) &&
   array(value.hourly, (item) => bucket(item) && fields(item, ['start', 'end'], string)) &&
   fields(value, ['harnesses', 'models', 'providers', 'projects', 'devices'], (items) => array(items, breakdown)) &&

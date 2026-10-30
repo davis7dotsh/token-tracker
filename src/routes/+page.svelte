@@ -20,6 +20,7 @@
   import {
     nativeThreadUrl,
     projectLabel,
+    projectLabels,
     repositoryWebUrl,
     safeWebUrl,
     sessionDisplayName,
@@ -29,6 +30,7 @@
   import HiddenProjects from '#lib/components/HiddenProjects.svelte';
   import Icon from '#lib/components/Icon.svelte';
   import MultiSelect from '#lib/components/MultiSelect.svelte';
+  import ProjectPalette from '#lib/components/ProjectPalette.svelte';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
   const integer = new Intl.NumberFormat('en-US');
@@ -69,8 +71,96 @@
     distinctSeriesColors([...devices.map((device) => device.id), ...(data?.filters.devices ?? [])]),
   );
   const projectColors = $derived(distinctSeriesColors(data?.filters.projects ?? []));
+  const projectNames = $derived(
+    projectLabels([...(data?.filters.projects ?? []), ...(query.projects ?? []), ...(query.excludedProjects ?? [])]),
+  );
   const hiddenProjects = $derived(query.excludedProjects ?? []);
   const hiddenSet = $derived(new Set(hiddenProjects));
+  let projectCatalog = $state.raw<DashboardResponse>();
+  let catalogLoading = $state(false);
+  let catalogError = $state('');
+  let catalogRequest: AbortController | undefined;
+  let catalogKey = '';
+  let catalogFetchedAt = 0;
+  const catalogContext = $derived(
+    `${ranges.find((range) => range.value === query.range)?.label ?? query.range} · ${
+      [
+        query.harnesses &&
+          (query.harnesses.length === 1
+            ? (categoryNames[query.harnesses[0]] ?? query.harnesses[0])
+            : `${query.harnesses.length} harnesses`),
+        query.providers &&
+          (query.providers.length === 1
+            ? (categoryNames[query.providers[0]] ?? query.providers[0])
+            : `${query.providers.length} providers`),
+        query.models && (query.models.length === 1 ? query.models[0] : `${query.models.length} models`),
+        query.devices &&
+          (query.devices.length === 1 ? deviceName(query.devices[0]) : `${query.devices.length} devices`),
+      ]
+        .filter(Boolean)
+        .join(' · ') || 'All harnesses, providers, models & devices'
+    }`,
+  );
+
+  async function loadProjectCatalog() {
+    if (!client) return;
+    catalogRequest?.abort();
+    if (data?.projectInsights) {
+      catalogLoading = false;
+      catalogError = '';
+      return;
+    }
+    const controller = new AbortController();
+    catalogRequest = controller;
+    const catalogQuery = { ...query, projects: undefined, excludedProjects: undefined };
+    const key = JSON.stringify(catalogQuery);
+    catalogError = '';
+    if (query.projects === undefined && hiddenProjects.length === 0 && dataQueryKey === queryKey && data) {
+      projectCatalog = data;
+      catalogKey = key;
+      catalogFetchedAt = Date.now();
+      catalogLoading = false;
+      return;
+    }
+    if (catalogKey === key && projectCatalog && Date.now() - catalogFetchedAt < 60_000) {
+      catalogLoading = false;
+      return;
+    }
+    projectCatalog = undefined;
+    catalogLoading = true;
+    try {
+      const result = await client.getUsage(catalogQuery, controller.signal);
+      if (controller.signal.aborted) return;
+      projectCatalog = result;
+      catalogKey = key;
+      catalogFetchedAt = Date.now();
+    } catch {
+      if (!controller.signal.aborted) catalogError = 'Could not load project insights.';
+    } finally {
+      if (catalogRequest === controller) catalogLoading = false;
+    }
+  }
+
+  function applyProjects(projects: readonly string[] | undefined, excluded: readonly string[]) {
+    if (JSON.stringify(excluded) !== JSON.stringify(hiddenProjects)) saveHiddenProjects(excluded);
+    params.update({
+      projects: encodeFilter(projects),
+      excludedProjects: excluded.length ? encodeHidden(excluded) : 'none',
+      page: 1,
+      chartBy:
+        projects && projects.length > 1
+          ? 'projects'
+          : projects?.length === 1 && params.chartBy === 'projects'
+            ? 'models'
+            : params.chartBy,
+      breakdown:
+        projects && projects.length > 1
+          ? 'projects'
+          : projects?.length === 1 && params.breakdown === 'projects'
+            ? 'models'
+            : params.breakdown,
+    });
+  }
 
   function categoryColor(name: string, group: VisualGrouping) {
     return (
@@ -223,7 +313,7 @@
     return deviceNames.get(id) ?? (id === 'local' ? (data?.machine ?? 'This machine') : id);
   }
   function projectName(value: string) {
-    return projectLabel(value);
+    return projectNames.get(value) ?? projectLabel(value);
   }
   function formatDate(value: string) {
     return date.format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
@@ -295,6 +385,7 @@
   }
   function removeChip(key: (typeof filterKeys)[number], value: string) {
     const remaining = (query[key] ?? []).filter((entry) => entry !== value);
+    if (key === 'projects') return applyProjects(remaining.length ? remaining : undefined, hiddenProjects);
     changeQuery({ ...query, [key]: query[key]?.length === 0 || remaining.length === 0 ? undefined : remaining });
   }
   function mountDashboard() {
@@ -317,6 +408,7 @@
       mounted = false;
       clearInterval(timer);
       request?.abort();
+      catalogRequest?.abort();
       params.cleanup();
       void client?.dispose();
       client = undefined;
@@ -488,16 +580,16 @@
           names={Object.fromEntries((data?.filters.devices ?? []).map((id) => [id, deviceName(id)]))}
           onchange={(selected) => changeQuery({ ...query, devices: selected })}
         />
-        <MultiSelect
-          label="Projects"
-          options={data?.filters.projects ?? []}
+        <ProjectPalette
+          data={data?.projectInsights ? data : (projectCatalog ?? data)}
           value={query.projects}
-          grouping="projects"
           colors={projectColors}
-          names={Object.fromEntries((data?.filters.projects ?? []).map((id) => [id, projectName(id)]))}
-          hidden={hiddenSet}
-          ontogglehidden={toggleHidden}
-          onchange={(projects) => changeQuery({ ...query, projects })}
+          hidden={hiddenProjects}
+          loading={!data || catalogLoading}
+          error={catalogError}
+          context={catalogContext}
+          onopen={() => void loadProjectCatalog()}
+          onapply={applyProjects}
         />
         {#if hiddenProjects.length}<HiddenProjects
             projects={hiddenProjects}
@@ -530,6 +622,7 @@
           class="text-button"
           onclick={() => changeQuery({ range: query.range, timezone: query.timezone })}>Clear filters</button
         >{/if}
+      {#if query.projects?.length}<span class="project-view-status" role="status">Graph by {params.chartBy}</span>{/if}
     </div>
 
     {#if error}<div class="notice-region">
@@ -679,7 +772,15 @@
               <div class="breakdown-top">
                 <span class="breakdown-name" title={row.name}
                   ><i class="category-swatch" style:background={categoryColor(row.name, grouping)} aria-hidden="true"
-                  ></i><span class="breakdown-label">{breakdownName(row.name)}</span></span
+                  ></i>{#if grouping === 'projects'}<button
+                      class="breakdown-label project-focus"
+                      title={`Focus ${row.name}`}
+                      onclick={() =>
+                        applyProjects(
+                          [row.name],
+                          hiddenProjects.filter((project) => project !== row.name),
+                        )}>{breakdownName(row.name)}</button
+                    >{:else}<span class="breakdown-label">{breakdownName(row.name)}</span>{/if}</span
                 >{#if grouping === 'projects'}<button
                     class="visibility-toggle"
                     aria-label={`Hide ${projectName(row.name)}`}

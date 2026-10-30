@@ -1,6 +1,8 @@
 <script lang="ts">
   import { curveMonotoneX, line, scaleBand, scaleLinear, select } from 'd3';
-  import { categoryNames, seriesColor } from '#lib/client/visuals.ts';
+  import { categoryNames, distinctSeriesColors, seriesColor } from '#lib/client/visuals.ts';
+  import { projectLabels } from '#lib/client/session-links.ts';
+  import type { ChartGrouping } from '#lib/client/dashboard-url.ts';
   import type { ChartSeries, DashboardResponse } from '#lib/shared/domain.ts';
 
   let {
@@ -13,8 +15,8 @@
     data: DashboardResponse;
     metric?: 'tokens' | 'costUSD';
     mode?: 'bar' | 'line';
-    grouping?: 'harnesses' | 'providers' | 'models';
-    onGroupingChange: (grouping: 'harnesses' | 'providers' | 'models') => void;
+    grouping?: ChartGrouping;
+    onGroupingChange: (grouping: ChartGrouping) => void;
   } = $props();
   let width = $state(900);
   let active = $state(-1);
@@ -30,6 +32,7 @@
     { value: 'harnesses', label: 'Harnesses' },
     { value: 'providers', label: 'Providers' },
     { value: 'models', label: 'Models' },
+    { value: 'projects', label: 'Projects' },
   ] as const;
   const integer = new Intl.NumberFormat('en-US');
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
@@ -62,26 +65,36 @@
     harnesses: true,
     providers: buckets.every((bucket) => bucket.providers !== undefined),
     models: buckets.every((bucket) => bucket.models !== undefined),
+    projects: buckets.every((bucket) => bucket.projects !== undefined),
   });
   const selectedGrouping = $derived(available[grouping] ? grouping : 'harnesses');
   const ranked = $derived(
     [...data[selectedGrouping]].sort((left, right) => right[metric] - left[metric] || right.tokens - left.tokens),
   );
   const visibleNames = $derived(
-    new Set((selectedGrouping === 'models' ? ranked.slice(0, 5) : ranked).map((series) => series.name)),
+    new Set(
+      (selectedGrouping === 'models' || selectedGrouping === 'projects' ? ranked.slice(0, 5) : ranked).map(
+        (series) => series.name,
+      ),
+    ),
   );
+  const projectColors = $derived(distinctSeriesColors(data.filters.projects));
+  const projectNames = $derived(projectLabels(data.filters.projects));
   const chartSeries = $derived.by(() => {
     const result = ranked
       .filter((series) => visibleNames.has(series.name))
       .map((series) => ({
         name: series.name,
-        label: categoryNames[series.name] ?? series.name,
-        color: seriesColor(series.name, selectedGrouping),
+        label:
+          (selectedGrouping === 'projects' ? projectNames.get(series.name) : categoryNames[series.name]) ?? series.name,
+        color:
+          (selectedGrouping === 'projects' ? projectColors.get(series.name) : undefined) ??
+          seriesColor(series.name, selectedGrouping),
       }));
     if (ranked.length > visibleNames.size) {
       result.push({
         name: other,
-        label: 'Other',
+        label: selectedGrouping === 'projects' ? `Other projects (${ranked.length - visibleNames.size})` : 'Other',
         color: seriesColor(other, selectedGrouping),
       });
     }
@@ -272,7 +285,9 @@
     return (full ? fullLabelFormat : labelFormat).format(new Date(hourly ? key : key + 'T12:00:00Z'));
   }
   function dashForSeries(index: number) {
-    return selectedGrouping === 'models' ? ['', '6 3', '2 3', '9 3 2 3', '3 2', '8 4'][index % 6] : '';
+    return selectedGrouping === 'models' || selectedGrouping === 'projects'
+      ? ['', '6 3', '2 3', '9 3 2 3', '3 2', '8 4'][index % 6]
+      : '';
   }
   function pointer(event: PointerEvent) {
     if (points.length === 0) return;
@@ -335,6 +350,26 @@
   </div>
   <span class="chart-granularity">{granularity}</span>
 </div>
+<ul class="chart-legend" aria-label="Chart series">
+  {#each chartSeries as series, index (series.name)}
+    <li title={series.name === other ? series.label : series.name}>
+      <svg width="18" height="10" viewBox="0 0 18 10" aria-hidden="true">
+        {#if mode === 'line'}
+          <line
+            x1="0"
+            x2="18"
+            y1="5"
+            y2="5"
+            stroke={series.color}
+            stroke-width="2.5"
+            stroke-dasharray={dashForSeries(index)}
+          />
+        {:else}<rect x="3" y="1" width="8" height="8" rx="2" fill={series.color} />{/if}
+      </svg>
+      <span>{series.label}</span>
+    </li>
+  {/each}
+</ul>
 <div
   class="chart-stage"
   {@attach observe}
@@ -450,7 +485,9 @@
       >
       {#each selectedSeries as series (series.name)}
         <div>
-          <span title={series.label}><i style:background={series.color}></i><span>{series.label}</span></span>
+          <span title={series.name === other ? series.label : series.name}
+            ><i style:background={series.color}></i><span>{series.label}</span></span
+          >
           <span class="tooltip-values"
             ><b>{formatValue(series, true)}</b><span>{percentage(series[metric], selected[metric])}</span></span
           >
@@ -477,6 +514,33 @@
   .chart-grouping button {
     padding: 5px 9px;
     font-size: 11px;
+  }
+  .chart-legend {
+    height: 32px;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    list-style: none;
+    color: var(--muted);
+    font-size: 11px;
+    scrollbar-width: thin;
+  }
+  .chart-legend li {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    min-width: 0;
+    max-width: 240px;
+  }
+  .chart-legend li span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .chart-stage {
     height: 320px;
