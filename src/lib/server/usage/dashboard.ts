@@ -89,6 +89,7 @@ const bucketGroups = () => ({
   harnesses: new Map<string, ReturnType<typeof accumulator>>(),
   providers: new Map<string, ReturnType<typeof seriesTotals>>(),
   models: new Map<string, ReturnType<typeof seriesTotals>>(),
+  projects: new Map<string, ReturnType<typeof seriesTotals>>(),
 });
 const addBucket = <Key>(
   groups: Map<Key, ReturnType<typeof bucketGroups>>,
@@ -106,6 +107,7 @@ const addBucket = <Key>(
   addGroup(group.harnesses, event.harness, event, session, tokens);
   addSeries(group.providers, eventProvider, event, tokens);
   addSeries(group.models, event.model, event, tokens);
+  addSeries(group.projects, event.repository ?? event.project, event, tokens);
 };
 const selected = (names: readonly string[] | undefined, value: string) => names === undefined || names.includes(value);
 const projectListed = (names: readonly string[], event: UsageEvent) =>
@@ -218,6 +220,19 @@ const aggregateDashboard = (
   const modelGroups: Groups = new Map();
   const providerGroups: Groups = new Map();
   const projectGroups: Groups = new Map();
+  // Project discovery keeps the period and every other dimension, so opening
+  // the palette never needs a second dashboard request to see another project.
+  const projectContext = { ...query, projects: undefined, excludedProjects: undefined };
+  const projectInsights = new Map<
+    string,
+    {
+      aggregate: ReturnType<typeof accumulator>;
+      paths: Set<string>;
+      projectNames: Set<string>;
+      lastActiveAt: string;
+      lastActiveMillis: number;
+    }
+  >();
   const deviceGroups: Groups = new Map();
   const dailyGroups = new Map<string, ReturnType<typeof bucketGroups>>();
   const hourlyGroups = new Map<number, ReturnType<typeof bucketGroups>>();
@@ -254,7 +269,9 @@ const aggregateDashboard = (
     availableProjects.add(project);
     availableDevices.add(device);
     const millis = eventMillis(event);
-    if (!Number.isFinite(millis) || !matchesUsage(query, event, eventProvider)) continue;
+    if (!Number.isFinite(millis) || !matchesUsage(projectContext, event, eventProvider)) continue;
+    // These boundaries cover the broader palette context as well as the
+    // selected graph; otherwise a hidden project's insight could stay stale.
     if (millis <= nowMillis) nowBefore = Math.max(nowBefore, millis);
     else nowAfter = Math.min(nowAfter, millis);
     if (range !== 'all') {
@@ -266,6 +283,28 @@ const aggregateDashboard = (
     if (millis > nowMillis) continue;
     const key = `${device}:${event.harness}:${event.sessionId}`;
     const tokens = tokenTotal(event);
+    if (millis >= startMillis && millis < endMillis) {
+      let insight = projectInsights.get(project);
+      if (!insight) {
+        insight = {
+          aggregate: accumulator(),
+          paths: new Set(),
+          projectNames: new Set(),
+          lastActiveAt: event.timestamp,
+          lastActiveMillis: millis,
+        };
+        projectInsights.set(project, insight);
+      }
+      insight.aggregate.add(event, key, tokens);
+      insight.paths.add(event.project);
+      const projectName = event.projectName?.trim();
+      if (projectName) insight.projectNames.add(projectName);
+      if (millis > insight.lastActiveMillis) {
+        insight.lastActiveAt = event.timestamp;
+        insight.lastActiveMillis = millis;
+      }
+    }
+    if (!matchesUsage(query, event, eventProvider)) continue;
     if (range !== 'all' && millis >= previousMillis && millis < startMillis) previous.add(event);
     if (millis < startMillis || millis >= endMillis) continue;
     total.add(event, key, tokens);
@@ -346,6 +385,7 @@ const aggregateDashboard = (
       harnesses,
       providers: series(groups?.providers),
       models: series(groups?.models),
+      projects: series(groups?.projects),
     });
   }
   const hourly: DashboardResponse['hourly'][number][] = [];
@@ -366,6 +406,7 @@ const aggregateDashboard = (
         harnesses,
         providers: series(groups?.providers),
         models: series(groups?.models),
+        projects: series(groups?.projects),
       });
     }
   }
@@ -392,6 +433,19 @@ const aggregateDashboard = (
     models: breakdown(modelGroups),
     providers: breakdown(providerGroups),
     projects: breakdown(projectGroups),
+    projectInsights: [...projectInsights].map(([name, insight]) => {
+      const { tokens, costUSD, unpricedTokens, sessions } = insight.aggregate.finish();
+      return {
+        name,
+        tokens,
+        costUSD,
+        unpricedTokens,
+        sessions,
+        paths: [...insight.paths].sort(),
+        projectNames: [...insight.projectNames].sort(),
+        lastActiveAt: insight.lastActiveAt,
+      };
+    }),
     devices: breakdown(deviceGroups),
     sessions: [...sessions.values()]
       .map((session) => ({

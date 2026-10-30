@@ -1,5 +1,12 @@
 import { expect, test } from 'bun:test';
-import { nativeThreadUrl, repositoryWebUrl, safeWebUrl, sessionDisplayName } from '../../src/lib/client/session-links';
+import {
+  nativeThreadUrl,
+  projectLabel,
+  projectLabels,
+  repositoryWebUrl,
+  safeWebUrl,
+  sessionDisplayName,
+} from '../../src/lib/client/session-links';
 
 test('thread links allow browser URLs and reject executable schemes and embedded credentials', () => {
   expect(safeWebUrl('https://app.t3.codes/environment/thread')).toBe('https://app.t3.codes/environment/thread');
@@ -69,4 +76,47 @@ test('native links require a coherent binding and reject malformed or cleared we
   expect(
     nativeThreadUrl({ t3ThreadId: 'thread/other', t3ThreadUrl: 'https://app.t3.codes/env/thread%2Fother' }),
   ).toBeUndefined();
+});
+
+test('project labels retain existing compact labels when there are no collisions', () => {
+  const values = ['github.com/team/app', 'local:/work/solo', 'https://gitlab.com/other/repo.git', 'C:\\work\\tools'];
+  const labels = projectLabels(values);
+  for (const value of values) expect(labels.get(value)).toBe(projectLabel(value));
+  expect(labels.get('https://gitlab.com/other/repo.git')).toBe('other/repo');
+  expect(projectLabels([...values, values[0]]).size).toBe(values.length);
+});
+
+test('project labels extend colliding suffixes only as far as each identity needs', () => {
+  const labels = projectLabels([
+    '/one/team/app',
+    '/two/team/app',
+    '/east/shared/org/api',
+    '/west/shared/org/api',
+    '/team/app',
+    '/unrelated/unique',
+  ]);
+  expect([...labels.values()]).toEqual([
+    'one/team/app',
+    'two/team/app',
+    'east/shared/org/api',
+    'west/shared/org/api',
+    'team/app',
+    'unrelated/unique',
+  ]);
+  const reversed = projectLabels([...labels.keys()].reverse());
+  for (const [key, label] of labels) expect(reversed.get(key)).toBe(label);
+});
+
+test('project labels preserve full canonical keys when stripped identities are identical', () => {
+  const values = ['https://github.com/team/app.git', 'github.com/team/app', 'local:github.com/team/app'];
+  expect([...projectLabels(values).values()]).toEqual(values);
+});
+
+test('full identity fallbacks cannot collide with a different project suffix', () => {
+  const values = ['local:/a/team/app', '/a/team/app', '/root/local:/a/team/app'];
+  const labels = projectLabels(values);
+  expect(new Set(labels.values()).size).toBe(values.length);
+  expect(labels.get('local:/a/team/app')).toBe('local:/a/team/app');
+  expect(labels.get('/a/team/app')).toBe('/a/team/app');
+  expect(labels.get('/root/local:/a/team/app')).toBe('root/local:/a/team/app');
 });

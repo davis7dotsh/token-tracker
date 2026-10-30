@@ -93,6 +93,17 @@ export const Totals = Schema.Struct(totalFields);
 export type Totals = typeof Totals.Type;
 export const Breakdown = Schema.Struct({ name: Schema.String, ...totalFields });
 export type Breakdown = typeof Breakdown.Type;
+export const ProjectInsight = Schema.Struct({
+  name: Schema.String,
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  unpricedTokens: Schema.Number,
+  sessions: Schema.Number,
+  paths: Schema.Array(Schema.String),
+  projectNames: Schema.Array(Schema.String),
+  lastActiveAt: Schema.optionalKey(Timestamp),
+});
+export type ProjectInsight = typeof ProjectInsight.Type;
 export const ChartSeries = Schema.Struct({
   name: Schema.String,
   tokens: Schema.Number,
@@ -139,6 +150,7 @@ export const DashboardResponse = Schema.Struct({
       harnesses: Schema.Array(Breakdown),
       providers: Schema.optionalKey(Schema.Array(ChartSeries)),
       models: Schema.optionalKey(Schema.Array(ChartSeries)),
+      projects: Schema.optionalKey(Schema.Array(ChartSeries)),
     }),
   ),
   hourly: Schema.Array(
@@ -150,12 +162,14 @@ export const DashboardResponse = Schema.Struct({
       harnesses: Schema.Array(Breakdown),
       providers: Schema.optionalKey(Schema.Array(ChartSeries)),
       models: Schema.optionalKey(Schema.Array(ChartSeries)),
+      projects: Schema.optionalKey(Schema.Array(ChartSeries)),
     }),
   ),
   harnesses: Schema.Array(Breakdown),
   models: Schema.Array(Breakdown),
   providers: Schema.Array(Breakdown),
   projects: Schema.Array(Breakdown),
+  projectInsights: Schema.optionalKey(Schema.Array(ProjectInsight)),
   devices: Schema.Array(Breakdown),
   sessions: Schema.Array(Session),
   filters: Schema.Struct({

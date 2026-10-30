@@ -738,7 +738,7 @@ main[data-loading='true']
   border-top: 1px solid var(--border);
 }
 .chart-loading {
-  height: 352px;
+  height: 384px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -941,6 +941,24 @@ main[data-loading='true']
 .breakdown-label {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.project-focus {
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 3px;
+}
+.project-focus:hover,
+.project-focus:focus-visible {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+.project-view-status {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
 }
 .breakdown-track {
   height: 4px;

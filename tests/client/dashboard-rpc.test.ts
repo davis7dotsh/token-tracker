@@ -83,6 +83,12 @@ test.each([
   ['invalid daily bucket', { ...dashboard, daily: [null] }],
   ['invalid hourly series', { ...dashboard, hourly: [{ ...dashboard.hourly[0], harnesses: {} }] }],
   ['invalid optional chart series', { ...dashboard, daily: [{ ...dashboard.daily[0], providers: [null] }] }],
+  ['invalid project chart series', { ...dashboard, daily: [{ ...dashboard.daily[0], projects: [null] }] }],
+  ['invalid project insight', { ...dashboard, projectInsights: [null] }],
+  [
+    'invalid project insight paths',
+    { ...dashboard, projectInsights: [{ ...dashboard.projectInsights?.[0], paths: [42] }] },
+  ],
   ['null optional token costs', { ...dashboard, tokenCosts: null }],
   [
     'invalid token cost count',
@@ -114,10 +120,10 @@ test('browser RPC accepts legacy usage without optional fields and retains addit
   const without = (value: object, keys: readonly string[]) =>
     Object.fromEntries(Object.entries(value).filter(([key]) => !keys.includes(key)));
   const legacy = {
-    ...without(dashboard, ['tokenCosts']),
+    ...without(dashboard, ['tokenCosts', 'projectInsights']),
     filters: without(dashboard.filters, ['selectedModels']),
-    daily: dashboard.daily.map((bucket) => without(bucket, ['providers', 'models'])),
-    hourly: dashboard.hourly.map((bucket) => without(bucket, ['providers', 'models'])),
+    daily: dashboard.daily.map((bucket) => without(bucket, ['providers', 'models', 'projects'])),
+    hourly: dashboard.hourly.map((bucket) => without(bucket, ['providers', 'models', 'projects'])),
   };
   const compatible = { ...legacy, futureField: 'preserved' };
   const server = Bun.serve({

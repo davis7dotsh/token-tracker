@@ -3,7 +3,8 @@ import type { UsageQuery } from '../shared/domain';
 
 export const filterKeys = ['harnesses', 'providers', 'models', 'devices', 'projects'] as const;
 export const breakdownGroups = ['harnesses', 'models', 'providers', 'devices', 'projects'] as const;
-export const chartGroups = ['harnesses', 'providers', 'models'] as const;
+export const chartGroups = ['harnesses', 'providers', 'models', 'projects'] as const;
+export type ChartGrouping = (typeof chartGroups)[number];
 const rangeValues = ['6m', '30d', '7d', 'today'] as const;
 export type DashboardRange = (typeof rangeValues)[number];
 export const dashboardRanges = [

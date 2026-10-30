@@ -311,7 +311,7 @@ describe('dashboard aggregation', () => {
     }
   });
 
-  test('provider and model chart buckets conserve filtered accounting, including missing prices', () => {
+  test('provider, model and project chart buckets conserve filtered accounting, including missing prices', () => {
     const response = buildDashboard(
       result([
         event({ timestamp: '2026-10-03T10:00:00Z', costUsd: 0.125 }),
@@ -347,7 +347,7 @@ describe('dashboard aggregation', () => {
     expect(response.totals).toMatchObject({ tokens: 252, costUSD: 1.125, unpricedTokens: 67 });
     for (const buckets of [response.daily, response.hourly]) {
       for (const bucket of buckets) {
-        for (const dimension of ['providers', 'models'] as const) {
+        for (const dimension of ['providers', 'models', 'projects'] as const) {
           const chart = bucket[dimension] ?? [];
           expect(chart.reduce((sum, group) => sum + group.tokens, 0)).toBe(bucket.tokens);
           expect(chart.reduce((sum, group) => sum + group.costUSD, 0)).toBe(bucket.costUSD);
@@ -356,7 +356,7 @@ describe('dashboard aggregation', () => {
           );
         }
       }
-      for (const dimension of ['providers', 'models'] as const) {
+      for (const dimension of ['providers', 'models', 'projects'] as const) {
         for (const group of response[dimension]) {
           const chart = buckets.flatMap((bucket) => bucket[dimension] ?? []).filter(({ name }) => name === group.name);
           expect(chart.reduce((sum, item) => sum + item.tokens, 0)).toBe(group.tokens);
@@ -383,7 +383,7 @@ describe('dashboard aggregation', () => {
     expect(response.totals.tokens).toBe(0);
     expect(
       [...response.daily, ...response.hourly].every(
-        (bucket) => bucket.providers?.length === 0 && bucket.models?.length === 0,
+        (bucket) => bucket.providers?.length === 0 && bucket.models?.length === 0 && bucket.projects?.length === 0,
       ),
     ).toBe(true);
     const legacy = {
@@ -398,6 +398,7 @@ describe('dashboard aggregation', () => {
       })),
     };
     expect(Schema.decodeUnknownSync(DashboardResponse)(legacy).daily[0].providers).toBeUndefined();
+    expect(Schema.decodeUnknownSync(DashboardResponse)(legacy).daily[0].projects).toBeUndefined();
   });
 
   test('half-hour timezone buckets start at local midnight', () => {
@@ -429,7 +430,22 @@ describe('dashboard aggregation', () => {
     const response = buildDashboard(data, { projects: ['github.com/davis7/app'] }, new Date('2026-10-03T12:00:00Z'));
     expect(response.projects).toHaveLength(1);
     expect(response.projects[0].tokens).toBe(34);
+    expect(response.daily.flatMap((bucket) => bucket.projects ?? []).filter((row) => row.tokens > 0)).toEqual([
+      { name: 'github.com/davis7/app', tokens: 34, costUSD: 0.02, unpricedTokens: 0 },
+    ]);
     expect(response.totals.sessions).toBe(2);
+    expect(response.projectInsights).toEqual([
+      {
+        name: 'github.com/davis7/app',
+        tokens: 34,
+        costUSD: 0.02,
+        unpricedTokens: 0,
+        sessions: 2,
+        paths: ['/Users/user/app', '/work/app'],
+        projectNames: [],
+        lastActiveAt: '2026-10-03T10:00:00.000Z',
+      },
+    ]);
     expect(response.sessions.find((session) => session.deviceId === 'linux')?.project).toBe('/work/app');
     expect(response.sessions.find((session) => session.deviceId === 'mac')?.project).toBe('/Users/user/app');
     expect(response.sessions.every((session) => session.repository === 'github.com/davis7/app')).toBe(true);
@@ -446,6 +462,7 @@ describe('dashboard aggregation', () => {
     expect(visible.totals.tokens).toBe(17);
     expect(visible.daily.reduce((sum, day) => sum + day.tokens, 0)).toBe(17);
     expect(visible.projects.map((row) => row.name)).toEqual(['/work/app']);
+    expect(visible.daily.flatMap((bucket) => bucket.projects ?? []).map((row) => row.name)).toEqual(['/work/app']);
     expect(visible.sessions.map((session) => session.id)).toEqual(['app']);
     expect(visible.filters.projects).toEqual(['/work/app', 'github.com/davis7/spike']);
     // A local path matches the same way an included project does.
@@ -461,6 +478,92 @@ describe('dashboard aggregation', () => {
     );
     expect(selected.totals.tokens).toBe(17);
     expect(buildDashboard(data, { excludedProjects: [] }, now).totals.tokens).toBe(1_041);
+  });
+  test('project insights ignore project visibility while retaining period and other dimension filters', () => {
+    const now = new Date('2026-10-03T12:00:00Z');
+    const data = result([
+      event({ projectName: '  App  ' }),
+      event({
+        project: '/work/spike',
+        repository: 'github.com/example/spike',
+        projectName: 'Spike',
+        sessionId: 'spike',
+        costKnown: false,
+        costUsd: 0,
+      }),
+      event({ project: '/work/other-harness', harness: 'claude' }),
+      event({ project: '/work/other-model', model: 'gpt-6.1-sol-preview' }),
+      event({ project: '/work/other-provider', model: 'grok-4.6' }),
+      event({ project: '/work/other-device', deviceId: 'mac' }),
+      event({ project: '/work/old', timestamp: '2026-10-02T23:59:59Z' }),
+      event({ project: '/work/future', timestamp: '2026-10-03T12:00:01Z' }),
+    ]);
+    const response = buildDashboard(
+      data,
+      {
+        range: 'today',
+        projects: ['/work/app'],
+        excludedProjects: ['github.com/example/spike'],
+        harnesses: ['codex'],
+        models: ['gpt-6.1-sol'],
+        providers: ['openai'],
+        devices: ['local'],
+      },
+      now,
+    );
+    expect(response.totals.tokens).toBe(17);
+    expect(response.projectInsights).toEqual([
+      {
+        name: '/work/app',
+        tokens: 17,
+        costUSD: 0.01,
+        unpricedTokens: 0,
+        sessions: 1,
+        paths: ['/work/app'],
+        projectNames: ['App'],
+        lastActiveAt: '2026-10-03T10:00:00.000Z',
+      },
+      {
+        name: 'github.com/example/spike',
+        tokens: 17,
+        costUSD: 0,
+        unpricedTokens: 17,
+        sessions: 1,
+        paths: ['/work/spike'],
+        projectNames: ['Spike'],
+        lastActiveAt: '2026-10-03T10:00:00.000Z',
+      },
+    ]);
+    expect(Schema.decodeUnknownSync(DashboardResponse)(response).projectInsights).toEqual(response.projectInsights);
+    const providerFiltered = buildDashboard(data, { range: 'today', providers: ['xai'] }, now);
+    expect(providerFiltered.projectInsights?.map((row) => row.name)).toEqual(['/work/other-provider']);
+    expect(buildDashboard(data, { range: 'today', models: [] }, now).projectInsights).toEqual([]);
+  });
+  test('project insights deduplicate sessions and use timestamp order for latest activity', () => {
+    const response = buildDashboard(
+      result([
+        event({ timestamp: '2026-10-03T11:00:00+01:00', projectName: 'App' }),
+        event({ timestamp: '2026-10-03T10:30:00Z', projectName: 'New app' }),
+      ]),
+      { range: 'today' },
+      new Date('2026-10-03T12:00:00Z'),
+    );
+    expect(response.projectInsights?.[0]).toMatchObject({
+      tokens: 34,
+      sessions: 1,
+      paths: ['/work/app'],
+      projectNames: ['App', 'New app'],
+      lastActiveAt: '2026-10-03T10:30:00Z',
+    });
+  });
+  test('cached project insights expire when an unselected project crosses a moving boundary', () => {
+    const data = result([event(), event({ project: '/work/spike', timestamp: '2026-10-03T12:00:01Z' })]);
+    const query = { range: 'today', projects: ['/work/app'], excludedProjects: ['/work/spike'] } as const;
+    const first = buildDashboard(data, query, new Date('2026-10-03T12:00:00Z'));
+    const next = buildDashboard(data, query, new Date('2026-10-03T12:00:02Z'));
+    expect(first.projectInsights?.map((row) => row.name)).toEqual(['/work/app']);
+    expect(next.projectInsights?.map((row) => row.name)).toEqual(['/work/app', '/work/spike']);
+    expect(next.totals).toEqual(first.totals);
   });
   test('sessions use the latest available metadata while legacy records preserve accounting and project grouping', () => {
     const data = result([

@@ -224,6 +224,7 @@ describe('dashboard URL state', () => {
       sort: 'tokens',
     });
     expect(validate({ page: Number.MAX_SAFE_INTEGER }).page).toBe(Number.MAX_SAFE_INTEGER);
+    expect(normalizedDashboardParams(validate({ chartBy: 'projects' })).chartBy).toBe('projects');
   });
 
   test.each(['true', 'false', '[]', '{}', '[1]', '{"x": 1}', '  exact spacing  ', 'none', 'a,b'])(
