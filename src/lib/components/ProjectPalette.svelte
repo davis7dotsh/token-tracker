@@ -48,9 +48,9 @@
   let activeKey = $state<string>();
   let limit = $state(60);
   let shortcut = $state('Ctrl K');
-  const selected = $derived(new Set(draft ?? []));
   const hiddenSet = $derived(new Set(draftHidden));
   const entries = $derived(open ? buildProjectIndex(data, [...(value ?? []), ...hidden]) : []);
+  const selected = $derived(new Set((draft ?? entries.map((entry) => entry.key)).filter((key) => !hiddenSet.has(key))));
   const labels = $derived(new Map(entries.map((entry) => [entry.key, entry.label])));
   const scoped = $derived(
     entries.filter(
@@ -105,19 +105,22 @@
     onapply(draft, draftHidden);
     close();
   }
-  function toggle(entry: ProjectEntry) {
+  async function toggle(entry: ProjectEntry) {
+    // All means every project except the hidden ones, including future projects.
+    if (draft === undefined) return toggleHidden(entry.key);
     const next = selected.has(entry.key)
-      ? (draft ?? []).filter((key) => key !== entry.key)
-      : [...(draft ?? []), entry.key];
-    draft = next.length ? next : undefined;
+      ? draft.filter((key) => key !== entry.key)
+      : [...new Set([...draft, entry.key])];
+    draft = next;
     if (next.includes(entry.key)) draftHidden = draftHidden.filter((key) => key !== entry.key);
+    await tick();
+    input?.focus();
   }
   async function toggleHidden(key: string) {
     if (hiddenSet.has(key)) draftHidden = draftHidden.filter((entry) => entry !== key);
     else {
       draftHidden = [...draftHidden, key];
-      const next = draft?.filter((entry) => entry !== key);
-      draft = next?.length ? next : undefined;
+      draft = draft?.filter((entry) => entry !== key);
     }
     await tick();
     input?.focus();
@@ -130,8 +133,8 @@
     close();
   }
   async function removeSelection(key?: string) {
-    const next = key === undefined ? undefined : draft?.filter((entry) => entry !== key);
-    draft = next?.length ? next : undefined;
+    draft = key === undefined ? undefined : draft?.filter((entry) => entry !== key);
+    if (key === undefined) draftHidden = [];
     await tick();
     input?.focus();
   }
@@ -158,7 +161,7 @@
     if (event.key === 'Enter') {
       event.preventDefault();
       if (event.metaKey || event.ctrlKey) apply();
-      else if (visible[activeIndex]) toggle(visible[activeIndex]);
+      else if (visible[activeIndex]) await toggle(visible[activeIndex]);
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       if (event.key === 'ArrowDown') {
@@ -257,7 +260,7 @@
           onclick={() => {
             scope = 'selected';
             resetSearch();
-          }}>Selected <span>{draft?.length ?? 0}</span></button
+          }}>Selected <span>{selected.size}</span></button
         >
         <button
           class:current={scope === 'hidden'}
@@ -317,11 +320,11 @@
               <button
                 class="project-option"
                 aria-pressed={isSelected}
+                aria-label={`${isSelected ? 'Turn off' : 'Turn on'} ${entry.label}`}
                 tabindex="-1"
                 onclick={() => {
                   activeKey = entry.key;
-                  toggle(entry);
-                  input?.focus();
+                  void toggle(entry);
                 }}
               >
                 <span class="project-check" aria-hidden="true"
@@ -392,7 +395,7 @@
             >{search
               ? 'Try a project name or part of its full path.'
               : scope === 'selected'
-                ? 'Select projects from All to compare their usage.'
+                ? 'Turn projects on from All, or Reset to enable every project.'
                 : scope === 'hidden'
                   ? 'Hidden projects can be restored here.'
                   : 'Projects appear when usage is collected.'}</span
@@ -411,8 +414,9 @@
     </div>
     <div class="palette-selection">
       <div class="selection-chips">
-        {#if draft === undefined}<span class="all-projects">All visible projects</span>{:else if !draft.length}<span
-            class="all-projects">No projects selected</span
+        {#if draft === undefined}<span class="all-projects"
+            >{draftHidden.length ? `All except ${draftHidden.length} hidden` : 'All projects enabled'}</span
+          >{:else if !draft.length}<span class="all-projects">No projects selected</span
           >{:else}{#each draft as key (key)}<button
               class="selection-chip"
               onclick={() => void removeSelection(key)}
@@ -420,11 +424,14 @@
               ><span>{labels.get(key) ?? projectLabel(key)}</span><Icon name="close" size={11} /></button
             >{/each}{/if}
       </div>
-      {#if draft !== undefined}<button class="reset-projects" onclick={() => void removeSelection()}>Reset</button>{/if}
+      {#if draft !== undefined || draftHidden.length}<button
+          class="reset-projects"
+          onclick={() => void removeSelection()}>Reset</button
+        >{/if}
     </div>
     <footer class="palette-footer">
       <div class="keyboard-hints">
-        <span><kbd>↑↓</kbd> navigate</span><span><kbd>Enter</kbd> select</span><span><kbd>Esc</kbd> cancel</span>
+        <span><kbd>↑↓</kbd> navigate</span><span><kbd>Enter</kbd> toggle</span><span><kbd>Esc</kbd> cancel</span>
       </div>
       <div class="apply-area">
         <button class="cancel-projects" onclick={close}>Cancel</button>
