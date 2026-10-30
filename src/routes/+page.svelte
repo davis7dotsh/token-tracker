@@ -90,7 +90,7 @@
     (data?.projectInsights || !projectCatalog ? dataInsightKey : catalogKey) !== insightKey,
   );
   const paletteError = $derived(
-    catalogError ||
+    (data?.projectInsights ? '' : catalogError) ||
       (error
         ? !paletteData
           ? 'Could not load project insights.'
@@ -604,12 +604,12 @@
           value={query.projects}
           colors={projectColors}
           hidden={hiddenProjects}
-          loading={!data || catalogLoading}
+          loading={!paletteData || catalogLoading}
           updating={paletteStale && (loading || catalogLoading)}
           error={paletteError}
           context={catalogContext}
           onopen={() => void loadProjectCatalog()}
-          onretry={() => void (data?.projectInsights ? refresh() : loadProjectCatalog())}
+          onretry={() => void (error || data?.projectInsights ? refresh() : loadProjectCatalog())}
           onapply={applyProjects}
         />
         {#if hiddenProjects.length}<HiddenProjects
