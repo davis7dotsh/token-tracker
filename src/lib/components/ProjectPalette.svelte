@@ -101,9 +101,8 @@
     open = false;
     (returnFocus?.isConnected ? returnFocus : trigger).focus({ preventScroll: true });
   }
-  function apply() {
+  function commit() {
     onapply(draft, draftHidden);
-    close();
   }
   async function toggle(entry: ProjectEntry) {
     // All means every project except the hidden ones, including future projects.
@@ -113,6 +112,7 @@
       : [...new Set([...draft, entry.key])];
     draft = next;
     if (next.includes(entry.key)) draftHidden = draftHidden.filter((key) => key !== entry.key);
+    commit();
     await tick();
     input?.focus();
   }
@@ -122,19 +122,21 @@
       draftHidden = [...draftHidden, key];
       draft = draft?.filter((entry) => entry !== key);
     }
+    commit();
     await tick();
     input?.focus();
   }
   function only(key: string) {
     onapply(
       [key],
-      hidden.filter((entry) => entry !== key),
+      draftHidden.filter((entry) => entry !== key),
     );
     close();
   }
   async function removeSelection(key?: string) {
     draft = key === undefined ? undefined : draft?.filter((entry) => entry !== key);
     if (key === undefined) draftHidden = [];
+    commit();
     await tick();
     input?.focus();
   }
@@ -160,7 +162,7 @@
     if (event.isComposing) return;
     if (event.key === 'Enter') {
       event.preventDefault();
-      if (event.metaKey || event.ctrlKey) apply();
+      if (event.metaKey || event.ctrlKey) close();
       else if (visible[activeIndex]) await toggle(visible[activeIndex]);
     } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
@@ -177,7 +179,7 @@
     if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.isComposing) {
       event.preventDefault();
       event.stopPropagation();
-      apply();
+      close();
     }
   }
 </script>
@@ -366,7 +368,7 @@
                 class="only-project"
                 tabindex={index === activeIndex ? 0 : -1}
                 aria-label={`Focus only ${entry.label}`}
-                title="Apply this project immediately"
+                title="Focus this project"
                 onclick={() => only(entry.key)}>Only</button
               ><button
                 class="hide-project"
@@ -431,18 +433,14 @@
     </div>
     <footer class="palette-footer">
       <div class="keyboard-hints">
-        <span><kbd>↑↓</kbd> navigate</span><span><kbd>Enter</kbd> toggle</span><span><kbd>Esc</kbd> cancel</span>
+        <span><kbd>↑↓</kbd> navigate</span><span><kbd>Enter</kbd> toggle</span><span><kbd>Esc</kbd> close</span>
       </div>
-      <div class="apply-area">
-        <button class="cancel-projects" onclick={close}>Cancel</button>
+      <div class="done-area">
         <span
           >{draft?.length
             ? `${draft.length} selected${loading ? '' : ` · ${compact.format(selectionTokens)} tokens`}`
             : ''}</span
-        ><button class="apply-projects" onclick={apply}
-          >{draft && draft.length > 1 ? 'Compare projects' : 'Apply filters'}
-          <kbd>{shortcut.startsWith('⌘') ? '⌘' : 'Ctrl'} Enter</kbd></button
-        >
+        ><button class="done-projects" onclick={close}>Done <kbd>Esc</kbd></button>
       </div>
     </footer>
   {/if}
@@ -869,22 +867,17 @@
   .keyboard-hints kbd {
     margin-right: 3px;
   }
-  .apply-area {
+  .done-area {
     display: flex;
     align-items: center;
     gap: 10px;
   }
-  .cancel-projects {
-    color: var(--muted);
-    font-size: 11px;
-    padding: 8px 0;
-  }
-  .apply-area > span {
+  .done-area > span {
     color: var(--muted);
     font-size: 10px;
     font-variant-numeric: tabular-nums;
   }
-  .apply-projects {
+  .done-projects {
     display: flex;
     align-items: center;
     gap: 14px;
@@ -896,12 +889,12 @@
     font-weight: 600;
     white-space: nowrap;
   }
-  .apply-projects kbd {
+  .done-projects kbd {
     color: #173850;
   }
   @media (max-width: 600px) {
     .project-trigger kbd,
-    .apply-projects kbd {
+    .done-projects kbd {
       display: none;
     }
     .project-palette {
@@ -974,11 +967,11 @@
     .keyboard-hints {
       display: none;
     }
-    .apply-area {
+    .done-area {
       width: 100%;
       justify-content: space-between;
     }
-    .apply-projects {
+    .done-projects {
       min-height: 38px;
     }
   }
