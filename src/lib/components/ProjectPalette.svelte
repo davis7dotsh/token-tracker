@@ -184,7 +184,12 @@
   }
 </script>
 
-<svelte:window onkeydown={globalKeyboard} />
+<svelte:window
+  onkeydown={globalKeyboard}
+  onpopstate={() => {
+    if (open) close();
+  }}
+/>
 
 <button
   class={['project-trigger', value !== undefined && 'filtered']}
