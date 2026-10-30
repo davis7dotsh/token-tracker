@@ -12,9 +12,11 @@
     hidden,
     colors,
     loading = false,
+    updating = false,
     error = '',
     context,
     onopen,
+    onretry,
     onapply,
   }: {
     data: DashboardResponse | undefined;
@@ -22,9 +24,11 @@
     hidden: readonly string[];
     colors: ReadonlyMap<string, string>;
     loading?: boolean;
+    updating?: boolean;
     error?: string;
     context: string;
     onopen: () => void;
+    onretry: () => void;
     onapply: (projects: readonly string[] | undefined, excluded: readonly string[]) => void;
   } = $props();
 
@@ -277,12 +281,14 @@
         >{loading
           ? 'Updating insights…'
           : error
-            ? 'Insights unavailable'
-            : `${matches.length} ${matches.length === 1 ? 'project' : 'projects'}`}</span
+            ? 'Update failed'
+            : updating
+              ? 'Updating · Previous filters'
+              : `${matches.length} ${matches.length === 1 ? 'project' : 'projects'}`}</span
       >
     </div>
-    {#if error}<p class="palette-error" role="alert">{error} <button onclick={onopen}>Retry</button></p>{/if}
-    <div class="palette-results" aria-busy={loading}>
+    <div class="palette-results" aria-busy={loading || updating}>
+      {#if error}<p class="palette-error" role="alert">{error} <button onclick={onretry}>Retry</button></p>{/if}
       <div
         id={`${id}-list`}
         role="grid"
@@ -327,14 +333,13 @@
                     >{#if isHidden}<span class="hidden-label">Hidden</span>{/if}</span
                   ><span class="project-path" title={[entry.key, ...entry.paths].join('\n')}>{entry.key}</span>
                   <span class="project-detail"
-                    >{#if loading}Loading insights…{:else if error}Insights unavailable{:else if entry.metrics}{entry
-                        .metrics.sessions}
+                    >{#if loading}Loading insights…{:else if entry.metrics}{entry.metrics.sessions}
                       {entry.metrics.sessions === 1 ? 'session' : 'sessions'}<span>·</span>{total
                         ? ((entry.metrics.tokens / total) * 100).toFixed(1)
                         : '0'}% of all tokens{#if entry.lastActiveAt}<span>·</span><time
                           datetime={entry.lastActiveAt}
                           title={new Date(entry.lastActiveAt).toLocaleString()}>{relativeTime(entry.lastActiveAt)}</time
-                        >{/if}{:else}No usage in this view{/if}</span
+                        >{/if}{:else if error}Insights unavailable{:else}No usage in this view{/if}</span
                   >
                 </div>
                 <div
@@ -343,7 +348,7 @@
                     ? `${compact.format(entry.metrics.unpricedTokens)} unpriced tokens excluded from estimated cost`
                     : 'Estimated API cost'}
                 >
-                  {#if entry.metrics && !loading && !error}<strong
+                  {#if entry.metrics && !loading}<strong
                       >{compact.format(entry.metrics.tokens)}<small> tokens</small></strong
                     ><span
                       >{entry.metrics.tokens > 0 && entry.metrics.unpricedTokens >= entry.metrics.tokens
@@ -425,7 +430,7 @@
         <button class="cancel-projects" onclick={close}>Cancel</button>
         <span
           >{draft?.length
-            ? `${draft.length} selected${loading || error ? '' : ` · ${compact.format(selectionTokens)} tokens`}`
+            ? `${draft.length} selected${loading ? '' : ` · ${compact.format(selectionTokens)} tokens`}`
             : ''}</span
         ><button class="apply-projects" onclick={apply}
           >{draft && draft.length > 1 ? 'Compare projects' : 'Apply filters'}

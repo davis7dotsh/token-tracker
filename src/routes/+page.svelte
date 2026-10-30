@@ -67,6 +67,9 @@
   let requestVersion = 0;
   let observedQueryKey = '';
   let dataQueryKey = $state('');
+  let dataInsightKey = $state('');
+  const insightQuery = $derived({ ...query, projects: undefined, excludedProjects: undefined });
+  const insightKey = $derived(JSON.stringify(insightQuery));
   const deviceColors = $derived(
     distinctSeriesColors([...devices.map((device) => device.id), ...(data?.filters.devices ?? [])]),
   );
@@ -80,8 +83,22 @@
   let catalogLoading = $state(false);
   let catalogError = $state('');
   let catalogRequest: AbortController | undefined;
-  let catalogKey = '';
+  let catalogKey = $state('');
   let catalogFetchedAt = 0;
+  const paletteData = $derived(data?.projectInsights ? data : (projectCatalog ?? data));
+  const paletteStale = $derived(
+    (data?.projectInsights || !projectCatalog ? dataInsightKey : catalogKey) !== insightKey,
+  );
+  const paletteError = $derived(
+    catalogError ||
+      (error
+        ? !paletteData
+          ? 'Could not load project insights.'
+          : paletteStale
+            ? 'Could not update insights. Showing previous filters.'
+            : 'Could not refresh insights. Showing the last update.'
+        : ''),
+  );
   const catalogContext = $derived(
     `${ranges.find((range) => range.value === query.range)?.label ?? query.range} · ${
       [
@@ -112,7 +129,7 @@
     }
     const controller = new AbortController();
     catalogRequest = controller;
-    const catalogQuery = { ...query, projects: undefined, excludedProjects: undefined };
+    const catalogQuery = insightQuery;
     const key = JSON.stringify(catalogQuery);
     catalogError = '';
     if (query.projects === undefined && hiddenProjects.length === 0 && dataQueryKey === queryKey && data) {
@@ -353,7 +370,9 @@
         params.update({ models: encodeFilter(next.filters.selectedModels) }, { pushHistory: false });
         observedQueryKey = JSON.stringify(usageQueryFromParams(params, timezone));
       }
-      dataQueryKey = JSON.stringify(usageQueryFromParams(params, timezone));
+      const resolvedQuery = usageQueryFromParams(params, timezone);
+      dataQueryKey = JSON.stringify(resolvedQuery);
+      dataInsightKey = JSON.stringify({ ...resolvedQuery, projects: undefined, excludedProjects: undefined });
     } catch (failure) {
       if (controller.signal.aborted || version !== requestVersion || requestedKey !== queryKey) return;
       error = failure instanceof Error ? failure.message : 'Could not load usage. Try again.';
@@ -581,14 +600,16 @@
           onchange={(selected) => changeQuery({ ...query, devices: selected })}
         />
         <ProjectPalette
-          data={data?.projectInsights ? data : (projectCatalog ?? data)}
+          data={paletteData}
           value={query.projects}
           colors={projectColors}
           hidden={hiddenProjects}
           loading={!data || catalogLoading}
-          error={catalogError}
+          updating={paletteStale && (loading || catalogLoading)}
+          error={paletteError}
           context={catalogContext}
           onopen={() => void loadProjectCatalog()}
+          onretry={() => void (data?.projectInsights ? refresh() : loadProjectCatalog())}
           onapply={applyProjects}
         />
         {#if hiddenProjects.length}<HiddenProjects
