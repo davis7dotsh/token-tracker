@@ -40,10 +40,19 @@ export const usageSourceRoots = Effect.fn('usage.sourceRoots')(function* (option
   const piDirs = options.piDirs ?? environmentDirs('PI_CODING_AGENT_DIR') ?? [path.join(home, '.pi', 'agent')];
   const grokDirs = options.grokDirs ?? environmentDirs('GROK_HOME') ?? [path.join(home, '.grok')];
   // Muse keeps session logs under the XDG data directory on every platform.
-  const museDirs = options.museDirs ??
+  // Windows builds may use AppData instead, so include whichever exists.
+  let museDirs = options.museDirs ??
     environmentDirs('MUSE_HOME') ?? [
       path.join(process.env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'muse'),
     ];
+  if (process.platform === 'win32' && options.museDirs === undefined && !environmentDirs('MUSE_HOME')) {
+    for (const base of [process.env.LOCALAPPDATA, process.env.APPDATA]) {
+      if (!base) continue;
+      const root = path.join(base, 'muse');
+      const info = yield* Effect.result(fs.stat(root));
+      if (Result.isSuccess(info) && info.success.type === 'Directory') museDirs = [...museDirs, root];
+    }
+  }
   const sources: MutableSource[] = [];
   const seen = new Set<string>();
   const addSource = (harness: SourceStatus['harness'], root: string) => {

@@ -1,10 +1,13 @@
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, posix, win32 } from 'node:path';
 import { Effect, FileSystem } from 'effect';
-import { CliFailure, configDirectory } from './state';
+import { CliFailure, configDirectory, posixModes, type Connection } from './state';
 
+// Compiled Bun binaries embed their entrypoint in a virtual filesystem:
+// `/$bunfs/root/...` on Linux and macOS, `B:\~BUN\root\...` on Windows.
+export const compiledBinary = Bun.main.includes('$bunfs') || /^B:[\\/]~BUN[\\/]/.test(Bun.main);
 export const executableCommand = () =>
-  Bun.main.includes('$bunfs') ? [process.execPath] : [process.execPath, join(import.meta.dir, 'run.ts')];
+  compiledBinary ? [process.execPath] : [process.execPath, join(import.meta.dir, 'run.ts')];
 
 const run = Effect.fn('cli.scheduler.run')(function* (command: readonly string[]) {
   const result = yield* Effect.tryPromise({
@@ -31,32 +34,37 @@ export const systemdQuote = (value: string) =>
   `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('%', '%%').replaceAll('$', '$$')}"`;
 export const xml = (value: string) =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
-const absoluteSourcePath = (value: string) =>
-  resolve(value === '~' ? homedir() : value.startsWith('~/') ? join(homedir(), value.slice(2)) : value);
+const absoluteSourcePath = (value: string, platform: NodeJS.Platform) => {
+  const path = platform === 'win32' ? win32 : posix;
+  const home = value === '~' || value.startsWith('~/') || (platform === 'win32' && value.startsWith('~\\'));
+  return path.resolve(home ? path.join(homedir(), value.slice(2)) : value);
+};
 export const launchdDomains = () => [`gui/${process.getuid?.() ?? 0}`, `user/${process.getuid?.() ?? 0}`];
-export const scheduledEnvironment = (directory: string) => [
+const sourceOverrides = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'GROK_HOME', 'MUSE_HOME'];
+export const scheduledEnvironment = (
+  directory: string,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+) => [
   { name: 'TOKEN_TRACKER_CONFIG_DIR', value: directory },
   ...[
-    'HOME',
+    // Bun resolves the Windows home directory from USERPROFILE.
+    platform === 'win32' ? 'USERPROFILE' : 'HOME',
     'XDG_CONFIG_HOME',
     'XDG_DATA_HOME',
     'TOKEN_TRACKER_DATA_DIR',
-    'CLAUDE_CONFIG_DIR',
-    'CODEX_HOME',
-    'PI_CODING_AGENT_DIR',
-    'GROK_HOME',
-    'MUSE_HOME',
+    ...sourceOverrides,
   ].flatMap((name) => {
-    const value = process.env[name];
+    const value = env[name];
     if (!value) return [];
-    const resolved = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'GROK_HOME', 'MUSE_HOME'].includes(name)
+    const resolved = sourceOverrides.includes(name)
       ? value
           .split(',')
           .map((path) => path.trim())
           .filter(Boolean)
-          .map(absoluteSourcePath)
+          .map((path) => absoluteSourcePath(path, platform))
           .join(',')
-      : absoluteSourcePath(value);
+      : absoluteSourcePath(value, platform);
     return [{ name, value: resolved }];
   }),
 ];
@@ -101,20 +109,107 @@ export const launchdPlist = (command: readonly string[], directory: string, minu
   `<key>StandardOutPath</key><string>${xml(join(directory, 'sync.log'))}</string>\n` +
   `<key>StandardErrorPath</key><string>${xml(join(directory, 'sync.log'))}</string>\n</dict></plist>\n`;
 
+// cmd.exe expands `%` even inside quotes. Windows paths cannot contain quotes
+// or line breaks, so dropping them keeps each value one literal token.
+const cmdText = (value: string) => value.replaceAll(/["\r\n]/g, '').replaceAll('%', '%%');
+export const schtasksName = 'Token Tracker Sync';
+// Task Scheduler cannot set environment variables. This wrapper sets them,
+// then runs one quiet sync with output appended to sync.log like launchd.
+export const schtasksScript = (command: readonly string[], directory: string, env: NodeJS.ProcessEnv = process.env) =>
+  [
+    '@echo off',
+    'chcp 65001 >nul',
+    ...scheduledEnvironment(directory, 'win32', env).map(({ name, value }) => `set "${name}=${cmdText(value)}"`),
+    `${[...command, 'sync', '--quiet'].map((value) => `"${cmdText(value)}"`).join(' ')} >> "${cmdText(win32.join(directory, 'sync.log'))}" 2>&1`,
+    '',
+  ].join('\r\n');
+// Whole hours use hour units (`PT2H`); a daily schedule is `PT24H`.
+const repetitionInterval = (minutes: number) => (minutes % 60 === 0 ? `PT${minutes / 60}H` : `PT${minutes}M`);
+// Runs as the current user without elevation. Headless conhost keeps the
+// periodic task from opening a console or Windows Terminal window. The quoted
+// script path lives in the XML because Bun's Windows spawn rejects embedded
+// quotes in a `/TR` argument.
+export const schtasksXml = (script: string, minutes: number, startBoundary: string) =>
+  [
+    '<?xml version="1.0" encoding="UTF-16"?>',
+    '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+    '  <RegistrationInfo><Description>Token Tracker usage sync</Description></RegistrationInfo>',
+    '  <Triggers>',
+    '    <TimeTrigger>',
+    `      <Repetition><Interval>${repetitionInterval(minutes)}</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>`,
+    `      <StartBoundary>${xml(startBoundary)}</StartBoundary>`,
+    '      <Enabled>true</Enabled>',
+    '    </TimeTrigger>',
+    '  </Triggers>',
+    '  <Principals>',
+    '    <Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>',
+    '  </Principals>',
+    '  <Settings>',
+    '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+    '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+    '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
+    '    <AllowHardTerminate>true</AllowHardTerminate>',
+    '    <StartWhenAvailable>true</StartWhenAvailable>',
+    '    <AllowStartOnDemand>true</AllowStartOnDemand>',
+    '    <Enabled>true</Enabled>',
+    // Mirrors the systemd `TimeoutStartSec=11min`.
+    '    <ExecutionTimeLimit>PT11M</ExecutionTimeLimit>',
+    '    <Priority>7</Priority>',
+    '  </Settings>',
+    '  <Actions Context="Author">',
+    `    <Exec><Command>conhost.exe</Command><Arguments>--headless cmd.exe /d /c &quot;${xml(script)}&quot;</Arguments></Exec>`,
+    '  </Actions>',
+    '</Task>',
+    '',
+  ].join('\r\n');
+// Task Scheduler rejects UTF-8 task XML; it requires UTF-16LE with a BOM.
+// JavaScript strings are already UTF-16 code units; write each low byte first.
+export const utf16le = (text: string) =>
+  Uint8Array.from([
+    0xff,
+    0xfe,
+    ...Array.from({ length: text.length }, (_, index) => text.charCodeAt(index)).flatMap((unit) => [
+      unit & 0xff,
+      unit >> 8,
+    ]),
+  ]);
+// Local time without a zone suffix, as Task Scheduler expects for StartBoundary.
+export const localStartBoundary = (date: Date) => {
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+export const schtasksCreate = (xmlPath: string) => [
+  // Bun's Windows spawn does not apply PATHEXT, so the extension is required.
+  'schtasks.exe',
+  '/Create',
+  '/XML',
+  xmlPath,
+  '/TN',
+  schtasksName,
+  '/F',
+];
+export const schtasksDelete = ['schtasks.exe', '/Delete', '/TN', schtasksName, '/F'];
+const schtasksScriptPath = () => join(configDirectory(), 'bin', 'sync.cmd');
+const schtasksXmlPath = () => join(configDirectory(), 'bin', 'sync-task.xml');
+
 export const installSchedule = Effect.fn('cli.installSchedule')(function* (minutes: number) {
   const fs = yield* FileSystem.FileSystem;
   const directory = configDirectory();
   let command = executableCommand();
-  if (Bun.main.includes('$bunfs')) {
+  if (compiledBinary) {
     // npx caches can be evicted. The scheduled job owns a durable copy instead
     // of pointing at the transient npm package extraction directory.
     const binaryDirectory = join(directory, 'bin');
-    const destination = join(binaryDirectory, 'token-tracker');
+    const destination = join(binaryDirectory, process.platform === 'win32' ? 'token-tracker.exe' : 'token-tracker');
     yield* fs.makeDirectory(binaryDirectory, { recursive: true, mode: 0o700 });
-    if (process.execPath !== destination) {
+    const running =
+      process.platform === 'win32'
+        ? process.execPath.toLowerCase() === destination.toLowerCase()
+        : process.execPath === destination;
+    if (!running) {
       const temporary = `${destination}.${process.pid}.tmp`;
       yield* fs.copyFile(process.execPath, temporary);
-      yield* fs.chmod(temporary, 0o700);
+      if (posixModes) yield* fs.chmod(temporary, 0o700);
       yield* fs.rename(temporary, destination);
     }
     command = [destination];
@@ -145,10 +240,21 @@ export const installSchedule = Effect.fn('cli.installSchedule')(function* (minut
     yield* run(['launchctl', 'bootstrap', domain, plist]);
     return 'launchd' as const;
   }
-  return yield* Effect.fail(new CliFailure({ message: 'Scheduled sync currently supports macOS and Linux.' }));
+  if (process.platform === 'win32') {
+    const script = schtasksScriptPath();
+    yield* fs.makeDirectory(join(directory, 'bin'), { recursive: true });
+    const task = schtasksXmlPath();
+    yield* fs.writeFileString(script, schtasksScript(command, directory));
+    yield* fs.writeFile(task, utf16le(schtasksXml(script, minutes, localStartBoundary(new Date()))));
+    yield* run(schtasksCreate(task));
+    return 'schtasks' as const;
+  }
+  return yield* Effect.fail(
+    new CliFailure({ message: 'Scheduled sync currently supports macOS, Linux, and Windows.' }),
+  );
 });
 
-export const removeSchedule = Effect.fn('cli.removeSchedule')(function* (scheduler: 'systemd' | 'launchd' | null) {
+export const removeSchedule = Effect.fn('cli.removeSchedule')(function* (scheduler: Connection['scheduler']) {
   const fs = yield* FileSystem.FileSystem;
   if (scheduler === 'systemd') {
     yield* run(['systemctl', '--user', 'disable', '--now', 'token-tracker-sync.timer']);
@@ -162,5 +268,10 @@ export const removeSchedule = Effect.fn('cli.removeSchedule')(function* (schedul
       yield* run(['launchctl', 'bootout', domain, plist]).pipe(Effect.catch(() => Effect.void));
     }
     yield* fs.remove(plist, { force: true });
+  } else if (scheduler === 'schtasks') {
+    // An already deleted task leaves nothing to remove.
+    yield* run(schtasksDelete).pipe(Effect.catch(() => Effect.void));
+    yield* fs.remove(schtasksScriptPath(), { force: true });
+    yield* fs.remove(schtasksXmlPath(), { force: true });
   }
 });

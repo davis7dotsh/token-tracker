@@ -8,7 +8,7 @@ import { buildDashboard, collectUsage, resolveRepository } from '../lib/server/u
 import { resolveDisplayModel } from '../lib/server/usage/pricing';
 import { loadPricing } from '../lib/server/usage/pricing-runtime';
 import { formatReport } from './report';
-import { installSchedule, removeSchedule } from './scheduler';
+import { compiledBinary, installSchedule, removeSchedule } from './scheduler';
 import {
   CliFailure,
   type Connection,
@@ -271,9 +271,7 @@ const serve = Command.make(
   Effect.fn('cli.serve')(function* (options) {
     if (options.port < 1 || options.port > 65535)
       return yield* Effect.fail(new CliFailure({ message: '--port must be 1–65535.' }));
-    const root = Bun.main.includes('$bunfs')
-      ? resolve(dirname(process.execPath), '..')
-      : resolve(import.meta.dir, '../..');
+    const root = compiledBinary ? resolve(dirname(process.execPath), '..') : resolve(import.meta.dir, '../..');
     const entry = Option.getOrElse(options.entry, () => join(root, 'build/index.js'));
     const fs = yield* FileSystem.FileSystem;
     if (!(yield* fs.exists(entry)))
@@ -282,7 +280,7 @@ const serve = Command.make(
           message: 'Dashboard build not found. Run bun run build or pass --entry <build/index.js>.',
         }),
       );
-    const binary = Bun.main.includes('$bunfs') ? (process.env.BUN_EXEC_PATH ?? Bun.which('bun')) : process.execPath;
+    const binary = compiledBinary ? (process.env.BUN_EXEC_PATH ?? Bun.which('bun')) : process.execPath;
     if (!binary)
       return yield* Effect.fail(
         new CliFailure({

@@ -51,7 +51,13 @@ export const runT3DatabaseProcess = (
       Effect.promise(async () => {
         // Effect interruption cannot stop native SQLite work on its own.
         // Kill and reap the isolated process before the timeout returns.
-        if (child.exitCode === null) child.kill('SIGKILL');
+        // Windows maps the signal to process termination; a failed kill must
+        // still leave T3 metadata optional rather than defect the collection.
+        try {
+          if (child.exitCode === null) child.kill('SIGKILL');
+        } catch {
+          return;
+        }
         await child.exited;
       }),
   );

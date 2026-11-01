@@ -131,6 +131,8 @@ const downloads = HttpRouter.add(
       'token-tracker-linux-arm64',
       'token-tracker-darwin-x64',
       'token-tracker-darwin-arm64',
+      'token-tracker-windows-x64.exe',
+      'token-tracker-windows-arm64.exe',
     ]);
     if (!file || !allowed.has(file) || !directory || !path.isAbsolute(directory)) return notFound;
     const target = path.join(directory, file);
