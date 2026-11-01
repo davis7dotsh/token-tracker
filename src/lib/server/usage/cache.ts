@@ -55,7 +55,8 @@ export const fileSignature = (file: string) =>
 export const prepareParsedCache = Effect.fn('usage.prepareParsedCache')(function* (directory: string) {
   const fs = yield* FileSystem.FileSystem;
   return yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 }).pipe(
-    Effect.andThen(fs.chmod(directory, 0o700)),
+    // Windows has no POSIX modes; its profile ACLs protect the cache instead.
+    Effect.andThen(process.platform === 'win32' ? Effect.void : fs.chmod(directory, 0o700)),
     Effect.as(true),
     Effect.catch(() => Effect.succeed(false)),
   );

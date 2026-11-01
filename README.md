@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), and Muse. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), and Muse. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
 
 The dashboard can run as a self-hosted service, e.g. at [https://tracker.example.ts.net:10007](https://tracker.example.ts.net:10007) on a Tailscale network.
 
@@ -114,7 +114,7 @@ unset TOKEN_TRACKER_PAIRING_SECRET
 Alternatively pass `--pairing-secret <secret>`. `--name <name>` sets the device label, `--interval <minutes>` changes the schedule, and `--no-schedule` leaves scheduling to you.
 
 - `connect` registers the device, enables a scheduled push every **five minutes**, and uploads all available history. Terminal report timeframes do not limit syncing.
-- Linux uses a user systemd timer; macOS uses a LaunchAgent. Scheduled native clients keep a durable executable copy independent of the npm cache. Configured log directories are preserved.
+- Linux uses a user systemd timer; macOS uses a LaunchAgent; Windows uses a Task Scheduler task (`Token Tracker Sync`) for the current user, no administrator rights needed. Scheduled native clients keep a durable executable copy independent of the npm cache. Configured log directories are preserved.
 - Later runs send only new or changed accounting records. Stable IDs and content fingerprints detect corrections and newly imported historical logs without relying on a timestamp watermark.
 - Genuine subagent calls count once. Inherited Codex counters, Claude sidechain message replays, and Pi fork entries retain their original ownership instead of adding usage again. Codex fork accounting uses native task creation metadata because copied records can have rewritten timestamps.
 - Acknowledged batches append a small checkpoint journal; a successful changed sync compacts it into an atomic snapshot. Failed uploads retry later; replaying an accepted batch does not increase totals. Archiving/removing local logs does not erase uploaded history.
@@ -130,7 +130,26 @@ bun run cli status --json        # Connection/checkpoint status
 bun run cli disconnect          # Remove credentials and scheduled job
 ```
 
-Disconnecting leaves existing history on the server. Client configuration and checkpoints live under `${XDG_CONFIG_HOME:-~/.config}/token-tracker`, or `TOKEN_TRACKER_CONFIG_DIR` when set. Credential/checkpoint files use mode `0600`. The server stores synchronized usage in `usage.sqlite` in its data directory. This version uses tailnet access for the dashboard and paired credentials for uploads; hosted-account login is not implemented.
+Disconnecting leaves existing history on the server. Client configuration and checkpoints live under `${XDG_CONFIG_HOME:-~/.config}/token-tracker` (`%APPDATA%\token-tracker` on Windows), or `TOKEN_TRACKER_CONFIG_DIR` when set. Credential/checkpoint files use mode `0600`; on Windows they rely on the user profile's permissions.
+
+### Windows
+
+Native Windows (x64 or arm64, no WSL) pairs the same way. The hub's package tarball bundles the Windows binary. In PowerShell:
+
+```powershell
+$hub = 'https://tracker.example.ts.net:10007'
+$dir = "$env:LOCALAPPDATA\token-tracker-cli"
+New-Item -ItemType Directory -Force $dir | Out-Null
+curl.exe -fL -o "$dir\token-tracker.tgz" "$hub/downloads/token-tracker-0.4.0.tgz"
+tar -xzf "$dir\token-tracker.tgz" -C $dir
+$env:TOKEN_TRACKER_PAIRING_SECRET = 'the-secret-from-your-dashboard-machine'
+& "$dir\package\dist\token-tracker-windows-x64.exe" connect $hub
+Remove-Item Env:TOKEN_TRACKER_PAIRING_SECRET
+```
+
+- `connect` copies the executable to `%APPDATA%\token-tracker\bin\token-tracker.exe`, writes a `sync.cmd` wrapper beside it with the configured log directories, and schedules it every five minutes through a headless console. The extracted download can be deleted afterwards.
+- Scheduled output goes to `%APPDATA%\token-tracker\sync.log`. `schtasks /Query /TN "Token Tracker Sync"` shows the task; `disconnect` deletes it.
+- The task runs while you are signed in, including on battery power; missed runs start once the machine is available again. The server stores synchronized usage in `usage.sqlite` in its data directory. This version uses tailnet access for the dashboard and paired credentials for uploads; hosted-account login is not implemented.
 
 ## Native CLI and npm packaging
 
@@ -147,6 +166,8 @@ bun run build:cli bun-linux-x64
 bun run build:cli bun-linux-arm64
 bun run build:cli bun-darwin-x64
 bun run build:cli bun-darwin-arm64
+bun run build:cli bun-windows-x64   # dist/token-tracker-windows-x64.exe
+bun run build:cli bun-windows-arm64 # dist/token-tracker-windows-arm64.exe
 ```
 
 The npm `token-tracker` executable selects its bundled platform binary. This draft is private and has not been published to npm. After building the dashboard and platform binaries, `bun pm pack` creates a local tarball for npm/npx:
@@ -206,7 +227,7 @@ Grok Build's input counters include cached tokens, so the collector separates ca
 
 Inherited Grok fork turns retain their original session ownership and are counted once. Parent turns already include subagent usage, so child sessions are excluded; missing readable parent accounting produces a partial-source warning. Subagent totals can lag until the parent writes its next durable turn.
 
-Muse writes one `session.jsonl` event log per session under its XDG data directory (`$XDG_DATA_HOME/muse/sessions`, defaulting to `~/.local/share/muse/sessions` on Linux and macOS); `MUSE_HOME` can point to the Muse data directory or directly to its `sessions` directory. The collector counts each session stream's `model_completed` records once. The paired `goal_usage_attribution` provider rows repeat the same counters without a model or cache split, so they are not added again. Muse input counters include cached tokens, so cache reads/writes are separated from uncached input before totaling, and reasoning is already included in output. Nested subagent and reminder sessions keep their own session IDs and inherit the enclosing session's project when they do not record a workspace. Approval-review judge streams are excluded because they record a synthetic sequence clock instead of wall time, so their usage cannot be dated. Model IDs are preserved exactly as logged; catalog pricing applies when an ID is available in the pricing catalog, while other IDs remain unpriced until a pricing rule is saved.
+Muse writes one `session.jsonl` event log per session under its XDG data directory (`$XDG_DATA_HOME/muse/sessions`, defaulting to `~/.local/share/muse/sessions` on Linux and macOS). On Windows, `%LOCALAPPDATA%\muse` and `%APPDATA%\muse` are also read when present; `MUSE_HOME` can point to the Muse data directory or directly to its `sessions` directory. The collector counts each session stream's `model_completed` records once. The paired `goal_usage_attribution` provider rows repeat the same counters without a model or cache split, so they are not added again. Muse input counters include cached tokens, so cache reads/writes are separated from uncached input before totaling, and reasoning is already included in output. Nested subagent and reminder sessions keep their own session IDs and inherit the enclosing session's project when they do not record a workspace. Approval-review judge streams are excluded because they record a synthetic sequence clock instead of wall time, so their usage cannot be dated. Model IDs are preserved exactly as logged; catalog pricing applies when an ID is available in the pricing catalog, while other IDs remain unpriced until a pricing rule is saved.
 
 Costs are **API-equivalent costs**, using native Grok accounting as described above and estimates from a cached LiteLLM catalog and saved model rules for other harnesses. The bundled snapshot in `src/lib/server/usage/pricing.json` is the initial catalog fallback. These costs are not subscription charges or invoices. Supported cache TTL, service-tier, and context-length rates are accounted for. Unknown models or unavailable costs retain their tokens with cost reported as unpriced.
 
@@ -273,7 +294,7 @@ The toolchain is pinned to Vite+ 1.0.0 and the latest stable native TypeScript c
 
 Runed 0.37.1 is pinned with a Bun patch in `patches/` for SvelteKit 3's shallow URL/navigation APIs, matching server-rendered URL state, literal string parameters, and per-update history behavior. Recheck the patch when upgrading Runed or SvelteKit.
 
-Tests cover parser deduplication/compaction, cache and pricing accounting, filtering/timezone boundaries, authenticated RPC and atomic SQLite writes, retry-safe checkpoints, historical imports/corrections, and read-only CLI checks. Linux scheduled pushes have also been exercised with the compiled binary. macOS binaries cross-compile; LaunchAgent execution needs verification on an actual Mac.
+Tests cover parser deduplication/compaction, cache and pricing accounting, filtering/timezone boundaries, authenticated RPC and atomic SQLite writes, retry-safe checkpoints, historical imports/corrections, and read-only CLI checks. Linux scheduled pushes have also been exercised with the compiled binary. macOS and Windows binaries cross-compile; LaunchAgent and Task Scheduler execution need verification on an actual Mac and Windows machine.
 
 - `src/lib/server/usage`: shared collection, accounting, repository identity, and aggregation.
 - `src/lib/shared`: validated data and Effect RPC contracts.

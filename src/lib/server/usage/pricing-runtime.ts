@@ -75,7 +75,7 @@ const writeStored = async (directory: string, stored: StoredPricing) => {
   const temporary = join(directory, `${stateFile}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`);
   try {
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(directory, 0o700);
+    if (process.platform !== 'win32') await chmod(directory, 0o700);
     await writeFile(temporary, JSON.stringify(stored) + '\n', { mode: 0o600, flag: 'wx', flush: true });
     const written = await stat(temporary, { bigint: true });
     await rename(temporary, join(directory, stateFile));

@@ -12,6 +12,7 @@ import {
   type Checkpoint,
   type Connection,
 } from '../../src/cli/state';
+import { configDirectory } from '../../src/lib/server/rpc/identity';
 
 const connection: Connection = {
   url: 'https://dashboard.example',
@@ -72,4 +73,18 @@ test('checkpoint restart merges acknowledged deltas, ignores foreign/incomplete 
     else process.env.TOKEN_TRACKER_CONFIG_DIR = previous;
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('client configuration defaults to roaming AppData on Windows unless explicitly configured', () => {
+  const home = 'C:\\Users\\Ada';
+  const appData = 'C:\\Users\\Ada\\AppData\\Roaming';
+  expect(configDirectory('win32', { APPDATA: appData }, home)).toBe(`${appData}\\token-tracker`);
+  expect(configDirectory('win32', {}, home)).toBe(`${appData}\\token-tracker`);
+  expect(configDirectory('win32', { APPDATA: appData, XDG_CONFIG_HOME: 'D:\\config' }, home)).toBe(
+    'D:\\config\\token-tracker',
+  );
+  expect(configDirectory('win32', { APPDATA: appData, TOKEN_TRACKER_CONFIG_DIR: 'D:\\tracker' }, home)).toBe(
+    'D:\\tracker',
+  );
+  expect(configDirectory('linux', { APPDATA: appData }, '/home/ada')).toBe('/home/ada/.config/token-tracker');
 });

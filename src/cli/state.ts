@@ -1,6 +1,6 @@
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ByteSize, Effect, FileSystem, Schema } from 'effect';
+import { configDirectory as deviceConfigDirectory } from '../lib/server/rpc/identity';
 
 export class CliFailure extends Schema.TaggedError<CliFailure>()('CliFailure', {
   message: Schema.String,
@@ -11,7 +11,7 @@ export const Connection = Schema.Struct({
   token: Schema.String,
   device: Schema.Struct({ id: Schema.String, name: Schema.String, platform: Schema.String }),
   intervalMinutes: Schema.Number,
-  scheduler: Schema.NullOr(Schema.Literals(['systemd', 'launchd'])),
+  scheduler: Schema.NullOr(Schema.Literals(['systemd', 'launchd', 'schtasks'])),
   connectedAt: Schema.String,
 });
 export type Connection = typeof Connection.Type;
@@ -26,11 +26,9 @@ export const Checkpoint = Schema.Struct({
 });
 export type Checkpoint = typeof Checkpoint.Type;
 
-export const configDirectory = () =>
-  resolve(
-    process.env.TOKEN_TRACKER_CONFIG_DIR ??
-      join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'token-tracker'),
-  );
+export const configDirectory = () => resolve(deviceConfigDirectory());
+// Windows ignores POSIX modes; its per-user profile ACLs protect these files.
+export const posixModes = process.platform !== 'win32';
 
 const parseJson = (text: string) =>
   Effect.try({
@@ -52,14 +50,14 @@ export const writePrivateJson = Effect.fn('cli.writePrivateJson')(function* (nam
   const fs = yield* FileSystem.FileSystem;
   const directory = configDirectory();
   yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
-  yield* fs.chmod(directory, 0o700);
+  if (posixModes) yield* fs.chmod(directory, 0o700);
   const destination = join(directory, name);
   const temporary = join(directory, `.${name}.${process.pid}.${crypto.randomUUID()}.tmp`);
   yield* fs.writeFileString(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600, flag: 'wx' });
   yield* fs
     .rename(temporary, destination)
     .pipe(Effect.ensuring(fs.remove(temporary, { force: true }).pipe(Effect.catch(() => Effect.void))));
-  yield* fs.chmod(destination, 0o600);
+  if (posixModes) yield* fs.chmod(destination, 0o600);
 });
 
 export const readCheckpoint = Effect.fn('cli.readCheckpoint')(function* (connection: Connection) {
