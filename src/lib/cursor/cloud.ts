@@ -173,18 +173,21 @@ const agentEvents = async (get: Get, current: typeof agent.Type) => {
   // tied to a run. Record only the difference once, dated to the agent start.
   if (buckets.some((bucket) => remaining[bucket] > 0))
     events.push(makeEvent(current.id, 'unattributed', current.createdAt, remaining));
-  return events;
+  return { events, zeroRuns: usage.runs.filter((row) => row.usage.totalTokens === 0).length };
 };
 
 export const fetchCursorUsage = async (apiKey: string, options: Options = {}) => {
   const get = makeGet(apiKey, options);
   const agentIds = new Set<string>();
   const events: UsageEvent[] = [];
+  let zeroRuns = 0;
   try {
     for await (const current of items(get, 'agents', decodeAgents, true)) {
       if (current.env.type !== 'cloud' || agentIds.has(current.id)) continue;
       agentIds.add(current.id);
-      for (const event of await agentEvents(get, current)) events.push(event);
+      const result = await agentEvents(get, current);
+      zeroRuns += result.zeroRuns;
+      for (const event of result.events) events.push(event);
       options.onAgentComplete?.(agentIds.size);
     }
   } catch (error) {
@@ -195,5 +198,5 @@ export const fetchCursorUsage = async (apiKey: string, options: Options = {}) =>
     if (Schema.isSchemaError(error) || error instanceof SyntaxError) throw invalid();
     throw new CursorApiError('Could not reach Cursor or finish reading its response. Retry later.');
   }
-  return { events, agentIds: [...agentIds] };
+  return { events, agentIds: [...agentIds], zeroRuns };
 };

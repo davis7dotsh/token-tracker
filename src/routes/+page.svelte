@@ -279,6 +279,10 @@
     data ? `${formatDate(data.period.start)} – ${formatDate(data.period.end)}` : 'Reading usage…',
   );
   const totals = $derived(data?.totals);
+  const onlyCursor = $derived.by(() => {
+    const selected = query.harnesses ?? data?.filters.harnesses;
+    return selected?.length === 1 && selected[0] === 'cursor';
+  });
   const requestCount = $derived.by(() => {
     if (!data) return 'Across your harnesses';
     const hasCursor = data.harnesses.some((row) => row.name === 'cursor');
@@ -665,7 +669,8 @@
 
     <section class="metrics" aria-label="Usage summary" aria-busy={loading}>
       <div class="metric">
-        <span class="metric-label">Total tokens</span><strong class={['metric-value', !data && loading && 'skeleton']}
+        <span class="metric-label">{onlyCursor ? 'Cloud agent tokens reported' : 'Total tokens'}</span><strong
+          class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? compact.format(totals.tokens) : '—'}</strong
         ><span class="metric-detail"
           >{totals ? `${integer.format(totals.tokens)} tokens` : 'Input, output & cache'}</span

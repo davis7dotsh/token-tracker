@@ -86,7 +86,12 @@ export const mergeCursorSnapshot = (
     else events.push(event); // Disappearance from the API isn't evidence of deletion.
   }
   for (const event of fresh.events) retracted.delete(event.id);
-  return { version: 1, syncedAt, events, warnings: [], ...(retracted.size ? { retractedIds: [...retracted] } : {}) };
+  const warnings = fresh.zeroRuns
+    ? [
+        `Cursor returned zero recorded tokens for ${fresh.zeroRuns} cloud run(s). The agent API is not an account usage ledger.`,
+      ]
+    : [];
+  return { version: 1, syncedAt, events, warnings, ...(retracted.size ? { retractedIds: [...retracted] } : {}) };
 };
 
 const refresh = Effect.fn('cli.refreshCursor')(function* (providedKey?: Redacted.Redacted) {
@@ -133,8 +138,9 @@ const refresh = Effect.fn('cli.refreshCursor')(function* (providedKey?: Redacted
   if (providedKey) yield* writePrivateJson(keyName, { key: Redacted.value(key) });
   const tokens = snapshot.events.reduce((sum, event) => sum + tokenTotal(event), 0);
   yield* Console.log(
-    `Refreshed ${fresh.agentIds.length} cloud agent(s). Local Cursor history: ${tokens.toLocaleString('en-US')} tokens.`,
+    `Refreshed ${fresh.agentIds.length} cloud agent(s). Cloud Agents API-reported history: ${tokens.toLocaleString('en-US')} tokens.`,
   );
+  for (const warning of snapshot.warnings) yield* Console.log(warning);
 });
 
 const connect = Command.make('connect', {}, () => Effect.scoped(Effect.flatMap(promptKey, (key) => refresh(key)))).pipe(

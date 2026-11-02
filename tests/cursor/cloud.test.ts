@@ -53,6 +53,7 @@ describe('Cursor cloud accounting', () => {
     const parsed = await fetchCursorUsage('fixture', { ...api, onAgentComplete: (n) => completed.push(n) });
     expect(completed).toEqual([1, 2]);
     expect(parsed.agentIds).toEqual(['bc-a', 'bc-b']);
+    expect(parsed.zeroRuns).toBe(1);
     expect(api.paths).toHaveLength(6);
     expect(parsed.events).toHaveLength(3);
     expect(parsed.events[0]).toMatchObject({
