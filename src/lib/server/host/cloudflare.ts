@@ -21,3 +21,8 @@ export const handleHubRequest = async ({
   headers.set('cache-control', 'no-store');
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 };
+
+// A Worker has no collector filesystem on which to keep a Cursor key.
+export const supportsCursorKey = (_url: URL) => false;
+export const cursorKeyConfigured = async () => false;
+export const saveCursorKey = async (_key: string) => 'Cursor credentials require a self-hosted collector.';

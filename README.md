@@ -227,6 +227,8 @@ token-tracker cursor sync             # refresh once; add --watch to repeat in t
 token-tracker cursor disconnect       # forget the local key; keep imported history
 ```
 
+On the self-hosted HTTPS dashboard (`ORIGIN` configured), **Settings → Data → Cursor usage** lets you verify and save or replace the hub’s agent API key. The saved key is never displayed. Saving does not import history or switch away from billing reports.
+
 For a one-off import without storing a key, supply `CURSOR_API_KEY` privately to `cursor sync` instead. Never put a key in a command argument or commit it. The key stays on the collector (mode `0600` on POSIX). To revoke access, also revoke the key at Cursor. `cursor sync --watch` defaults to 15 minutes between completed imports. Regular `check`, dashboard reads, and device `sync` use the last local snapshot without contacting Cursor. A paired collector pushes those records on its next regular sync; update the receiving hub first. A standalone hub reads the snapshot directly. No new background service is installed.
 
 - **Coverage:** The [v1 Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints.md#get-agent-usage) lists the authenticated user's agents, including archived ones. We import Cursor-hosted runs, not IDE/Tab usage or self-hosted pool/machine runs. Agents no longer visible are retained if imported before. An unsuccessful refresh doesn't replace the last good snapshot.

@@ -1,10 +1,14 @@
 <script lang="ts">
+  import { enhance } from '$app/forms';
+  import type { PageProps } from './$types';
   import { untrack } from 'svelte';
   import { failureMessage, getSettings } from '#lib/client/settings.svelte.ts';
   import { categoryNames, seriesColor } from '#lib/client/visuals.ts';
   import type { DashboardResponse } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
 
+  let { data: pageData, form }: PageProps = $props();
+  let savingKey = $state(false);
   const settings = getSettings();
   const integer = new Intl.NumberFormat('en-US');
   let data = $state.raw<DashboardResponse>();
@@ -53,8 +57,37 @@
   </div>
 </div>
 
-<details class="cursor-setup" id="cursor">
-  <summary>Set up Cursor usage</summary>
+<details class="cursor-setup" id="cursor" open={pageData.cursorKeySaved !== null}>
+  <summary>Cursor usage</summary>
+  {#if pageData.cursorKeySaved !== null}
+    <form
+      method="POST"
+      action="?/cursorKey"
+      use:enhance={() => {
+        savingKey = true;
+        return async ({ update }) => {
+          try {
+            await update();
+          } finally {
+            savingKey = false;
+          }
+        };
+      }}
+    >
+      <label for="cursor-key">Cursor API key{pageData.cursorKeySaved ? ' · Saved' : ''}</label>
+      <input
+        id="cursor-key"
+        name="key"
+        type="password"
+        autocomplete="new-password"
+        maxlength="4096"
+        required
+        placeholder={pageData.cursorKeySaved ? 'Enter a replacement key' : 'Enter a key with agent read access'}
+      />
+      <button type="submit" class="button" disabled={savingKey}>{savingKey ? 'Verifying…' : 'Save key'}</button>
+      <span role="status">{form?.message ?? ''}</span>
+    </form>
+  {/if}
   <p>
     For account usage, export a personal unified usage CSV and run <code>token-tracker cursor import report.csv</code>
     on one tracker machine. Import newer exports there to update totals. Overlapping billing items count once.
@@ -113,6 +146,24 @@
     font-size: 13px;
     line-height: 1.6;
     border-bottom: 1px solid var(--border);
+  }
+  form {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 16px;
+  }
+  form label {
+    width: 100%;
+  }
+  form input {
+    color: var(--ink);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    width: min(100%, 300px);
   }
   summary {
     width: fit-content;
