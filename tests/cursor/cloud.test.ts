@@ -124,12 +124,22 @@ describe('Cursor cloud accounting', () => {
     expect(
       fetchCursorUsage('fixture', { request: async () => new Response(secretText, { status: 401 }) }),
     ).rejects.toThrow('Check your personal API key');
-    expect(
-      fetchCursorUsage('fixture', {
-        request: async () => {
-          throw new Error(secretText);
-        },
-      }),
-    ).rejects.toThrow('Could not reach Cursor');
+    let reads = 0;
+    let lists = 0;
+    const retries: string[] = [];
+    const imported = await fetchCursorUsage('fixture', {
+      onRetry: (reason) => retries.push(reason),
+      request: async (url) => {
+        if (url.pathname === '/v1/agents') {
+          lists++;
+          return Response.json({ items: [agent('bc-a')] });
+        }
+        if (++reads === 1) throw new Error(secretText);
+        return Response.json({ totalUsage: usage(0, 0, 0, 0), runs: [] });
+      },
+    });
+    expect(imported.agentIds).toEqual(['bc-a']);
+    expect([lists, reads]).toEqual([1, 2]);
+    expect(retries).toEqual(['connection or response interrupted']);
   });
 });

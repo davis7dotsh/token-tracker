@@ -114,6 +114,8 @@ const refresh = Effect.fn('cli.refreshCursor')(function* (providedKey?: Redacted
             completed = count;
             if (count === 1) report();
           },
+          onRetry: (reason, waitMs) =>
+            console.error(`Cursor: ${reason}; retrying this request in ${waitMs / 1000}s (keeping progress).`),
           onRateLimit: (waitMs) => {
             retryAt = Date.now() + waitMs;
             report();

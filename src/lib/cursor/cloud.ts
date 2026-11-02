@@ -34,6 +34,7 @@ type Options = {
   signal?: AbortSignal;
   request?: (url: URL, init: RequestInit) => Promise<Response>;
   onAgentComplete?: (completed: number) => void;
+  onRetry?: (reason: string, waitMs: number) => void;
   onRateLimit?: (waitMs: number) => void;
 };
 const rateLimitMessage = 'Cursor rate-limited the import (HTTP 429). Retry later.';
@@ -44,21 +45,49 @@ const retryMs = (value: string | null) => {
 };
 
 const makeGet =
-  (key: string, { request = fetch, signal, onRateLimit }: Options) =>
+  (key: string, { request = fetch, signal, onRateLimit, onRetry }: Options) =>
   async (path: string, query?: URLSearchParams) => {
     // Neither continuation tokens nor upstream IDs can change the request origin.
     const url = new URL(`https://api.cursor.com/v1/${path}`);
     if (query) url.search = query.toString();
+    const stage = path === 'agents' ? 'the agent list' : path.endsWith('/usage') ? 'agent usage' : 'run history';
     for (let attempt = 0; ; attempt++) {
-      const timeout = AbortSignal.timeout(30_000);
-      const response = await request(url, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
-        redirect: 'error',
-        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-      });
-      if (response.ok) return (await response.json()) as unknown;
-      await response.body?.cancel();
+      signal?.throwIfAborted();
+      const timeout = AbortSignal.timeout(attempt === 0 ? 30_000 : 60_000);
+      const retry = async (reason: string) => {
+        if (attempt >= 3)
+          throw new CursorApiError(
+            `Could not reach Cursor or finish reading ${stage} after four attempts (${reason}). Retry later.`,
+          );
+        const wait = 1000 * 2 ** attempt;
+        onRetry?.(reason, wait);
+        await delay(wait, undefined, { signal });
+      };
+      let response: Response;
+      try {
+        response = await request(url, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+          redirect: 'error',
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        });
+        if (response.ok) return (await response.json()) as unknown;
+      } catch (error) {
+        signal?.throwIfAborted();
+        await retry(
+          timeout.aborted
+            ? 'request timed out'
+            : error instanceof SyntaxError
+              ? 'invalid JSON response'
+              : 'connection or response interrupted',
+        );
+        continue;
+      }
+      await response.body?.cancel().catch(() => undefined);
+      if ([408, 500, 502, 503, 504].includes(response.status)) {
+        await retry(`HTTP ${response.status}`);
+        continue;
+      }
       if (response.status === 429) {
         const wait = retryMs(response.headers.get('retry-after'));
         if (attempt >= 2 || wait > 120_000) throw new CursorApiError(rateLimitMessage);
