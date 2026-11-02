@@ -34,6 +34,17 @@ export const categoryNames: Record<string, string> = {
   __other__: 'Other',
 };
 
+// Display labels only; keep the reported model ID for grouping, filters and exports.
+export function modelLabel(id: string) {
+  if (id === 'cursor/unknown') return 'Unreported model';
+  const claude = /^claude-(opus|sonnet|haiku)-(\d+)-(\d+)(?:-(low|medium|high|max))?$/.exec(id);
+  if (claude) {
+    const [, family, major, minor, effort] = claude;
+    return `Claude ${family[0].toUpperCase()}${family.slice(1)} ${major}.${minor}${effort ? ` (${effort})` : ''}`;
+  }
+  return id.replace(/^cursor-grok-(?=\d)/, 'Grok ');
+}
+
 const categoryColors: Record<string, string> = {
   claude: 'var(--series-claude)',
   anthropic: 'var(--series-claude)',

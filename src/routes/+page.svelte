@@ -26,7 +26,13 @@
     safeWebUrl,
     sessionDisplayName,
   } from '#lib/client/session-links.ts';
-  import { categoryNames, distinctSeriesColors, seriesColor, type VisualGrouping } from '#lib/client/visuals.ts';
+  import {
+    categoryNames,
+    distinctSeriesColors,
+    modelLabel,
+    seriesColor,
+    type VisualGrouping,
+  } from '#lib/client/visuals.ts';
   import type { UsageQuery, Breakdown, DashboardResponse, Device } from '#lib/shared/domain.ts';
   import HiddenProjects from '#lib/components/HiddenProjects.svelte';
   import Icon from '#lib/components/Icon.svelte';
@@ -111,7 +117,7 @@
           (query.providers.length === 1
             ? (categoryNames[query.providers[0]] ?? query.providers[0])
             : `${query.providers.length} providers`),
-        query.models && (query.models.length === 1 ? query.models[0] : `${query.models.length} models`),
+        query.models && (query.models.length === 1 ? modelLabel(query.models[0]) : `${query.models.length} models`),
         query.devices &&
           (query.devices.length === 1 ? deviceName(query.devices[0]) : `${query.devices.length} devices`),
       ]
@@ -233,11 +239,14 @@
             ? deviceName(value)
             : key === 'projects'
               ? projectName(value)
-              : (categoryNames[value] ?? value),
+              : key === 'models'
+                ? modelLabel(value)
+                : (categoryNames[value] ?? value),
         color: categoryColor(value, key),
       }));
     }),
   );
+  const modelNames = $derived(Object.fromEntries((data?.filters.models ?? []).map((id) => [id, modelLabel(id)])));
   const breakdown = $derived(
     [...(data?.[grouping] ?? [])].sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name)),
   );
@@ -314,7 +323,9 @@
       ? deviceName(name)
       : grouping === 'projects'
         ? projectName(name)
-        : (categoryNames[name] ?? name);
+        : grouping === 'models'
+          ? modelLabel(name)
+          : (categoryNames[name] ?? name);
   }
   function share(value: number, total: number) {
     return total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0;
@@ -605,6 +616,7 @@
           label="Models"
           options={data?.filters.models ?? []}
           value={query.models}
+          names={modelNames}
           grouping="models"
           onchange={(models) => changeQuery({ ...query, models })}
         />
@@ -675,7 +687,13 @@
     <section class="metrics" aria-label="Usage summary" aria-busy={loading}>
       <div class="metric">
         <span class="metric-label"
-          >{billingOnly ? 'Cursor billing tokens' : onlyCursor ? 'Reported Cursor tokens' : 'Total tokens'}</span
+          >{query.models?.length === 1
+            ? `${modelLabel(query.models[0])} tokens`
+            : billingOnly
+              ? 'Cursor billing tokens'
+              : onlyCursor
+                ? 'Reported Cursor tokens'
+                : 'Total tokens'}</span
         ><strong class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? compact.format(totals.tokens) : '—'}</strong
         ><span class="metric-detail"
@@ -942,7 +960,7 @@
                       class="category-swatch"
                       style:background={seriesColor(session.model, 'models')}
                       aria-hidden="true"
-                    ></i><span>{session.model}</span></span
+                    ></i><span>{modelLabel(session.model)}</span></span
                   ></td
                 ><td class="numeric">{compact.format(session.tokens)}</td><td class="numeric">{formatCost(session)}</td
                 ><td class="numeric session-time" title={new Date(session.lastActiveAt).toLocaleString()}

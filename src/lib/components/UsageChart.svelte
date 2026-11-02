@@ -1,6 +1,6 @@
 <script lang="ts">
   import { curveMonotoneX, line, scaleBand, scaleLinear, select } from 'd3';
-  import { categoryNames, distinctSeriesColors, seriesColor } from '#lib/client/visuals.ts';
+  import { categoryNames, distinctSeriesColors, modelLabel, seriesColor } from '#lib/client/visuals.ts';
   import { projectLabels } from '#lib/client/session-links.ts';
   import type { ChartGrouping } from '#lib/client/dashboard-url.ts';
   import type { ChartSeries, DashboardResponse } from '#lib/shared/domain.ts';
@@ -9,7 +9,7 @@
     data,
     metric = 'tokens',
     mode = 'bar',
-    grouping = 'harnesses',
+    grouping = 'models',
     onGroupingChange,
   }: {
     data: DashboardResponse;
@@ -86,7 +86,10 @@
       .map((series) => ({
         name: series.name,
         label:
-          (selectedGrouping === 'projects' ? projectNames.get(series.name) : categoryNames[series.name]) ?? series.name,
+          selectedGrouping === 'models'
+            ? modelLabel(series.name)
+            : ((selectedGrouping === 'projects' ? projectNames.get(series.name) : categoryNames[series.name]) ??
+              series.name),
         color:
           (selectedGrouping === 'projects' ? projectColors.get(series.name) : undefined) ??
           seriesColor(series.name, selectedGrouping),
