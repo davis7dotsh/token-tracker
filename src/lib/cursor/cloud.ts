@@ -30,7 +30,12 @@ const page = <S extends Schema.Constraint>(item: S) =>
 const decodeAgents = Schema.decodeUnknownSync(page(agent));
 const decodeRuns = Schema.decodeUnknownSync(page(run));
 
-type Options = { signal?: AbortSignal; request?: (url: URL, init: RequestInit) => Promise<Response> };
+type Options = {
+  signal?: AbortSignal;
+  request?: (url: URL, init: RequestInit) => Promise<Response>;
+  onAgentComplete?: (completed: number) => void;
+  onRateLimit?: (waitMs: number) => void;
+};
 const rateLimitMessage = 'Cursor rate-limited the import (HTTP 429). Retry later.';
 const retryMs = (value: string | null) => {
   if (value !== null && /^\d+$/.test(value)) return Number(value) * 1000;
@@ -39,7 +44,7 @@ const retryMs = (value: string | null) => {
 };
 
 const makeGet =
-  (key: string, { request = fetch, signal }: Options) =>
+  (key: string, { request = fetch, signal, onRateLimit }: Options) =>
   async (path: string, query?: URLSearchParams) => {
     // Neither continuation tokens nor upstream IDs can change the request origin.
     const url = new URL(`https://api.cursor.com/v1/${path}`);
@@ -57,6 +62,7 @@ const makeGet =
       if (response.status === 429) {
         const wait = retryMs(response.headers.get('retry-after'));
         if (attempt >= 2 || wait > 120_000) throw new CursorApiError(rateLimitMessage);
+        onRateLimit?.(wait);
         await delay(wait, undefined, { signal });
         continue;
       }
@@ -150,6 +156,7 @@ export const fetchCursorUsage = async (apiKey: string, options: Options = {}) =>
       if (current.env.type !== 'cloud' || agentIds.has(current.id)) continue;
       agentIds.add(current.id);
       for (const event of await agentEvents(get, current)) events.push(event);
+      options.onAgentComplete?.(agentIds.size);
     }
   } catch (error) {
     // HTTP bodies, schema diagnostics and transport errors can contain agent

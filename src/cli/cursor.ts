@@ -95,7 +95,34 @@ const refresh = Effect.fn('cli.refreshCursor')(function* (providedKey?: Redacted
   const previous = yield* readCursorSnapshot();
   yield* Console.log('Reading Cursor cloud agent history…');
   const fresh = yield* Effect.tryPromise({
-    try: (signal) => fetchCursorUsage(Redacted.value(key), { signal }),
+    try: async (signal) => {
+      const started = Date.now();
+      let completed = 0;
+      let retryAt = 0;
+      const report = () => {
+        const seconds = Math.ceil((retryAt - Date.now()) / 1000);
+        const state = seconds > 0 ? `rate limited; retrying in ${seconds}s` : 'reading history';
+        console.error(
+          `Cursor: ${completed} cloud agents read · ${Math.floor((Date.now() - started) / 1000)}s elapsed · ${state}…`,
+        );
+      };
+      const timer = setInterval(report, 15_000);
+      try {
+        return await fetchCursorUsage(Redacted.value(key), {
+          signal,
+          onAgentComplete: (count) => {
+            completed = count;
+            if (count === 1) report();
+          },
+          onRateLimit: (waitMs) => {
+            retryAt = Date.now() + waitMs;
+            report();
+          },
+        });
+      } finally {
+        clearInterval(timer);
+      }
+    },
     catch: (error) =>
       new CliFailure({ message: error instanceof CursorApiError ? error.message : 'Could not fetch Cursor usage.' }),
   });

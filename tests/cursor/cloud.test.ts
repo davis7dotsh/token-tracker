@@ -49,7 +49,9 @@ describe('Cursor cloud accounting', () => {
       '/v1/agents/bc-b/usage': { totalUsage: usage(0, 0, 0, 0), runs: [{ id: 'waiting', usage: usage(0, 0, 0, 0) }] },
     };
     const api = mockApi(routes);
-    const parsed = await fetchCursorUsage('fixture', api);
+    const completed: number[] = [];
+    const parsed = await fetchCursorUsage('fixture', { ...api, onAgentComplete: (n) => completed.push(n) });
+    expect(completed).toEqual([1, 2]);
     expect(parsed.agentIds).toEqual(['bc-a', 'bc-b']);
     expect(api.paths).toHaveLength(6);
     expect(parsed.events).toHaveLength(3);
@@ -108,13 +110,16 @@ describe('Cursor cloud accounting', () => {
       fetchCursorUsage('fixture', mockApi({ [agents]: repeated, [`${agents}&cursor=same`]: repeated })),
     ).rejects.toThrow(CursorApiError);
     let attempts = 0;
+    const waits: number[] = [];
     const result = await fetchCursorUsage('fixture', {
+      onRateLimit: (wait) => waits.push(wait),
       request: async () =>
         ++attempts === 1
           ? new Response(null, { status: 429, headers: { 'Retry-After': '0' } })
           : Response.json({ items: [] }),
     });
     expect(attempts).toBe(2);
+    expect(waits).toEqual([0]);
     expect(result.events).toEqual([]);
     expect(
       fetchCursorUsage('fixture', { request: async () => new Response(secretText, { status: 401 }) }),
