@@ -22,7 +22,12 @@ export default defineConfig({
       'static/*-license.txt',
     ],
   },
-  plugins: [sveltekit({ adapter: adapter(), compilerOptions: { experimental: { async: true } } })],
+  plugins: [
+    // Kit also starts config-less Vite servers while syncing env types. Their
+    // default optimizer cache must never evict a running dashboard's modules.
+    { name: 'dashboard-dev-cache', apply: 'serve', config: () => ({ cacheDir: 'node_modules/.vite-dashboard-dev' }) },
+    sveltekit({ adapter: adapter(), compilerOptions: { experimental: { async: true } } }),
+  ],
   ssr: { external: ['bun:sqlite'] },
   server: { port: 5173, allowedHosts: ['.ts.net'] },
 });

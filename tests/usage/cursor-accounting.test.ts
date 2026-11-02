@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
 import { BunServices } from '@effect/platform-bun';
 import { Effect } from 'effect';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildDashboard, collectUsage } from '../../src/lib/server/usage';
-import type { CursorSnapshot } from '../../src/lib/server/usage/cursor-snapshot';
+import { readCursorSnapshot, type CursorSnapshot } from '../../src/lib/server/usage/cursor-snapshot';
 import { bundledPolicy } from '../../src/lib/server/usage/pricing';
 import { usageRevision } from '../../src/lib/server/usage/revision';
 
@@ -61,6 +61,16 @@ test('offline Cursor import invalidates the local dashboard, preserves accountin
     expect(usage.sources[0]).toMatchObject({ harness: 'cursor', status: 'ready', events: 1 });
     const dashboard = buildDashboard(usage, { range: 'all', harnesses: ['cursor'] }, new Date('2026-01-03'));
     expect(dashboard.totals).toMatchObject({ tokens: 77, sessions: 1, requests: 0, unpricedTokens: 77 });
+    const read = () =>
+      Effect.runPromise(readCursorSnapshot(cursorSnapshotFile).pipe(Effect.provide(BunServices.layer)));
+    const original = await read();
+    expect(await read()).toBe(original);
+    const replacement = { ...snapshot, syncedAt: '2026-01-03T12:00:00Z' };
+    await writeFile(`${cursorSnapshotFile}.tmp`, JSON.stringify(replacement));
+    await rename(`${cursorSnapshotFile}.tmp`, cursorSnapshotFile);
+    expect((await read())?.syncedAt).toBe(replacement.syncedAt);
+    await rm(cursorSnapshotFile);
+    expect(await read()).toBeNull();
     await writeFile(cursorSnapshotFile, JSON.stringify({ ...snapshot, retractedIds: ['claude:untouched'] }));
     const bad = await collect();
     expect(bad.sources[0].status).toBe('error');
