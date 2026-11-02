@@ -28,6 +28,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## CSV parsing
+
+The CLI bundles `csv-parse`, copyright (c) 2010 Adaltas, under the MIT license reproduced above.
+
 ## Fonts
 
 Geist is self-hosted through `@fontsource-variable/geist` under the SIL Open Font License 1.1. Its complete notice is included in `static/geist-license.txt`.

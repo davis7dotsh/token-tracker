@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), Muse, and Cursor Cloud Agents. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), Muse, and Cursor. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
 
 The dashboard can run as a self-hosted service, e.g. at [https://tracker.example.ts.net:10007](https://tracker.example.ts.net:10007) on a Tailscale network.
 
@@ -193,16 +193,28 @@ The dashboard runs as a separate Bun server. Native `serve` launches the package
 
 ## Sources and calculations
 
-| Harness             | Default log locations                                                         | Override                   |
-| ------------------- | ----------------------------------------------------------------------------- | -------------------------- |
-| Claude Code         | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present        | `CLAUDE_CONFIG_DIR`        |
-| Codex               | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`       | `CODEX_HOME`               |
-| Pi                  | `~/.pi/agent/sessions/**/*.jsonl`                                             | `PI_CODING_AGENT_DIR`      |
-| Grok Build          | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback             | `GROK_HOME`                |
-| Muse                | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`) | `MUSE_HOME`                |
-| Cursor Cloud Agents | Private snapshot from the official Cloud Agents API (opt-in)                  | `TOKEN_TRACKER_CONFIG_DIR` |
+| Harness     | Default log locations                                                         | Override                   |
+| ----------- | ----------------------------------------------------------------------------- | -------------------------- |
+| Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present        | `CLAUDE_CONFIG_DIR`        |
+| Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`       | `CODEX_HOME`               |
+| Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                             | `PI_CODING_AGENT_DIR`      |
+| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback             | `GROK_HOME`                |
+| Muse        | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`) | `MUSE_HOME`                |
+| Cursor      | Local personal billing CSV import or Cloud Agents API snapshot (opt-in)       | `TOKEN_TRACKER_CONFIG_DIR` |
 
 File-source directory overrides accept comma-separated roots. Malformed records are skipped with diagnostics; incomplete JSONL records are reread on later checks. Collection does not follow arbitrary nested directory symlinks.
+
+### Cursor billing reports
+
+For account token usage, download a **personal unified usage CSV** and import it on **one collector**:
+
+```sh
+token-tracker cursor import path/to/personal-unified-usage.csv
+```
+
+No API key is needed. Only `Product=cursor` usage items count; Grok API and bot items are excluded. Tokens are dated by billing event time and include input, output, cache reads and writes. Blank models stay unknown. Billing items do not identify sessions or request counts and aren't treated as spend estimates. Email and principal fields are not retained.
+
+Import additional exports to cover more dates. Billing item IDs deduplicate overlapping exports; a newer export replaces an item with the same ID. Switching to billing keeps the agent snapshot but excludes **all** agent totals, even outside the report dates, because the sources cannot be reliably joined. To switch back, explicitly run `cursor connect`; `cursor sync` won't silently replace billing. On paired collectors run the regular device sync to publish the change.
 
 ### Cursor Cloud Agents
 

@@ -1,7 +1,8 @@
 import { Database } from 'bun:sqlite';
 import { join } from 'node:path';
 import { Console, Effect, FileSystem, Redacted, Schedule, Schema, Stdio, Stream } from 'effect';
-import { Command, Flag, Prompt } from 'effect/cli';
+import { Argument, Command, Flag, Prompt } from 'effect/cli';
+import { parseCursorBilling } from '../lib/cursor/billing';
 import { CursorApiError, fetchCursorUsage } from '../lib/cursor/cloud';
 import { cursorSnapshotName, readCursorSnapshot, type CursorSnapshot } from '../lib/server/usage/cursor-snapshot';
 import { tokenTotal } from '../lib/server/usage/parsers';
@@ -81,23 +82,40 @@ export const mergeCursorSnapshot = (
   const refreshedAgents = new Set(fresh.agentIds);
   const retracted = new Set(previous?.retractedIds ?? []);
   const events = [...fresh.events];
-  for (const event of previous?.events ?? []) {
+  const switching = previous?.source === 'billing';
+  if (switching) for (const event of previous.events) retracted.add(event.id);
+  for (const event of (switching ? previous.inactiveEvents : previous?.events) ?? []) {
     if (refreshedAgents.has(event.sessionId)) retracted.add(event.id);
     else events.push(event); // Disappearance from the API isn't evidence of deletion.
   }
-  for (const event of fresh.events) retracted.delete(event.id);
+  for (const event of events) retracted.delete(event.id);
+  const inactiveEvents = switching ? previous.events : previous?.inactiveEvents;
   const warnings = fresh.zeroRuns
     ? [
         `Cursor returned zero recorded tokens for ${fresh.zeroRuns} cloud run(s). The agent API is not an account usage ledger.`,
       ]
     : [];
-  return { version: 1, syncedAt, events, warnings, ...(retracted.size ? { retractedIds: [...retracted] } : {}) };
+  return {
+    version: 1,
+    syncedAt,
+    events,
+    ...(inactiveEvents ? { inactiveEvents } : {}),
+    warnings,
+    ...(retracted.size ? { retractedIds: [...retracted] } : {}),
+  };
 };
 
 const refresh = Effect.fn('cli.refreshCursor')(function* (providedKey?: Redacted.Redacted) {
   yield* cursorLock;
-  const key = providedKey ?? (yield* readKey);
   const previous = yield* readCursorSnapshot();
+  if (!providedKey && previous?.source === 'billing')
+    return yield* Effect.fail(
+      new CliFailure({
+        message:
+          'Billing CSV is active. Import a newer export, or explicitly run cursor connect to switch back to cloud agents.',
+      }),
+    );
+  const key = providedKey ?? (yield* readKey);
   yield* Console.log('Reading Cursor cloud agent history…');
   const fresh = yield* Effect.tryPromise({
     try: async (signal) => {
@@ -185,7 +203,48 @@ const disconnect = Command.make('disconnect', {}, () =>
   ),
 ).pipe(Command.withDescription('Forget the saved Cursor key without deleting usage history.'));
 
+const importBilling = Command.make('import', { file: Argument.String('file') }, ({ file }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* cursorLock;
+      const fs = yield* FileSystem.FileSystem;
+      const text = yield* fs.readFileString(file);
+      const incoming = yield* Effect.try({
+        try: () => parseCursorBilling(text),
+        catch: (error) =>
+          new CliFailure({ message: error instanceof Error ? error.message : 'Could not parse billing CSV.' }),
+      });
+      const previous = yield* readCursorSnapshot();
+      const billingActive = previous?.source === 'billing';
+      const records = new Map(
+        (billingActive ? previous.events : (previous?.inactiveEvents ?? [])).map((event) => [event.id, event]),
+      );
+      for (const event of incoming) records.set(event.id, event);
+      const retracted = new Set(previous?.retractedIds);
+      if (!billingActive) for (const event of previous?.events ?? []) retracted.add(event.id);
+      for (const id of records.keys()) retracted.delete(id);
+      const snapshot: CursorSnapshot = {
+        version: 1,
+        source: 'billing',
+        syncedAt: new Date().toISOString(),
+        events: [...records.values()],
+        inactiveEvents: (billingActive ? previous.inactiveEvents : previous?.events) ?? [],
+        retractedIds: [...retracted],
+        warnings: [],
+      };
+      yield* writePrivateJson(cursorSnapshotName, snapshot);
+      yield* Console.log(
+        `Billing CSV active: ${records.size} Cursor billing items, ${snapshot.events.reduce((sum, event) => sum + tokenTotal(event), 0).toLocaleString('en-US')} tokens. Cloud history is kept separately, not added.`,
+      );
+    }),
+  ),
+).pipe(
+  Command.withDescription(
+    'Use Cursor billing records from a personal unified usage CSV instead of cloud-agent totals. Repeated exports are deduplicated.',
+  ),
+);
+
 export const cursor = Command.make('cursor').pipe(
-  Command.withDescription('Import usage from the Cursor Cloud Agents API.'),
-  Command.withSubcommands([connect, sync, disconnect]),
+  Command.withDescription('Import Cursor usage from a billing CSV or the Cloud Agents API.'),
+  Command.withSubcommands([connect, sync, importBilling, disconnect]),
 );

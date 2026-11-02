@@ -44,7 +44,7 @@ const accumulator = () => {
     totals.costUSD += event.costUsd;
     if (!event.costKnown) totals.unpricedTokens += tokens;
     totals.requests += event.requests ?? 1;
-    sessions.add(key);
+    if (event.sessionId) sessions.add(key);
   };
   const finish = () => ({
     ...totals,
@@ -332,6 +332,8 @@ const aggregateDashboard = (
       const hour = Math.floor((millis - todayMillis) / 3_600_000);
       addBucket(hourlyGroups, hour, event, eventProvider, key, tokens);
     }
+    // Billing exports have event IDs but no conversation identity.
+    if (!event.sessionId) continue;
     let session = sessions.get(key);
     if (!session) {
       session = {

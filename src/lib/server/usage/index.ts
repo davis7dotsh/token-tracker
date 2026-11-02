@@ -249,6 +249,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
       harness: 'cursor',
       path: snapshotPath,
       syncedAt: snapshot.syncedAt,
+      cursorSource: snapshot.source ?? 'cloud',
       files: 1,
       events: snapshot.events.length,
       status: snapshot.warnings.length ? 'partial' : snapshot.events.length ? 'ready' : 'empty',

@@ -50,6 +50,7 @@ export const SourceStatus = Schema.Struct({
   path: Schema.String,
   files: Schema.Number,
   syncedAt: Schema.optionalKey(Timestamp),
+  cursorSource: Schema.optionalKey(Schema.Literals(['billing', 'cloud'])),
   events: Schema.Number,
   status: Schema.Literals(['missing', 'empty', 'ready', 'partial', 'error']),
   error: Schema.optionalKey(Schema.String),

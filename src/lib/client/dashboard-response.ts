@@ -64,6 +64,7 @@ const source = (value: unknown) =>
   fields(value, ['files', 'events'], number) &&
   member(value.status, sourceStatuses) &&
   optional(value.syncedAt, string) &&
+  optional(value.cursorSource, (item) => item === 'cloud' || item === 'billing') &&
   optional(value.error, string);
 const filters = (value: unknown) =>
   record(value) &&

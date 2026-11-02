@@ -8,7 +8,7 @@ export const categoryNames: Record<string, string> = {
   pi: 'Pi',
   grok: 'Grok Build',
   muse: 'Muse',
-  cursor: 'Cursor Cloud Agents',
+  cursor: 'Cursor',
   openai: 'OpenAI',
   anthropic: 'Anthropic',
   google: 'Google',

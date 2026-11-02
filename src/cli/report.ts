@@ -15,7 +15,7 @@ const harnessName = (value: string) =>
     pi: 'Pi',
     grok: 'Grok Build',
     muse: 'Muse',
-    cursor: 'Cursor Cloud Agents',
+    cursor: 'Cursor',
   })[value] ?? value;
 
 export const formatReport = (report: DashboardResponse) => {

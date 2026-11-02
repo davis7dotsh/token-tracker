@@ -283,6 +283,11 @@
     const selected = query.harnesses ?? data?.filters.harnesses;
     return selected?.length === 1 && selected[0] === 'cursor';
   });
+  const billingOnly = $derived(
+    onlyCursor &&
+      data?.sources.some((source) => source.cursorSource === 'billing') &&
+      !data?.sources.some((source) => source.harness === 'cursor' && source.cursorSource !== 'billing'),
+  );
   const requestCount = $derived.by(() => {
     if (!data) return 'Across your harnesses';
     const hasCursor = data.harnesses.some((row) => row.name === 'cursor');
@@ -669,8 +674,9 @@
 
     <section class="metrics" aria-label="Usage summary" aria-busy={loading}>
       <div class="metric">
-        <span class="metric-label">{onlyCursor ? 'Cloud agent tokens reported' : 'Total tokens'}</span><strong
-          class={['metric-value', !data && loading && 'skeleton']}
+        <span class="metric-label"
+          >{billingOnly ? 'Cursor billing tokens' : onlyCursor ? 'Reported Cursor tokens' : 'Total tokens'}</span
+        ><strong class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? compact.format(totals.tokens) : '—'}</strong
         ><span class="metric-detail"
           >{totals ? `${integer.format(totals.tokens)} tokens` : 'Input, output & cache'}</span
@@ -693,7 +699,7 @@
       </div>
       <div class="metric">
         <span class="metric-label">Sessions</span><strong class={['metric-value', !data && loading && 'skeleton']}
-          >{totals ? integer.format(totals.sessions) : '—'}</strong
+          >{billingOnly && !totals?.sessions ? 'Not reported' : totals ? integer.format(totals.sessions) : '—'}</strong
         ><span class="metric-detail">{requestCount}</span>
       </div>
       <div class="metric">

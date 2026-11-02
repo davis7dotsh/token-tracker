@@ -11,12 +11,15 @@ export const cursorSnapshotPath = (home?: string) =>
 // This file is an accounting source, not a connection configuration. The hub
 // and read-only commands never open the key file or contact Cursor.
 const cursorId = Schema.String.check(Schema.isStartingWith('cursor:'));
+const cursorEvents = Schema.Array(
+  UsageEvent.check(Schema.makeFilter((event) => event.harness === 'cursor' && event.id.startsWith('cursor:'))),
+);
 export const CursorSnapshot = Schema.Struct({
   version: Schema.Literal(1),
   syncedAt: UsageEvent.fields.timestamp,
-  events: Schema.Array(
-    UsageEvent.check(Schema.makeFilter((event) => event.harness === 'cursor' && event.id.startsWith('cursor:'))),
-  ),
+  events: cursorEvents,
+  source: Schema.optionalKey(Schema.Literals(['cloud', 'billing'])),
+  inactiveEvents: Schema.optionalKey(cursorEvents),
   warnings: Schema.Array(Schema.String),
   retractedIds: Schema.optionalKey(Schema.Array(cursorId)),
 });

@@ -46,6 +46,7 @@
     "@effect/sql-sqlite-bun": "4.0.2",
     "@fontsource-variable/geist": "5.3.0",
     "@js-temporal/polyfill": "^0.5.1",
+    "csv-parse": "7.0.3",
     "d3": "7.9.0",
     "effect": "4.0.2",
     "runed": "0.37.1"
