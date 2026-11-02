@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), and Muse. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), Muse, and Cursor Cloud Agents. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
 
 The dashboard can run as a self-hosted service, e.g. at [https://tracker.example.ts.net:10007](https://tracker.example.ts.net:10007) on a Tailscale network.
 
@@ -193,15 +193,35 @@ The dashboard runs as a separate Bun server. Native `serve` launches the package
 
 ## Sources and calculations
 
-| Harness     | Default log locations                                                         | Override              |
-| ----------- | ----------------------------------------------------------------------------- | --------------------- |
-| Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present        | `CLAUDE_CONFIG_DIR`   |
-| Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`       | `CODEX_HOME`          |
-| Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                             | `PI_CODING_AGENT_DIR` |
-| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback             | `GROK_HOME`           |
-| Muse        | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`) | `MUSE_HOME`           |
+| Harness             | Default log locations                                                         | Override                   |
+| ------------------- | ----------------------------------------------------------------------------- | -------------------------- |
+| Claude Code         | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present        | `CLAUDE_CONFIG_DIR`        |
+| Codex               | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`       | `CODEX_HOME`               |
+| Pi                  | `~/.pi/agent/sessions/**/*.jsonl`                                             | `PI_CODING_AGENT_DIR`      |
+| Grok Build          | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback             | `GROK_HOME`                |
+| Muse                | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`) | `MUSE_HOME`                |
+| Cursor Cloud Agents | Private snapshot from the official Cloud Agents API (opt-in)                  | `TOKEN_TRACKER_CONFIG_DIR` |
 
-Overrides accept comma-separated roots. Malformed records are skipped with diagnostics; incomplete JSONL records are reread on later checks. Collection does not follow arbitrary nested directory symlinks.
+File-source directory overrides accept comma-separated roots. Malformed records are skipped with diagnostics; incomplete JSONL records are reread on later checks. Collection does not follow arbitrary nested directory symlinks.
+
+### Cursor Cloud Agents
+
+On **one collector** (or the self-hosted dashboard machine), sign in to [Cursor → API Keys](https://cursor.com/dashboard/api) and create a **user** key with agent read access. You don't need to run the Cursor editor on that machine.
+
+```sh
+token-tracker cursor connect          # hidden key prompt; imports immediately
+token-tracker check --harness cursor --range all
+token-tracker cursor sync             # refresh once; add --watch to repeat in the foreground
+token-tracker cursor disconnect       # forget the local key; keep imported history
+```
+
+For a one-off import without storing a key, supply `CURSOR_API_KEY` privately to `cursor sync` instead. Never put a key in a command argument or commit it. The key stays on the collector (mode `0600` on POSIX). To revoke access, also revoke the key at Cursor. `cursor sync --watch` defaults to 15 minutes between completed imports. Regular `check`, dashboard reads, and device `sync` use the last local snapshot without contacting Cursor. A paired collector pushes those records on its next regular sync; update the receiving hub first. A standalone hub reads the snapshot directly. No new background service is installed.
+
+- **Coverage:** The [v1 Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints.md#get-agent-usage) lists the authenticated user's agents, including archived ones. We import Cursor-hosted runs, not IDE/Tab usage or self-hosted pool/machine runs. Agents no longer visible are retained if imported before. An unsuccessful refresh doesn't replace the last good snapshot.
+- **Counting:** Input, output, cache reads and cache writes add up to Cursor's reported total. Runs are dated to run creation; the difference between an agent's total and its run totals (e.g. side chats and subagents) is counted once on the agent's creation date. This is not per-request timing. Later refreshes replace corrected records rather than adding them again.
+- **Privacy and limits:** Only accounting metadata and IDs are retained, not prompts, replies, generated agent names, or repository contents. The REST usage response doesn't identify the model, bill, reasoning split, or number of model calls; the tracker doesn't infer these from token counts. This is a [public-beta API for plans with Cloud Agents](https://cursor.com/docs/api.md). Cursor's separate [enterprise usage-events API](https://cursor.com/docs/account/teams/admin-api.md#get-usage-events-data) offers billing/model detail but needs team access and overlaps these tokens; the tracker doesn't add both feeds. To spot-check an agent, compare its all-time tracker total to `totalUsage.totalTokens` from `GET /v1/agents/{id}/usage`, not to total account spend.
+
+### Local harness logs
 
 Grok Build's native CLI stores a compact accounting ledger for each session under its [session directory](https://docs.x.ai/build/features/sessions). `GROK_HOME` can point to the Grok home directory or directly to its `sessions` directory. The collector prefers `usage.json` per-turn/model counters and reads `summary.json` session metadata, with the parent directory's `.cwd` file as a fallback for long project paths. If the ledger is missing or invalid, it streams accounting updates from the session's legacy `updates.jsonl`, including history written by Grok Build 1.0.13. Only accounting and session metadata are cached or uploaded; conversation text is discarded.
 

@@ -10,7 +10,7 @@ const strings = (value: unknown) => array(value, string);
 const fields = (value: Record<string, unknown>, keys: readonly string[], check: (item: unknown) => boolean) =>
   keys.every((key) => check(value[key]));
 const optional = (value: unknown, check: (item: unknown) => boolean) => value === undefined || check(value);
-const harnesses = { claude: true, codex: true, pi: true, grok: true, muse: true } satisfies Record<
+const harnesses = { claude: true, codex: true, pi: true, grok: true, muse: true, cursor: true } satisfies Record<
   DashboardResponse['sessions'][number]['harness'],
   boolean
 >;
@@ -63,6 +63,7 @@ const source = (value: unknown) =>
   string(value.path) &&
   fields(value, ['files', 'events'], number) &&
   member(value.status, sourceStatuses) &&
+  optional(value.syncedAt, string) &&
   optional(value.error, string);
 const filters = (value: unknown) =>
   record(value) &&

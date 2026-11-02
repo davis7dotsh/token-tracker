@@ -7,6 +7,7 @@ import { getLocalDevice } from '../lib/server/rpc/identity';
 import { buildDashboard, collectUsage, resolveRepository } from '../lib/server/usage';
 import { resolveDisplayModel } from '../lib/server/usage/pricing';
 import { loadPricing } from '../lib/server/usage/pricing-runtime';
+import { cursor } from './cursor';
 import { formatReport } from './report';
 import { compiledBinary, installSchedule, removeSchedule } from './scheduler';
 import {
@@ -317,6 +318,6 @@ const serve = Command.make(
 ).pipe(Command.withDescription('Start the SvelteKit dashboard through Bun.'));
 
 export const cli = makeCheckCommand('token-tracker').pipe(
-  Command.withDescription('Token usage for Claude Code, Codex, Pi, Grok Build, and Muse.'),
-  Command.withSubcommands([check, connect, sync, status, disconnect, serve]),
+  Command.withDescription('Token usage for Claude Code, Codex, Pi, Grok Build, Muse, and Cursor.'),
+  Command.withSubcommands([check, connect, sync, status, disconnect, serve, cursor]),
 );

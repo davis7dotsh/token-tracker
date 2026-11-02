@@ -10,7 +10,7 @@ import {
   readParsedCache,
   writeParsedCache,
 } from './cache';
-import { estimateCost, resolveDisplayModel } from './pricing';
+import { estimateCost, repriceEvent, resolveDisplayModel } from './pricing';
 import { loadPricing } from './pricing-runtime';
 import { makeRepositoryResolver } from './repository';
 import { collectGrokFiles } from './grok';
@@ -19,12 +19,15 @@ import { readUsageDirectory } from './files';
 import { usageSourceRoots, type SourceRootOptions } from './source-roots';
 import { rememberRepositoryDependencies } from './revision-dependencies';
 
+import { cursorSnapshotPath, readCursorSnapshot } from './cursor-snapshot';
+
 export { buildDashboard, provider, validateTimezone } from './dashboard';
 export { canonicalRepository, resolveRepository } from './repository';
 export { tokenTotal } from './parsers';
 
 export type CollectionOptions = SourceRootOptions & {
   deviceId?: string;
+  cursorSnapshotFile?: string;
   pricingPolicy?: PricingPolicy;
   t3DataDirectory?: string;
   t3Url?: string;
@@ -202,43 +205,74 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
     }
   }
   const unknownModels = new Set<string>();
-  const events: UsageEvent[] = entries
-    .map((entry) => {
-      const cost = estimateCost(entry.event, entry.cacheWrite1h, entry.tier, pricingPolicy);
-      if (!cost.costKnown) unknownModels.add(entry.event.model);
-      sources[entry.source].events++;
-      const key = t3MetadataKey(entry.event);
-      const metadata = t3Metadata.get(key);
-      const repository = repositories.get(entry.event.project);
-      return {
-        ...entry.event,
-        ...(metadata?.sessionTitle ? { sessionTitle: metadata.sessionTitle } : {}),
-        ...(metadata?.projectName ? { projectName: metadata.projectName } : {}),
-        ...(metadata?.t3ThreadId ? { t3ThreadId: metadata.t3ThreadId } : {}),
-        ...(metadata?.t3ThreadUrl !== undefined ? { t3ThreadUrl: metadata.t3ThreadUrl } : {}),
-        ...cost,
-        rawModel: entry.event.model,
-        model: resolveDisplayModel(entry.event.model, pricingPolicy),
-        serviceTier: entry.tier,
-        cacheWrite1hTokens: entry.cacheWrite1h,
-        repository:
-          repository && !repository.startsWith('local:')
-            ? repository
-            : (sessionRepositories.get(key) ?? repository ?? null),
-        ...(options.deviceId ? { deviceId: options.deviceId } : {}),
-      };
-    })
-    .sort((left, right) =>
-      left.timestamp < right.timestamp
-        ? -1
-        : left.timestamp > right.timestamp
-          ? 1
-          : left.id < right.id
-            ? -1
-            : left.id > right.id
-              ? 1
-              : 0,
-    );
+  const events: UsageEvent[] = entries.map((entry) => {
+    const cost = estimateCost(entry.event, entry.cacheWrite1h, entry.tier, pricingPolicy);
+    if (!cost.costKnown) unknownModels.add(entry.event.model);
+    sources[entry.source].events++;
+    const key = t3MetadataKey(entry.event);
+    const metadata = t3Metadata.get(key);
+    const repository = repositories.get(entry.event.project);
+    return {
+      ...entry.event,
+      ...(metadata?.sessionTitle ? { sessionTitle: metadata.sessionTitle } : {}),
+      ...(metadata?.projectName ? { projectName: metadata.projectName } : {}),
+      ...(metadata?.t3ThreadId ? { t3ThreadId: metadata.t3ThreadId } : {}),
+      ...(metadata?.t3ThreadUrl !== undefined ? { t3ThreadUrl: metadata.t3ThreadUrl } : {}),
+      ...cost,
+      rawModel: entry.event.model,
+      model: resolveDisplayModel(entry.event.model, pricingPolicy),
+      serviceTier: entry.tier,
+      cacheWrite1hTokens: entry.cacheWrite1h,
+      repository:
+        repository && !repository.startsWith('local:')
+          ? repository
+          : (sessionRepositories.get(key) ?? repository ?? null),
+      ...(options.deviceId ? { deviceId: options.deviceId } : {}),
+    };
+  });
+  const snapshotPath = options.cursorSnapshotFile ?? cursorSnapshotPath(home);
+  const cursor = yield* Effect.result(readCursorSnapshot(snapshotPath));
+  if (Result.isFailure(cursor)) {
+    markIncomplete();
+    sources.push({
+      harness: 'cursor',
+      path: snapshotPath,
+      files: 1,
+      events: 0,
+      status: 'error',
+      error: cursor.failure.message,
+    });
+    warnings.push(`cursor: ${cursor.failure.message}`);
+  } else if (cursor.success) {
+    const snapshot = cursor.success;
+    sources.push({
+      harness: 'cursor',
+      path: snapshotPath,
+      syncedAt: snapshot.syncedAt,
+      files: 1,
+      events: snapshot.events.length,
+      status: snapshot.warnings.length ? 'partial' : snapshot.events.length ? 'ready' : 'empty',
+      ...(snapshot.warnings.length ? { error: snapshot.warnings.join(' ') } : {}),
+    });
+    warnings.push(...snapshot.warnings);
+    retractedIds.push(...(snapshot.retractedIds ?? []));
+    for (const record of snapshot.events) {
+      const event = repriceEvent(record, pricingPolicy);
+      if (!event.costKnown) unknownModels.add(event.model);
+      events.push(options.deviceId ? { ...event, deviceId: options.deviceId } : event);
+    }
+  }
+  events.sort((left, right) =>
+    left.timestamp < right.timestamp
+      ? -1
+      : left.timestamp > right.timestamp
+        ? 1
+        : left.id < right.id
+          ? -1
+          : left.id > right.id
+            ? 1
+            : 0,
+  );
   if (unknownModels.size)
     warnings.push(
       `No reliable API price for: ${[...unknownModels].sort().join(', ')}. These tokens are included, but their costs are unavailable.`,

@@ -30,6 +30,12 @@ export const nativeThreadUrl = (session: Pick<Session, 't3ThreadId' | 't3ThreadU
   }
 };
 
+// Build a first-party link from the opaque ID, not an API-supplied redirect or share token.
+export const cursorAgentUrl = (session: Pick<Session, 'harness' | 'id'>) =>
+  session.harness === 'cursor' && /^[a-zA-Z0-9_-]{1,256}$/.test(session.id)
+    ? `https://cursor.com/agents/${session.id}`
+    : undefined;
+
 export const repositoryWebUrl = (repository: string | null) => {
   if (!repository || repository.startsWith('local:')) return undefined;
   const value = safeWebUrl(`https://${repository}`);

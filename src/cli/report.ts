@@ -9,7 +9,14 @@ const money = (value: number) =>
     maximumFractionDigits: 2,
   }).format(value);
 const harnessName = (value: string) =>
-  ({ claude: 'Claude Code', codex: 'Codex', pi: 'Pi', grok: 'Grok Build', muse: 'Muse' })[value] ?? value;
+  ({
+    claude: 'Claude Code',
+    codex: 'Codex',
+    pi: 'Pi',
+    grok: 'Grok Build',
+    muse: 'Muse',
+    cursor: 'Cursor Cloud Agents',
+  })[value] ?? value;
 
 export const formatReport = (report: DashboardResponse) => {
   const row = (name: string, count: number, cost: number) =>

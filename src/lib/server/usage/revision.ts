@@ -7,6 +7,7 @@ import { CollectionError, type UsageResult } from '../../shared/domain';
 import type { CollectionOptions } from './index';
 import { makeRepositoryPathResolver, skippedRepositoryPath, type RepositoryOptions } from './repository';
 import { usageRepositoryDependencies, usageSnapshotIncomplete } from './revision-dependencies';
+import { cursorSnapshotPath } from './cursor-snapshot';
 import { usageSourceRoots } from './source-roots';
 
 const missing = (error: unknown) =>
@@ -91,6 +92,14 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
               observationUnavailable = true;
             })),
           );
+        }
+        const snapshot = options.cursorSnapshotFile ?? cursorSnapshotPath(home);
+        try {
+          const info = await fileInfo(snapshot, true);
+          inventoryRecords.push(`cursor:${snapshot}:${info ? fingerprint(info) : 'missing'}`);
+        } catch {
+          observationUnavailable = true;
+          inventoryRecords.push(`cursor:${snapshot}:unavailable`);
         }
         const configured = options.t3DataDirectory ?? process.env.TOKEN_TRACKER_T3_DATA_DIR;
         const root = configured?.trim() || path.join(home, '.t3', 'userdata');

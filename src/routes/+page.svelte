@@ -18,6 +18,7 @@
   import { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import { relativeTime as relative } from '#lib/client/format.ts';
   import {
+    cursorAgentUrl,
     nativeThreadUrl,
     projectLabel,
     projectLabels,
@@ -278,6 +279,12 @@
     data ? `${formatDate(data.period.start)} – ${formatDate(data.period.end)}` : 'Reading usage…',
   );
   const totals = $derived(data?.totals);
+  const requestCount = $derived.by(() => {
+    if (!data) return 'Across your harnesses';
+    const hasCursor = data.harnesses.some((row) => row.name === 'cursor');
+    if (hasCursor && data.harnesses.length === 1) return 'Request count unavailable';
+    return `${integer.format(data.totals.requests)} ${hasCursor ? 'reported requests' : 'requests'}`;
+  });
   const unpriced = $derived(totals?.unpricedTokens ?? 0);
   const unpricedModels = $derived(data?.models.filter((row) => row.unpricedTokens > 0).length ?? 0);
   const deviceNames = $derived(new Map(devices.map((device) => [device.id, device.name])));
@@ -471,6 +478,7 @@
         't3_thread_url',
         't3_native_thread_url',
         'repository_url',
+        'cursor_agent_url',
       ],
       ...data.sessions.map((session) => [
         session.id,
@@ -489,6 +497,7 @@
         safeWebUrl(session.t3ThreadUrl) ?? '',
         nativeThreadUrl(session) ?? '',
         repositoryWebUrl(session.repository) ?? '',
+        cursorAgentUrl(session) ?? '',
       ]),
     ];
     const url = URL.createObjectURL(
@@ -680,9 +689,7 @@
       <div class="metric">
         <span class="metric-label">Sessions</span><strong class={['metric-value', !data && loading && 'skeleton']}
           >{totals ? integer.format(totals.sessions) : '—'}</strong
-        ><span class="metric-detail"
-          >{totals ? `${integer.format(totals.requests)} requests` : 'Across your harnesses'}</span
-        >
+        ><span class="metric-detail">{requestCount}</span>
       </div>
       <div class="metric">
         <span class="metric-label">Cache hit rate</span><strong class={['metric-value', !data && loading && 'skeleton']}
@@ -877,11 +884,12 @@
             >{#each sessions as session (`${session.deviceId}:${session.harness}:${session.id}`)}
               {@const threadUrl = safeWebUrl(session.t3ThreadUrl)}
               {@const nativeUrl = nativeThreadUrl(session)}
+              {@const agentUrl = cursorAgentUrl(session)}
               {@const repoUrl = repositoryWebUrl(session.repository)}
               {@const pathName = session.project.split(/[\\/]/).filter(Boolean).at(-1) ?? session.project}
-              {@const name = sessionDisplayName(session)}
+              {@const name = agentUrl && !session.sessionTitle ? `Agent ${session.id}` : sessionDisplayName(session)}
               {@const hasTitle = Boolean(session.sessionTitle || session.projectName)}
-              {@const primaryUrl = nativeUrl ?? threadUrl ?? (hasTitle ? undefined : repoUrl)}
+              {@const primaryUrl = nativeUrl ?? threadUrl ?? agentUrl ?? (hasTitle ? undefined : repoUrl)}
               <tr
                 ><td
                   ><div class="session-project" title={name}>
@@ -889,7 +897,7 @@
                         href={primaryUrl}
                         target={nativeUrl ? undefined : '_blank'}
                         rel="noopener noreferrer"
-                        aria-label={`${threadUrl ? 'Open T3 Code thread' : 'Open repository'}: ${name}`}
+                        aria-label={`${threadUrl ? 'Open T3 Code thread' : agentUrl ? 'Open Cursor agent' : 'Open repository'}: ${name}`}
                       >
                         <span>{name}</span><Icon name="external" size={14} />
                       </a>{:else}<span>{name}</span>{/if}
@@ -898,7 +906,7 @@
                     class="session-context"
                     title={hasTitle ? (session.repository ?? session.project) : session.project}
                   >
-                    {#if (hasTitle || threadUrl) && repoUrl}<a
+                    {#if (hasTitle || threadUrl || agentUrl) && repoUrl}<a
                         href={repoUrl}
                         target="_blank"
                         rel="noopener noreferrer"

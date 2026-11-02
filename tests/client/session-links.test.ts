@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import {
+  cursorAgentUrl,
   nativeThreadUrl,
   projectLabel,
   projectLabels,
@@ -54,6 +55,13 @@ test('native links preserve the environment and namespaced thread across public 
     ).toBe(`t3code://threads/${environment}/${thread}`);
   }
   expect(safeWebUrl(`t3code://threads/${environment}/${thread}`)).toBeUndefined();
+});
+
+test('Cursor links point only to a single agent on Cursor and never include shared credentials', () => {
+  expect(cursorAgentUrl({ harness: 'cursor', id: 'bc-123' })).toBe('https://cursor.com/agents/bc-123');
+  expect(cursorAgentUrl({ harness: 'pi', id: 'bc-123' })).toBeUndefined();
+  for (const id of ['../billing', 'a/b', 'a?share=secret', '//evil.example', ''])
+    expect(cursorAgentUrl({ harness: 'cursor', id })).toBeUndefined();
 });
 
 test('native links require a coherent binding and reject malformed or cleared web routes', () => {

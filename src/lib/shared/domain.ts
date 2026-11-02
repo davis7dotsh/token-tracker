@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
 
-export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok', 'muse']);
+export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok', 'muse', 'cursor']);
 export const UsageRange = Schema.Literals(['today', '7d', '30d', '6m', '90d', 'all']);
 const TokenCount = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
 const ApiCost = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
@@ -49,6 +49,7 @@ export const SourceStatus = Schema.Struct({
   harness: Harness,
   path: Schema.String,
   files: Schema.Number,
+  syncedAt: Schema.optionalKey(Timestamp),
   events: Schema.Number,
   status: Schema.Literals(['missing', 'empty', 'ready', 'partial', 'error']),
   error: Schema.optionalKey(Schema.String),

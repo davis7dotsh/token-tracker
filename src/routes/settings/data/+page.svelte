@@ -53,6 +53,29 @@
   </div>
 </div>
 
+<details class="cursor-setup" id="cursor">
+  <summary>Set up Cursor Cloud Agents</summary>
+  <ol>
+    <li>
+      In <a href="https://cursor.com/dashboard/api" target="_blank" rel="noopener noreferrer">Cursor’s API keys page</a
+      >, create a user API key with permission to read your cloud agents.
+    </li>
+    <li>
+      On one tracker machine, run <code>token-tracker cursor connect</code>. Paste the key into the hidden terminal
+      prompt to import usage.
+    </li>
+    <li>
+      Refresh with <code>token-tracker cursor sync</code>, or leave <code>token-tracker cursor sync --watch</code> running
+      for ongoing updates.
+    </li>
+  </ol>
+  <p>
+    Run tokens are counted on the run’s creation date. Any remaining usage without a run is counted on the agent’s
+    creation date. Cursor does not report model names or request counts here. To forget the saved key without deleting
+    history, run <code>token-tracker cursor disconnect</code>.
+  </p>
+</details>
+
 <div class="sources-list" aria-busy={loading}>
   {#if data}
     {#each data.sources as source (`${source.harness}:${source.path}`)}<div class="source-row">
@@ -63,7 +86,10 @@
             {categoryNames[source.harness] ?? source.harness}</strong
           ><span class={['source-status', source.status]}>{source.status}</span>
         </div>
-        <code>{source.path}</code><span>{source.files} files · {integer.format(source.events)} usage records</span
+        <code>{source.path}</code><span
+          >{#if source.harness === 'cursor' && source.syncedAt}Last imported <time datetime={source.syncedAt}
+              >{new Date(source.syncedAt).toLocaleString()}</time
+            >{:else}{source.files} {source.files === 1 ? 'file' : 'files'}{/if} · {integer.format(source.events)} usage records</span
         >{#if source.error}<p>{source.error}</p>{/if}
       </div>{:else}<p class="settings-empty">No data sources reported</p>{/each}
   {:else if loading}
@@ -84,3 +110,35 @@
     </p>
     {#each data.warnings as warning (warning)}<p>{warning}</p>{/each}
   </div>{/if}
+
+<style>
+  .cursor-setup {
+    padding: 17px 0;
+    font-size: 13px;
+    line-height: 1.6;
+    border-bottom: 1px solid var(--border);
+  }
+  summary {
+    width: fit-content;
+    color: var(--ink);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  ol {
+    padding-inline-start: 22px;
+  }
+  li + li {
+    margin-top: 6px;
+  }
+  .cursor-setup p {
+    margin-bottom: 0;
+    color: var(--table-secondary);
+  }
+  a {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .cursor-setup code {
+    overflow-wrap: anywhere;
+  }
+</style>
