@@ -1,6 +1,8 @@
 <script lang="ts">
   let { name, size = 18 }: { name: string; size?: number } = $props();
   const paths: Record<string, string> = {
+    sliders: 'M3 6h18M3 12h18M3 18h18M8 3v6m8 0v6M9 15v6',
+    calendar: 'M3 5h18v16H3ZM7 3v4m10-4v4M3 10h18',
     refresh: 'M20 7v5h-5M20 12a8 8 0 1 0-2.3 5.7',
     download: 'M12 3v12m-4-4 4 4 4-4M4 15v5h16v-5',
     sun: 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0',

@@ -1,1027 +1,429 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
-  import { useSearchParams } from 'runed/kit';
+  import { exportSessions } from '#lib/client/session-export';
+  import { onMount, untrack, tick } from 'svelte';
+  import { goto } from '$app/navigation';
   import { page } from '$app/state';
+  import { makeDashboardClient } from '#lib/client/dashboard-rpc';
   import {
-    breakdownGroups,
-    dashboardRanges as ranges,
-    dashboardUrlSchemaFor,
-    encodeFilter,
-    encodeHidden,
-    filterKeys,
-    normalizedDashboardParams,
+    dashboardRanges,
     readDefaultRange,
     readHiddenProjects,
-    saveHiddenProjects,
-    usageQueryFromParams,
-  } from '#lib/client/dashboard-url.ts';
-  import { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
-  import { relativeTime as relative } from '#lib/client/format.ts';
+    decodeFilter,
+    type DashboardRange,
+  } from '#lib/client/dashboard-url';
+  import { assignChartColors } from '#lib/client/workbench-colors';
+  import { categoryNames, modelLabel } from '#lib/client/visuals';
   import {
     cursorAgentUrl,
     nativeThreadUrl,
     projectLabel,
     projectLabels,
-    repositoryWebUrl,
     safeWebUrl,
     sessionDisplayName,
-  } from '#lib/client/session-links.ts';
+  } from '#lib/client/session-links';
+  import { theme } from '#lib/client/theme.svelte';
   import {
-    categoryNames,
-    distinctSeriesColors,
-    modelLabel,
-    seriesColor,
-    type VisualGrouping,
-  } from '#lib/client/visuals.ts';
-  import type { UsageQuery, Breakdown, DashboardResponse, Device } from '#lib/shared/domain.ts';
-  import HiddenProjects from '#lib/components/HiddenProjects.svelte';
+    groupNames,
+    groups,
+    splitFrom,
+    rangeFrom,
+    filtersFrom,
+    setSelection,
+    formatValue,
+    valueOf,
+    periodOf,
+    type Group,
+    type Metric,
+    type Picked,
+  } from '#lib/client/usage-workbench';
+  import type { DashboardResponse, UsageQuery, Device } from '#lib/shared/domain';
   import Icon from '#lib/components/Icon.svelte';
-  import MultiSelect from '#lib/components/MultiSelect.svelte';
-  import ProjectPalette from '#lib/components/ProjectPalette.svelte';
-  import ThemeToggle from '#lib/components/ThemeToggle.svelte';
-
-  const integer = new Intl.NumberFormat('en-US');
-  const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
-  const currency = new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+  import Activity from '#lib/components/workbench/Activity.svelte';
+  import ChoiceMenu from '#lib/components/workbench/ChoiceMenu.svelte';
+  import ScopeDialog from '#lib/components/workbench/ScopeDialog.svelte';
+  import './workbench.css';
+  let shortcut = $state('Ctrl K');
+  const p = $derived(new URLSearchParams(page.url.search));
+  const compare = $derived(p.get('view') === 'compare');
+  const group = $derived(splitFrom(p.get('split') ?? p.get('chartBy') ?? p.get('breakdown')));
+  const metric: Metric = $derived(p.get('metric') === 'cost' ? 'costUSD' : 'tokens');
+  let defaultRange = $state<DashboardRange>('30d'),
+    timezone = $state('UTC'),
+    hidden = $state.raw<readonly string[]>([]);
+  const range = $derived(rangeFrom(p.get('range'), defaultRange));
+  const filters = $derived(filtersFrom(p));
+  const query: UsageQuery = $derived({
+    range,
+    timezone,
+    ...filters,
+    excludedProjects: p.has('excludedProjects')
+      ? decodeFilter(p.get('excludedProjects') ?? '')
+      : hidden.length
+        ? hidden
+        : undefined,
   });
-  const date = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  // A URL without `range` uses this browser's default from Settings.
-  const params = useSearchParams(dashboardUrlSchemaFor(readDefaultRange()), { noScroll: true });
-  let timezone = $state('UTC');
-  const query = $derived(usageQueryFromParams(params, timezone));
-  const queryKey = $derived(JSON.stringify(query));
-  let data = $state.raw<DashboardResponse>();
-  let devices = $state.raw<readonly Device[]>([]);
-  let loading = $state(true);
-  let error = $state('');
-  const chartMode = $derived(params.chart);
-  const metric = $derived(params.metric === 'cost' ? 'costUSD' : 'tokens');
-  const grouping = $derived(params.breakdown);
-  const showAll = $derived(params.expanded);
-  const sessionSearch = $derived(params.search);
-  const sessionPage = $derived(params.page - 1);
-  const sort = $derived(params.sort);
-  let UsageChart = $state.raw<typeof import('#lib/components/UsageChart.svelte').default>();
-  let chartModule: Promise<void> | undefined;
-  let chartError = $state('');
-  let mounted = false;
-  let client = $state.raw<ReturnType<typeof makeDashboardClient>>();
+  const key = $derived(JSON.stringify(query));
+  let data = $state.raw<DashboardResponse>(),
+    devices = $state.raw<readonly Device[]>([]),
+    client = $state.raw<ReturnType<typeof makeDashboardClient>>();
+  let loading = $state(true),
+    error = $state(''),
+    loadedKey = $state('');
   let request: AbortController | undefined;
-  let requestVersion = 0;
-  let observedQueryKey = '';
-  let dataQueryKey = $state('');
-  let dataInsightKey = $state('');
-  const insightQuery = $derived({ ...query, projects: undefined, excludedProjects: undefined });
-  const insightKey = $derived(JSON.stringify(insightQuery));
-  const deviceColors = $derived(
-    distinctSeriesColors([...devices.map((device) => device.id), ...(data?.filters.devices ?? [])]),
+  let overlay = $state.raw<{ picked?: Picked; group?: Group }>();
+  let returnTo: HTMLElement | undefined;
+  const active = $derived(groups.flatMap((g) => (filters[g] ?? []).map((v) => ({ g, v }))));
+  const projects = $derived(projectLabels(data?.filters.projects ?? []));
+  const names = $derived(new Map(devices.map((d) => [d.id, d.name])));
+  const label = (g: Group, id: string) =>
+    g === 'devices'
+      ? (names.get(id) ?? (id === 'local' ? (data?.machine ?? 'This machine') : id))
+      : g === 'projects'
+        ? (projects.get(id) ?? projectLabel(id))
+        : g === 'models'
+          ? modelLabel(id)
+          : (categoryNames[id] ?? id);
+  const ready = $derived(data && loadedKey === key);
+  const narrowed = $derived(Boolean(active.length) && groups.every((g) => data?.[g].length === 1));
+  const count = $derived(data?.sessions.length ?? 0),
+    perPage = 12;
+  const cursor = $derived(
+    Math.max(0, Math.min(Math.ceil(count / perPage) - 1, Math.floor(Number(p.get('page')) || 1) - 1)),
   );
-  const projectColors = $derived(distinctSeriesColors(data?.filters.projects ?? []));
-  const projectNames = $derived(
-    projectLabels([...(data?.filters.projects ?? []), ...(query.projects ?? []), ...(query.excludedProjects ?? [])]),
-  );
-  const hiddenProjects = $derived(query.excludedProjects ?? []);
-  const hiddenSet = $derived(new Set(hiddenProjects));
-  let projectCatalog = $state.raw<DashboardResponse>();
-  let catalogLoading = $state(false);
-  let catalogError = $state('');
-  let catalogRequest: AbortController | undefined;
-  let catalogKey = $state('');
-  let catalogFetchedAt = 0;
-  const paletteData = $derived(data?.projectInsights ? data : (projectCatalog ?? data));
-  const paletteStale = $derived(
-    (data?.projectInsights || !projectCatalog ? dataInsightKey : catalogKey) !== insightKey,
-  );
-  const paletteError = $derived(
-    (data?.projectInsights ? '' : catalogError) ||
-      (error
-        ? !paletteData
-          ? 'Could not load project insights.'
-          : paletteStale
-            ? 'Could not update insights. Showing previous filters.'
-            : 'Could not refresh insights. Showing the last update.'
-        : ''),
-  );
-  const catalogContext = $derived(
-    `${ranges.find((range) => range.value === query.range)?.label ?? query.range} · ${
-      [
-        query.harnesses &&
-          (query.harnesses.length === 1
-            ? (categoryNames[query.harnesses[0]] ?? query.harnesses[0])
-            : `${query.harnesses.length} harnesses`),
-        query.providers &&
-          (query.providers.length === 1
-            ? (categoryNames[query.providers[0]] ?? query.providers[0])
-            : `${query.providers.length} providers`),
-        query.models && (query.models.length === 1 ? modelLabel(query.models[0]) : `${query.models.length} models`),
-        query.devices &&
-          (query.devices.length === 1 ? deviceName(query.devices[0]) : `${query.devices.length} devices`),
-      ]
-        .filter(Boolean)
-        .join(' · ') || 'All harnesses, providers, models & devices'
-    }`,
-  );
-
-  async function loadProjectCatalog() {
-    if (!client) return;
-    catalogRequest?.abort();
-    if (data?.projectInsights) {
-      catalogLoading = false;
-      catalogError = '';
-      return;
-    }
-    const controller = new AbortController();
-    catalogRequest = controller;
-    const catalogQuery = insightQuery;
-    const key = JSON.stringify(catalogQuery);
-    catalogError = '';
-    if (query.projects === undefined && hiddenProjects.length === 0 && dataQueryKey === queryKey && data) {
-      projectCatalog = data;
-      catalogKey = key;
-      catalogFetchedAt = Date.now();
-      catalogLoading = false;
-      return;
-    }
-    if (catalogKey === key && projectCatalog && Date.now() - catalogFetchedAt < 60_000) {
-      catalogLoading = false;
-      return;
-    }
-    projectCatalog = undefined;
-    catalogLoading = true;
-    try {
-      const result = await client.getUsage(catalogQuery, controller.signal);
-      if (controller.signal.aborted) return;
-      projectCatalog = result;
-      catalogKey = key;
-      catalogFetchedAt = Date.now();
-    } catch {
-      if (!controller.signal.aborted) catalogError = 'Could not load project insights.';
-    } finally {
-      if (catalogRequest === controller) catalogLoading = false;
-    }
-  }
-
-  function applyProjects(projects: readonly string[] | undefined, excluded: readonly string[]) {
-    if (JSON.stringify(excluded) !== JSON.stringify(hiddenProjects)) saveHiddenProjects(excluded);
-    params.update({
-      projects: encodeFilter(projects),
-      excludedProjects: excluded.length ? encodeHidden(excluded) : 'none',
-      page: 1,
-      chartBy:
-        projects && projects.length > 1
-          ? 'projects'
-          : projects?.length === 1 && params.chartBy === 'projects'
-            ? 'models'
-            : params.chartBy,
-      breakdown:
-        projects && projects.length > 1
-          ? 'projects'
-          : projects?.length === 1 && params.breakdown === 'projects'
-            ? 'models'
-            : params.breakdown,
-    });
-  }
-
-  function categoryColor(name: string, group: VisualGrouping) {
-    return (
-      (group === 'devices' ? deviceColors.get(name) : group === 'projects' ? projectColors.get(name) : undefined) ??
-      seriesColor(name, group)
-    );
-  }
-
-  $effect(() => {
-    const url = page.shallow?.url ?? page.url;
-    untrack(() => {
-      const normalized = normalizedDashboardParams(params);
-      // An explicit empty/`none` excludedProjects means "hide nothing" and
-      // must stay in the URL as `none`; normalizing it away would let a
-      // reload restore this browser's stored hidden projects.
-      const rawExcluded = url.searchParams.get('excludedProjects');
-      const values =
-        rawExcluded === '' || rawExcluded === 'none' ? { ...normalized, excludedProjects: 'none' } : normalized;
-      const invalid = Object.entries(values).some(([key, value]) => {
-        const present = url.searchParams.getAll(key);
-        return present.length > 1 || (present.length === 1 && present[0] !== String(value));
-      });
-      if (invalid) params.update(values, { pushHistory: false });
-    });
-  });
-
-  $effect(() => {
-    const key = queryKey;
-    const ready = client !== undefined;
-    if (ready && key !== observedQueryKey) {
-      observedQueryKey = key;
-      untrack(() => void refresh());
-    }
-  });
-
-  const rangeIndex = $derived(
-    Math.max(
-      0,
-      ranges.findIndex((range) => range.value === query.range),
-    ),
-  );
-  const chips = $derived(
-    filterKeys.flatMap((key) => {
-      const selected = query[key];
-      if (selected === undefined) return [];
-      if (selected.length === 0) return [{ key, value: '__none__', label: `No ${key}`, color: '' }];
-      return selected.map((value) => ({
-        key,
-        value,
-        label:
-          key === 'devices'
-            ? deviceName(value)
-            : key === 'projects'
-              ? projectName(value)
-              : key === 'models'
-                ? modelLabel(value)
-                : (categoryNames[value] ?? value),
-        color: categoryColor(value, key),
-      }));
+  const sessionDate = $derived(
+    new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: timezone,
     }),
   );
-  const modelNames = $derived(Object.fromEntries((data?.filters.models ?? []).map((id) => [id, modelLabel(id)])));
-  const breakdown = $derived(
-    [...(data?.[grouping] ?? [])].sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name)),
-  );
-  const visibleBreakdown = $derived(showAll ? breakdown : breakdown.slice(0, 5));
-  const breakdownTotal = $derived(data?.totals[metric] ?? 0);
-  const breakdownOverview = $derived.by(() => {
-    const leading = breakdown
-      .slice(0, 5)
-      .map((row) => ({ name: row.name, value: row[metric], color: categoryColor(row.name, grouping) }));
-    const remaining = breakdown.slice(5).reduce((sum, row) => sum + row[metric], 0);
-    return remaining > 0 ? [...leading, { name: 'Other', value: remaining, color: 'var(--series-neutral)' }] : leading;
+  const rangeChoices = dashboardRanges.map((r) => ({
+    value: r.value,
+    label: r.value === '30d' ? '30 days' : r.value === '7d' ? '7 days' : r.label,
+  }));
+  let chartColors = $state.raw(new Map<Group, ReadonlyMap<string, string>>());
+  // Hold the facet order still while checking values, even when the server re-ranks the filtered breakdown.
+  let railOrder = $state.raw<Partial<Record<Group, readonly string[]>>>({});
+  const availableRail = $derived.by(() => {
+    const d = data;
+    return groups.map((g) => {
+      const options = new Set(d?.filters[g] ?? []);
+      const available = [
+        ...new Set([...(railOrder[g] ?? []).filter((v) => options.has(v)), ...options, ...(filters[g] ?? [])]),
+      ];
+      const limit = g === 'devices' ? 10 : 6;
+      return { g, items: [...new Set([...available.slice(0, limit), ...(filters[g] ?? [])])], total: available.length };
+    });
   });
-  const sessionIndex = $derived(
-    new Map(
-      (data?.sessions ?? []).map((session) => [
-        session,
-        `${session.sessionTitle ?? ''} ${session.projectName ?? ''} ${session.project} ${session.model} ${session.harness} ${session.id} ${session.repository ?? ''} ${session.t3ThreadId ?? ''}`.toLowerCase(),
-      ]),
-    ),
-  );
-  const sortedSessions = $derived(
-    [...(data?.sessions ?? [])].sort((a, b) =>
-      sort === 'tokens' ? b.tokens - a.tokens : b.lastActiveAt.localeCompare(a.lastActiveAt),
-    ),
-  );
-  const filteredSessions = $derived.by(() => {
-    const search = sessionSearch.toLowerCase();
-    return search ? sortedSessions.filter((session) => sessionIndex.get(session)?.includes(search)) : sortedSessions;
-  });
-  const pages = $derived(Math.max(1, Math.ceil(filteredSessions.length / 8)));
-  const currentPage = $derived(Math.min(sessionPage, pages - 1));
-  const sessions = $derived(filteredSessions.slice(currentPage * 8, currentPage * 8 + 8));
-  $effect(() => {
-    if (data && !loading && dataQueryKey === queryKey && params.page > pages) {
-      untrack(() => params.update({ page: pages }, { pushHistory: false }));
-    }
-  });
-  const period = $derived(
-    data ? `${formatDate(data.period.start)} – ${formatDate(data.period.end)}` : 'Reading usage…',
-  );
-  const totals = $derived(data?.totals);
-  const onlyCursor = $derived.by(() => {
-    const selected = query.harnesses ?? data?.filters.harnesses;
-    return selected?.length === 1 && selected[0] === 'cursor';
-  });
-  const billingOnly = $derived(
-    onlyCursor &&
-      data?.sources.some((source) => source.cursorSource === 'billing') &&
-      !data?.sources.some((source) => source.harness === 'cursor' && source.cursorSource !== 'billing'),
-  );
-  const requestCount = $derived.by(() => {
-    if (!data) return 'Across your harnesses';
-    const hasCursor = data.harnesses.some((row) => row.name === 'cursor');
-    if (hasCursor && data.harnesses.length === 1) return 'Request count unavailable';
-    return `${integer.format(data.totals.requests)} ${hasCursor ? 'reported requests' : 'requests'}`;
-  });
-  const unpriced = $derived(totals?.unpricedTokens ?? 0);
-  const unpricedModels = $derived(data?.models.filter((row) => row.unpricedTokens > 0).length ?? 0);
-  const deviceNames = $derived(new Map(devices.map((device) => [device.id, device.name])));
-  const composition = $derived([
-    { key: 'input', label: 'Input', value: totals?.inputTokens ?? 0, cost: data?.tokenCosts?.input },
-    { key: 'output', label: 'Output', value: totals?.outputTokens ?? 0, cost: data?.tokenCosts?.output },
-    { key: 'cache-read', label: 'Cache read', value: totals?.cacheReadTokens ?? 0, cost: data?.tokenCosts?.cacheRead },
-    {
-      key: 'cache-write',
-      label: 'Cache write',
-      value: totals?.cacheWriteTokens ?? 0,
-      cost: data?.tokenCosts?.cacheWrite,
-    },
-  ]);
-
-  function breakdownName(name: string) {
-    return grouping === 'devices'
-      ? deviceName(name)
-      : grouping === 'projects'
-        ? projectName(name)
-        : grouping === 'models'
-          ? modelLabel(name)
-          : (categoryNames[name] ?? name);
+  function href(change: (q: URLSearchParams) => void) {
+    const q = new URLSearchParams(p);
+    change(q);
+    return `/${q.size ? '?' + q : ''}`;
   }
-  function share(value: number, total: number) {
-    return total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0;
+  function go(change: (q: URLSearchParams) => void, drill = false) {
+    const url = href(change);
+    if (url !== page.url.pathname + page.url.search) void goto(url, { reset: false, state: { usageDrill: drill } });
   }
-  function compositionTitle(part: (typeof composition)[number]) {
-    const tokens = `${part.label}: ${integer.format(part.value)} tokens (${share(part.value, totals?.tokens ?? 0).toFixed(1)}%)${
-      part.key === 'output' && totals?.reasoningTokens
-        ? `, including ${integer.format(totals.reasoningTokens)} reasoning tokens`
-        : ''
-    }`;
-    const cost =
-      !part.cost || (part.value > 0 && part.cost.unavailableTokens >= part.value)
-        ? 'Cost breakdown unavailable'
-        : `${currency.format(part.cost.costUSD)} estimated cost`;
-    const excluded = part.cost?.unavailableTokens
-      ? `; ${integer.format(part.cost.unavailableTokens)} tokens excluded from this cost breakdown`
-      : '';
-    const unattributed = data?.tokenCosts?.unattributedCostUSD
-      ? `; ${currency.format(data.tokenCosts.unattributedCostUSD)} in reported usage costs cannot be split by token category`
-      : '';
-    return `${tokens}; ${cost}${excluded}${unattributed}`;
+  function updatePage(n: number) {
+    go((q) => q.set('page', String(n)));
   }
-  function compositionCost(part: (typeof composition)[number]) {
-    if (!part.cost) return '—';
-    return part.value > 0 && part.cost.unavailableTokens >= part.value ? '—' : currency.format(part.cost.costUSD);
-  }
-
-  function deviceName(id: string) {
-    return deviceNames.get(id) ?? (id === 'local' ? (data?.machine ?? 'This machine') : id);
-  }
-  function projectName(value: string) {
-    return projectNames.get(value) ?? projectLabel(value);
-  }
-  function formatDate(value: string) {
-    return date.format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
-  }
-  function formatCost(row: Pick<Breakdown, 'tokens' | 'unpricedTokens' | 'costUSD'>) {
-    return row.tokens > 0 && row.unpricedTokens >= row.tokens
-      ? 'Unpriced'
-      : `${currency.format(row.costUSD)}${row.unpricedTokens > 0 ? '*' : ''}`;
+  function update(k: string, v: string) {
+    go((q) => {
+      q.set(k, v);
+      q.delete('page');
+    });
   }
   async function refresh() {
     if (!client) return;
-    loadChart();
+    const q = query,
+      k = key;
     request?.abort();
-    const controller = new AbortController();
-    request = controller;
-    const version = ++requestVersion;
-    const requestedKey = queryKey;
+    const c = new AbortController();
+    request = c;
     loading = true;
     error = '';
-    void client
-      .getDevices(controller.signal)
-      .then((next) => {
-        if (!controller.signal.aborted && version === requestVersion) devices = next;
-      })
-      .catch(() => {
-        /* Keep the previous device metadata when offline. */
-      });
     try {
-      const requestedQuery = query;
-      const next = await client.getUsage({ ...requestedQuery }, controller.signal);
-      if (controller.signal.aborted || version !== requestVersion || requestedKey !== queryKey) return;
-      data = next;
-      if (
-        next.filters.selectedModels &&
-        JSON.stringify(next.filters.selectedModels) !== JSON.stringify(requestedQuery.models)
-      ) {
-        params.update({ models: encodeFilter(next.filters.selectedModels) }, { pushHistory: false });
-        observedQueryKey = JSON.stringify(usageQueryFromParams(params, timezone));
+      const result = await client.getUsage(q, c.signal);
+      if (!c.signal.aborted && k === key) {
+        if (!data || groups.every((g) => q[g] === undefined))
+          railOrder = Object.fromEntries(groups.map((g) => [g, result[g].map((row) => row.name)]));
+        chartColors = new Map(groups.map((g) => [g, assignChartColors(result[g], chartColors.get(g))]));
+        data = result;
+        loadedKey = k;
       }
-      const resolvedQuery = usageQueryFromParams(params, timezone);
-      dataQueryKey = JSON.stringify(resolvedQuery);
-      dataInsightKey = JSON.stringify({ ...resolvedQuery, projects: undefined, excludedProjects: undefined });
-    } catch (failure) {
-      if (controller.signal.aborted || version !== requestVersion || requestedKey !== queryKey) return;
-      error = failure instanceof Error ? failure.message : 'Could not load usage. Try again.';
+    } catch (e) {
+      if (!c.signal.aborted) error = e instanceof Error ? e.message : 'Could not load usage.';
     } finally {
-      if (version === requestVersion) loading = false;
+      if (!c.signal.aborted) loading = false;
     }
   }
-  function changeQuery(next: UsageQuery) {
-    params.update({
-      range: ranges.find((entry) => entry.value === next.range)?.value ?? '30d',
-      harnesses: encodeFilter(next.harnesses),
-      providers: encodeFilter(next.providers),
-      models: encodeFilter(next.models),
-      devices: encodeFilter(next.devices),
-      projects: encodeFilter(next.projects),
-      page: 1,
-    });
-  }
-  // Only explicit hide/unhide choices become this browser's default, so
-  // opening a shared link never replaces the stored hidden projects.
-  function setHiddenProjects(next: readonly string[]) {
-    saveHiddenProjects(next);
-    params.update({ excludedProjects: encodeHidden(next), page: 1 });
-  }
-  function toggleHidden(project: string) {
-    setHiddenProjects(
-      hiddenSet.has(project) ? hiddenProjects.filter((entry) => entry !== project) : [...hiddenProjects, project],
-    );
-  }
-  function removeChip(key: (typeof filterKeys)[number], value: string) {
-    const remaining = (query[key] ?? []).filter((entry) => entry !== value);
-    if (key === 'projects') return applyProjects(remaining.length ? remaining : undefined, hiddenProjects);
-    changeQuery({ ...query, [key]: query[key]?.length === 0 || remaining.length === 0 ? undefined : remaining });
-  }
-  function mountDashboard() {
-    mounted = true;
-    untrack(() => {
-      // A URL without `excludedProjects` hides the projects this browser last
-      // hid. Write them into the URL before the first load so copied links
-      // carry them explicitly instead of relying on the other browser's list.
-      const stored = readHiddenProjects();
-      if (stored.length && !new URLSearchParams(location.search).has('excludedProjects'))
-        params.update({ excludedProjects: encodeHidden(stored) }, { pushHistory: false });
-      timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      client = makeDashboardClient();
-      loadChart();
-    });
+  onMount(() => {
+    shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
+    defaultRange = readDefaultRange();
+    hidden = readHiddenProjects();
+    timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const rpc = makeDashboardClient('/rpc', { requestTimeoutMs: 120000 });
+    client = rpc;
+    const abort = new AbortController();
+    void rpc
+      .getDevices(abort.signal)
+      .then((d) => {
+        if (!abort.signal.aborted) devices = d;
+      })
+      .catch(() => {});
     const timer = setInterval(() => {
-      if (!document.hidden) void refresh();
+      if (!document.hidden && !overlay && !loading) void refresh();
     }, 60000);
     return () => {
-      mounted = false;
       clearInterval(timer);
+      abort.abort();
       request?.abort();
-      catalogRequest?.abort();
-      params.cleanup();
-      void client?.dispose();
-      client = undefined;
+      void rpc.dispose();
     };
+  });
+  $effect(() => {
+    const k = key;
+    const rpc = client;
+    if (rpc && k)
+      untrack(() => {
+        overlay = undefined;
+        void refresh();
+      });
+  });
+  function palette(g?: Group) {
+    if (!data || !ready) return;
+    returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    overlay = { group: g };
   }
-  function loadChart() {
-    if (UsageChart || chartModule) return;
-    chartError = '';
-    chartModule = import('#lib/components/UsageChart.svelte').then(
-      (module) => {
-        chartModule = undefined;
-        if (mounted) UsageChart = module.default;
-      },
-      () => {
-        chartModule = undefined;
-        if (mounted) chartError = 'Could not load the chart. Try again.';
-      },
-    );
+  function inspect(pick: Picked) {
+    returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    overlay = { picked: pick };
   }
-  function exportCsv() {
-    if (!data) return;
-    const escape = (value: string | number) => {
-      const text = String(value);
-      return `"${text.replace(/^[=+@-]/, "'$&").replaceAll('"', '""')}"`;
-    };
-    const rows = [
-      [
-        'session',
-        'harness',
-        'models',
-        'project',
-        'repository',
-        'device',
-        'tokens',
-        'estimated_cost_usd',
-        'unpriced_tokens',
-        'last_active',
-        'session_title',
-        'project_name',
-        't3_thread_id',
-        't3_thread_url',
-        't3_native_thread_url',
-        'repository_url',
-        'cursor_agent_url',
-      ],
-      ...data.sessions.map((session) => [
-        session.id,
-        session.harness,
-        session.model,
-        session.project,
-        session.repository ?? '',
-        deviceName(session.deviceId),
-        session.tokens,
-        session.costUSD,
-        session.unpricedTokens,
-        session.lastActiveAt,
-        session.sessionTitle ?? '',
-        session.projectName ?? '',
-        session.t3ThreadId ?? '',
-        safeWebUrl(session.t3ThreadUrl) ?? '',
-        nativeThreadUrl(session) ?? '',
-        repositoryWebUrl(session.repository) ?? '',
-        cursorAgentUrl(session) ?? '',
-      ]),
-    ];
-    const url = URL.createObjectURL(
-      new Blob([rows.map((row) => row.map(escape).join(',')).join('\n')], { type: 'text/csv;charset=utf-8' }),
-    );
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `token-usage-${data.period.start}-${data.period.end}.csv`;
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  function close() {
+    overlay = undefined;
+    void tick().then(() => {
+      if (returnTo?.isConnected) returnTo.focus({ preventScroll: true });
+      else document.querySelector<HTMLElement>('.scope-trigger')?.focus({ preventScroll: true });
+    });
   }
-  function rangeKeyboard(event: KeyboardEvent) {
-    const direction = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
-    if (!direction) return;
-    event.preventDefault();
-    const index = (rangeIndex + direction + ranges.length) % ranges.length;
-    changeQuery({ ...query, range: ranges[index].value });
-    document.querySelector<HTMLButtonElement>(`[data-range="${ranges[index].value}"]`)?.focus();
+  function apply(next: Pick<UsageQuery, Group>, drill?: Group) {
+    if (overlay) close();
+    go((q) => {
+      for (const g of groups) setSelection(q, g, next[g]);
+      if (drill) q.set('split', drill);
+      q.delete('page');
+    }, !!drill);
+  }
+  function toggle(g: Group, v: string) {
+    const old = filters[g] ?? [],
+      next = old.includes(v) ? old.filter((x) => x !== v) : [...old, v];
+    apply({ ...filters, [g]: next.length ? next : undefined });
+  }
+  function keys(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      if (overlay) close();
+      else palette();
+    }
   }
 </script>
 
-<svelte:head><title>Usage · Token tracker</title><meta name="theme-color" content="var(--surface)" /></svelte:head>
-<svelte:window ononline={() => void refresh()} />
-
-<div class="workspace" {@attach mountDashboard}>
-  <header class="topbar">
-    <a class="wordmark" href="/"
-      ><svg class="brand-mark" viewBox="0 0 32 32" fill="currentColor" aria-hidden="true"
-        ><rect x="5" y="18" width="5" height="9" rx="1.5" /><rect x="13.5" y="11" width="5" height="16" rx="1.5" /><rect
-          x="22"
-          y="5"
-          width="5"
-          height="22"
-          rx="1.5"
-        /></svg
-      >Token tracker<span class="brand-dot">.</span></a
-    >
-    <div class="topbar-right">
-      <div class="connection">
-        <Icon name="monitor" size={17} /><span class="machine-name">{data?.machine ?? 'This machine'}</span><span
-          class={['status-dot', error ? 'offline' : data ? 'online' : '']}
-        ></span><span>{error ? 'Offline' : data ? 'Connected' : 'Connecting'}</span>
+<svelte:head><title>{compare ? 'Comparison desk' : 'Usage overview'} · Token tracker</title></svelte:head>
+<svelte:window onkeydown={keys} />
+<div class="usage-app" class:compare {@attach theme.attach}>
+  <header class="wb-mast">
+    <div class="wb-wrap wb-mast-inner">
+      <a class="wb-brand" href="/" aria-label="Token tracker overview"
+        ><svg width="23" height="24" viewBox="0 0 28 28" fill="currentColor" aria-hidden="true"
+          ><path d="M2 16h5v10H2zM11 9h5v17h-5zM20 2h5v24h-5z" /></svg
+        ><span>Token tracker<b>.</b></span></a
+      >
+      <nav aria-label="Usage views">
+        <a
+          aria-current={!compare ? 'page' : undefined}
+          href={href((q) => {
+            q.delete('view');
+            q.delete('page');
+          })}>Overview</a
+        ><a
+          aria-current={compare ? 'page' : undefined}
+          href={href((q) => {
+            q.set('view', 'compare');
+            q.delete('page');
+          })}>Compare</a
+        >
+      </nav>
+      <div class="mast-tools">
+        <a href="/settings" aria-label="Settings"><Icon name="settings" size={17} /></a><button
+          aria-label="Switch theme"
+          onclick={() => theme.choose(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark')}
+          ><span class="light-icon"><Icon name="moon" size={17} /></span><span class="dark-icon"
+            ><Icon name="sun" size={17} /></span
+          ></button
+        >
       </div>
-      <a class="icon-button" href="/settings" aria-label="Settings" title="Settings"><Icon name="settings" /></a>
-      <ThemeToggle />
     </div>
   </header>
-
-  <main data-loading={loading}>
-    <div class="page-heading">
-      <h1>Usage</h1>
-      <div class="page-actions">
-        <div class="range-selector" role="radiogroup" tabindex="-1" aria-label="Date range" onkeydown={rangeKeyboard}>
-          <span class="range-indicator" style:transform={`translateX(${rangeIndex * 100}%)`}
-          ></span>{#each ranges as range (range.value)}<button
-              class={['range-option', query.range === range.value && 'selected']}
-              role="radio"
-              aria-checked={query.range === range.value}
-              tabindex={query.range === range.value ? 0 : -1}
-              data-range={range.value}
-              onclick={() => changeQuery({ ...query, range: range.value })}>{range.label}</button
-            >{/each}
-        </div>
-        <div class="secondary-actions">
-          <button
-            class={['icon-button', loading && 'refreshing']}
-            aria-label="Refresh usage"
-            title="Refresh usage"
-            onclick={() => void refresh()}><Icon name="refresh" /></button
-          ><button class="button" disabled={!data} onclick={exportCsv}
-            ><Icon name="download" size={16} /><span>Export CSV</span></button
-          >
-        </div>
-      </div>
-    </div>
-
-    <div class="filter-row">
-      <div class="filters">
-        <MultiSelect
-          label="Harnesses"
-          options={data?.filters.harnesses ?? []}
-          value={query.harnesses}
-          names={categoryNames}
-          grouping="harnesses"
-          onchange={(harnesses) => changeQuery({ ...query, harnesses })}
-        />
-        <MultiSelect
-          label="Providers"
-          options={data?.filters.providers ?? []}
-          value={query.providers}
-          names={categoryNames}
-          grouping="providers"
-          onchange={(providers) => changeQuery({ ...query, providers })}
-        />
-        <MultiSelect
-          label="Models"
-          options={data?.filters.models ?? []}
-          value={query.models}
-          names={modelNames}
-          grouping="models"
-          onchange={(models) => changeQuery({ ...query, models })}
-        />
-        <MultiSelect
-          label="Devices"
-          options={data?.filters.devices ?? []}
-          value={query.devices}
-          grouping="devices"
-          colors={deviceColors}
-          names={Object.fromEntries((data?.filters.devices ?? []).map((id) => [id, deviceName(id)]))}
-          onchange={(selected) => changeQuery({ ...query, devices: selected })}
-        />
-        <ProjectPalette
-          data={paletteData}
-          value={query.projects}
-          colors={projectColors}
-          hidden={hiddenProjects}
-          loading={!paletteData || catalogLoading}
-          updating={paletteStale && (loading || catalogLoading)}
-          error={paletteError}
-          context={catalogContext}
-          onopen={() => void loadProjectCatalog()}
-          onretry={() => void (error || data?.projectInsights ? refresh() : loadProjectCatalog())}
-          onapply={applyProjects}
-        />
-        {#if hiddenProjects.length}<HiddenProjects
-            projects={hiddenProjects}
-            name={projectName}
-            color={(project) => categoryColor(project, 'projects')}
-            onunhide={toggleHidden}
-            onunhideall={() => setHiddenProjects([])}
-          />{/if}
-      </div>
-      <span class="period-label"
-        ><span class="usage-period">{period}</span><span
-          class={['refresh-state', loading && 'visible']}
-          role="status"
-          aria-atomic="true">{loading ? (data ? 'Updating…' : 'Loading usage…') : ''}</span
-        ></span
+  <main class="wb-wrap wb-main">
+    <div class="wb-heading">
+      <h1>{compare ? 'Comparison desk' : 'Usage overview'}</h1>
+      <button
+        class="wb-link export"
+        disabled={!data || !ready}
+        onclick={() => data && exportSessions(data, (id) => label('devices', id))}
+        ><Icon name="download" size={15} /> Export CSV</button
       >
     </div>
-    <div class="filter-chip-region">
-      <div class="filter-chips">
-        {#each chips as chip (`${chip.key}:${chip.value}`)}<button
-            class="filter-chip"
-            aria-label={`Remove ${chip.label} filter`}
-            onclick={() => removeChip(chip.key, chip.value)}
-            >{#if chip.color}<i class="category-swatch" style:background={chip.color} aria-hidden="true"></i>{/if}<span
-              class="filter-chip-label">{chip.label}</span
-            ><Icon name="close" size={12} /></button
-          >{/each}
-      </div>
-      {#if chips.length}<button
-          class="text-button"
-          onclick={() => changeQuery({ range: query.range, timezone: query.timezone })}>Clear filters</button
-        >{/if}
-      {#if query.projects?.length}<span class="project-view-status" role="status">Graph by {params.chartBy}</span>{/if}
-    </div>
-
-    {#if error}<div class="notice-region">
-        <div class="notice error-notice" role="alert">
-          <Icon name="warning" /><span>{error}{data ? ' Showing the last successful update.' : ''}</span><button
-            onclick={() => void refresh()}>Try again</button
-          >
-        </div>
-      </div>{/if}
-
-    <section class="metrics" aria-label="Usage summary" aria-busy={loading}>
-      <div class="metric">
-        <span class="metric-label"
-          >{query.models?.length === 1
-            ? `${modelLabel(query.models[0])} tokens`
-            : billingOnly
-              ? 'Cursor billing tokens'
-              : onlyCursor
-                ? 'Reported Cursor tokens'
-                : 'Total tokens'}</span
-        ><strong class={['metric-value', !data && loading && 'skeleton']}
-          >{totals ? compact.format(totals.tokens) : '—'}</strong
-        ><span class="metric-detail"
-          >{totals ? `${integer.format(totals.tokens)} tokens` : 'Input, output & cache'}</span
-        >
-      </div>
-      <div class="metric">
-        <span class="metric-label">Estimated API cost</span><strong
-          class={['metric-value', !data && loading && 'skeleton']}>{totals ? formatCost(totals) : '—'}</strong
-        ><span class="metric-detail metric-pricing-detail"
-          ><span>At model API rates</span><a
-            class={['pricing-control', unpriced > 0 && 'needs-pricing']}
-            href="/settings/pricing"
-            aria-label={unpriced > 0
-              ? `Model pricing: ${unpricedModels} ${unpricedModels === 1 ? 'model needs' : 'models need'} pricing`
-              : 'Model pricing'}
-            title={unpriced > 0 ? `${compact.format(unpriced)} tokens need pricing` : 'Manage model aliases and prices'}
-            ><Icon name="info" size={14} />{#if unpriced > 0}<span>{unpricedModels} unpriced</span>{/if}</a
-          ></span
-        >
-      </div>
-      <div class="metric">
-        <span class="metric-label">Sessions</span><strong class={['metric-value', !data && loading && 'skeleton']}
-          >{billingOnly && !totals?.sessions ? 'Not reported' : totals ? integer.format(totals.sessions) : '—'}</strong
-        ><span class="metric-detail">{requestCount}</span>
-      </div>
-      <div class="metric">
-        <span class="metric-label">Cache hit rate</span><strong class={['metric-value', !data && loading && 'skeleton']}
-          >{totals ? `${(totals.cacheHitRate * 100).toFixed(1)}%` : '—'}</strong
-        ><span class="metric-detail">Cached input / total input</span>
-      </div>
-    </section>
-
-    <div class="analytics-grid">
-      <section class="activity-panel" aria-labelledby="activity-title" aria-busy={loading}>
-        <div class="section-heading">
-          <h2 id="activity-title">{metric === 'tokens' ? 'Token activity' : 'Cost activity'}</h2>
-          <div class="chart-controls">
-            <div class="segmented" aria-label="Chart type">
-              <button
-                class={chartMode === 'bar' ? 'active' : ''}
-                aria-label="Bar chart"
-                aria-pressed={chartMode === 'bar'}
-                onclick={() => params.update({ chart: 'bar' })}><Icon name="bars" size={16} /></button
-              ><button
-                class={chartMode === 'line' ? 'active' : ''}
-                aria-label="Line chart"
-                aria-pressed={chartMode === 'line'}
-                onclick={() => params.update({ chart: 'line' })}><Icon name="line" size={16} /></button
-              >
+    {#snippet rangeControl()}<ChoiceMenu
+        label="Date range"
+        icon="calendar"
+        value={range}
+        choices={rangeChoices}
+        onchange={(v) => update('range', v)}
+      />{/snippet}
+    {#snippet filterButton()}<button class="scope-trigger wb-link" disabled={!ready} onclick={() => palette()}
+        ><Icon name="sliders" size={16} />{compare ? 'Search filters' : 'Filter usage'} <kbd>{shortcut}</kbd></button
+      >{/snippet}
+    {#snippet chips()}{#if active.length}<div class="scope-chips">
+          <button class="summary-chip" onclick={() => palette()}>{active.length} filters</button
+          >{#each active as f (JSON.stringify([f.g, f.v]))}<button
+              class="scope-chip"
+              onclick={() => toggle(f.g, f.v)}
+              title={`Remove ${groupNames[f.g]}: ${label(f.g, f.v)}`}>{label(f.g, f.v)} ×</button
+            >{/each}<button class="wb-link" onclick={() => apply({})}>Clear all</button>
+        </div>{:else if !compare}<span class="all-usage"
+          >{query.excludedProjects?.length ? `${query.excludedProjects.length} projects hidden` : 'All usage'}</span
+        >{/if}{/snippet}
+    <div class:desk-grid={compare}>
+      {#if compare}<aside class="scope-rail">
+          <h2><Icon name="sliders" size={17} />Scope</h2>
+          {@render rangeControl()}{@render filterButton()}{@render chips()}
+          {#each availableRail.slice(0, 3) as { g, items, total } (g)}<details open>
+              <summary>{groupNames[g]} <small>{filters[g]?.length || ''}</small></summary>{#each items as v (v)}<label
+                  class="wb-facet-row"
+                  title={label(g, v)}
+                  ><input
+                    type="checkbox"
+                    checked={filters[g]?.includes(v) ?? false}
+                    onchange={() => toggle(g, v)}
+                  /><span>{label(g, v)}</span></label
+                >{/each}{#if total > items.length}<button class="wb-link more-filters" onclick={() => palette(g)}
+                  >All {total} {g} →</button
+                >{/if}
+            </details>{/each}
+        </aside>{/if}
+      <div class="wb-content">
+        {#if compare}<div class="scope-mobile">
+            <div class="wb-section-head"><b>Scope</b>{@render rangeControl()}</div>
+            <div class="mobile-groups">
+              {#each groups.slice(0, 3) as g (g)}<button onclick={() => palette(g)}
+                  >{groupNames[g]} {filters[g]?.length || ''}⌄</button
+                >{/each}<button onclick={() => palette()}>More ⌄</button>
             </div>
-            <div class="segmented" aria-label="Chart measurement">
-              <button
-                class={metric === 'tokens' ? 'active' : ''}
-                aria-pressed={metric === 'tokens'}
-                onclick={() => params.update({ metric: 'tokens' })}>Tokens</button
-              ><button
-                class={metric === 'costUSD' ? 'active' : ''}
-                aria-pressed={metric === 'costUSD'}
-                onclick={() => params.update({ metric: 'cost' })}>Cost</button
-              >
-            </div>
-          </div>
-        </div>
-        {#if data && UsageChart}<UsageChart
-            {data}
-            mode={chartMode}
-            {metric}
-            grouping={params.chartBy}
-            onGroupingChange={(chartBy) => params.update({ chartBy })}
-          />{:else}<div class="chart-loading">
-            {#if error || chartError}<Icon name="warning" size={24} /><span>{chartError || 'Usage is unavailable'}</span
-              ><button class="text-button" onclick={() => (chartError && !error ? loadChart() : void refresh())}
-                >Try again</button
-              >{:else}<span class="spinner"></span><span>Reading local usage</span>{/if}
+            {@render chips()}
+          </div>{:else}<div class="wb-scope">
+            {@render rangeControl()}{@render filterButton()}{@render chips()}
           </div>{/if}
-        <div class="token-composition" aria-label="Token composition">
-          <div class="composition-track" role="img" aria-label={composition.map(compositionTitle).join('; ')}>
-            {#each composition as part (part.key)}<span
-                class={`composition-segment composition-${part.key}`}
-                style:width={`${share(part.value, totals?.tokens ?? 0)}%`}
-                aria-hidden="true"
-              ></span>{/each}
-          </div>
-          <div class="composition-values">
-            {#each composition as part (part.key)}<div class="composition-value" title={compositionTitle(part)}>
-                <span class="composition-name"
-                  ><i class={`composition-${part.key}`} aria-hidden="true"></i>{part.label}<span
-                    class="composition-percent">{totals ? `${share(part.value, totals.tokens).toFixed(1)}%` : '—'}</span
-                  ></span
-                ><span class="composition-totals"
-                  ><b>{totals ? compact.format(part.value) : '—'}</b><span class="composition-cost"
-                    ><span class="composition-cost-amount">{compositionCost(part)}</span
-                    >{#if part.cost?.unavailableTokens}<span aria-hidden="true">*</span>{/if}</span
-                  ></span
+        {#if error}<div class="wb-error" role="alert">
+            {error} <button class="wb-link" onclick={() => void refresh()}>Retry</button>
+          </div>{/if}
+        {#if data}{@const d = data}
+          <div class="reading" aria-busy={loading} inert={!ready}>
+            <section class="wb-kpis" aria-label="Usage summary">
+              {#each [['Total tokens', formatValue(d.totals.tokens, 'tokens'), periodOf(d)], ['Estimated API cost', valueOf(d.totals, 'costUSD'), d.totals.unpricedTokens ? 'Priced tokens only' : 'API equivalent'], ['Sessions', d.totals.sessions.toLocaleString(), 'in this scope'], ['Cache hit rate', (d.totals.cacheHitRate * 100).toFixed(1) + '%', 'of input tokens']] as [name, val, sub] (name)}<div
                 >
-              </div>{/each}
-          </div>
-        </div>
-      </section>
-      <section class="breakdown-panel" aria-labelledby="breakdown-title" aria-busy={loading}>
-        <div class="section-heading">
-          <h2 id="breakdown-title">Breakdown</h2>
-          <span class="muted">{breakdown.length || '—'}</span>
-        </div>
-        <div class="breakdown-tabs" aria-label="Breakdown grouping">
-          {#each breakdownGroups as group (group)}<button
-              class={grouping === group ? 'active' : ''}
-              aria-pressed={grouping === group}
-              onclick={() => params.update({ breakdown: group, expanded: false })}
-              >{group.charAt(0).toUpperCase() + group.slice(1)}</button
-            >{/each}
-        </div>
-        <div class="breakdown-summary">
-          <div
-            class="breakdown-share-track"
-            role="img"
-            aria-label={`${metric === 'tokens' ? 'Token' : 'Priced cost'} share by ${grouping}`}
-          >
-            {#each breakdownOverview as segment (segment.name)}{#if segment.value > 0}<span
-                  style:width={`${share(segment.value, breakdownTotal)}%`}
-                  style:background={segment.color}
-                  title={`${breakdownName(segment.name)}: ${metric === 'tokens' ? `${compact.format(segment.value)} tokens` : currency.format(segment.value)} · ${share(segment.value, breakdownTotal).toFixed(1)}%`}
-                  aria-hidden="true"
-                ></span>{/if}{/each}
-          </div>
-          <span class="breakdown-pricing-note"
-            >{metric === 'costUSD' && unpriced > 0 ? `${compact.format(unpriced)} unpriced tokens excluded` : ''}</span
-          >
-        </div>
-        <div class="breakdown-list">
-          {#each visibleBreakdown as row (row.name)}<div class="breakdown-row">
-              <div class="breakdown-top">
-                <span class="breakdown-name" title={row.name}
-                  ><i class="category-swatch" style:background={categoryColor(row.name, grouping)} aria-hidden="true"
-                  ></i>{#if grouping === 'projects'}<button
-                      class="breakdown-label project-focus"
-                      title={`Focus ${row.name}`}
-                      onclick={() =>
-                        applyProjects(
-                          [row.name],
-                          hiddenProjects.filter((project) => project !== row.name),
-                        )}>{breakdownName(row.name)}</button
-                    >{:else}<span class="breakdown-label">{breakdownName(row.name)}</span>{/if}</span
-                >{#if grouping === 'projects'}<button
-                    class="visibility-toggle"
-                    aria-label={`Hide ${projectName(row.name)}`}
-                    title={`Hide ${projectName(row.name)}`}
-                    onclick={() => toggleHidden(row.name)}><Icon name="eye-off" size={14} /></button
-                  >{/if}<b title={metric === 'tokens' ? `${integer.format(row.tokens)} tokens` : formatCost(row)}
-                  >{metric === 'tokens' ? compact.format(row.tokens) : formatCost(row)}</b
-                >
-              </div>
-              <div class="breakdown-track">
-                <span
-                  style:width={`${share(row[metric], breakdownTotal)}%`}
-                  style:background={categoryColor(row.name, grouping)}
-                ></span>
-              </div>
-              <div class="breakdown-meta">
-                <span
-                  title={row.unpricedTokens > 0
-                    ? `${integer.format(row.unpricedTokens)} tokens have no model price`
-                    : ''}
-                  >{metric === 'tokens'
-                    ? formatCost(row)
-                    : `${compact.format(row.tokens)} tokens`}{#if row.unpricedTokens > 0}<span
-                      class="breakdown-unpriced"
-                    >
-                      · {compact.format(row.unpricedTokens)} unpriced</span
-                    >{/if}</span
-                ><span
-                  >{metric === 'costUSD' && row.tokens > 0 && row.unpricedTokens >= row.tokens
-                    ? '—'
-                    : `${share(row[metric], breakdownTotal).toFixed(1)}%`}</span
-                >
-              </div>
-            </div>{:else}<div class="breakdown-empty">{data ? 'No usage to show' : 'Loading breakdown…'}</div>{/each}
-        </div>
-        <div class="breakdown-footer">
-          {#if breakdown.length > 5}<button
-              class="text-button show-more"
-              onclick={() => params.update({ expanded: !showAll })}
-              >{showAll ? 'Show top five' : `Show all ${breakdown.length}`}</button
-            >{/if}
-        </div>
-      </section>
-    </div>
-
-    <section class="sessions-panel" aria-labelledby="sessions-title" aria-busy={loading}>
-      <div class="section-heading">
-        <div class="sessions-title">
-          <h2 id="sessions-title">Sessions</h2>
-          <span class="count-badge">{data?.sessions.length ?? 0}</span>
-        </div>
-        <label class="session-search"
-          ><Icon name="search" size={16} /><input
-            type="search"
-            placeholder="Search sessions"
-            aria-label="Search sessions"
-            value={sessionSearch}
-            oninput={(event) => params.update({ search: event.currentTarget.value, page: 1 }, { pushHistory: false })}
-          /></label
-        >
-      </div>
-      <div class="table-scroll">
-        <table>
-          <thead
-            ><tr
-              ><th scope="col">Session / project</th><th scope="col">Harness / model</th><th scope="col" class="numeric"
-                ><button onclick={() => params.update({ sort: 'tokens', page: 1 })}>Tokens</button></th
-              ><th scope="col" class="numeric">Est. cost</th><th scope="col" class="numeric"
-                ><button onclick={() => params.update({ sort: 'lastActiveAt', page: 1 })}>Last active</button></th
-              ></tr
-            ></thead
-          ><tbody
-            >{#each sessions as session (`${session.deviceId}:${session.harness}:${session.id}`)}
-              {@const threadUrl = safeWebUrl(session.t3ThreadUrl)}
-              {@const nativeUrl = nativeThreadUrl(session)}
-              {@const agentUrl = cursorAgentUrl(session)}
-              {@const repoUrl = repositoryWebUrl(session.repository)}
-              {@const pathName = session.project.split(/[\\/]/).filter(Boolean).at(-1) ?? session.project}
-              {@const name = agentUrl && !session.sessionTitle ? `Agent ${session.id}` : sessionDisplayName(session)}
-              {@const hasTitle = Boolean(session.sessionTitle || session.projectName)}
-              {@const primaryUrl = nativeUrl ?? threadUrl ?? agentUrl ?? (hasTitle ? undefined : repoUrl)}
-              <tr
-                ><td
-                  ><div class="session-project" title={name}>
-                    {#if primaryUrl}<a
-                        href={primaryUrl}
-                        target={nativeUrl ? undefined : '_blank'}
-                        rel="noopener noreferrer"
-                        aria-label={`${threadUrl ? 'Open T3 Code thread' : agentUrl ? 'Open Cursor agent' : 'Open repository'}: ${name}`}
-                      >
-                        <span>{name}</span><Icon name="external" size={14} />
-                      </a>{:else}<span>{name}</span>{/if}
-                  </div>
-                  <div
-                    class="session-context"
-                    title={hasTitle ? (session.repository ?? session.project) : session.project}
+                  <span>{name}</span><strong>{val}</strong><small>{sub}</small>
+                </div>{/each}
+            </section>
+            {#key JSON.stringify([loadedKey, group, metric, compare, p.get('scale')])}<Activity
+                data={d}
+                colors={chartColors.get(group) ?? new Map()}
+                {group}
+                {metric}
+                {compare}
+                independent={p.get('scale') === 'series'}
+                narrowed={!!narrowed}
+                canUndo={!!page.state.usageDrill}
+                {label}
+                {inspect}
+                setGroup={(v) => update('split', v)}
+                setMetric={(v) => update('metric', v === 'tokens' ? 'tokens' : 'cost')}
+                setScale={(v) => update('scale', v ? 'series' : 'shared')}
+                undo={() => history.back()}
+                clear={() => apply({})}
+              />{/key}
+            <section class="wb-sessions">
+              <div class="wb-section-head">
+                <div class="wb-title-line">
+                  <h2>Sessions</h2>
+                  <small>{count.toLocaleString()}</small>
+                </div>
+                <div class="wb-pager">
+                  <small
+                    >{count ? `${cursor * perPage + 1}–${Math.min((cursor + 1) * perPage, count)}` : '0'} of {count.toLocaleString()}</small
+                  ><button aria-label="Previous sessions" disabled={!cursor} onclick={() => updatePage(cursor)}
+                    >‹</button
+                  ><button
+                    aria-label="Next sessions"
+                    disabled={(cursor + 1) * perPage >= count}
+                    onclick={() => updatePage(cursor + 2)}>›</button
                   >
-                    {#if (hasTitle || threadUrl || agentUrl) && repoUrl}<a
-                        href={repoUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        aria-label={`Open repository: ${projectName(session.repository ?? session.project)}`}
-                      >
-                        <Icon name="repository" size={14} /><span
-                          >{projectName(session.repository ?? session.project)}</span
-                        >
-                      </a>{:else}<span>{hasTitle ? session.projectName || projectName(session.project) : pathName}</span
-                      >{/if}
-                    <span class="session-device">- {deviceName(session.deviceId)}</span>
-                  </div></td
-                ><td
-                  ><span class="session-harness"
-                    ><i
-                      class="category-swatch"
-                      style:background={seriesColor(session.harness, 'harnesses')}
-                      aria-hidden="true"
-                    ></i><span>{categoryNames[session.harness] ?? session.harness}</span></span
-                  ><span class="session-model" title={session.model}
-                    ><i
-                      class="category-swatch"
-                      style:background={seriesColor(session.model, 'models')}
-                      aria-hidden="true"
-                    ></i><span>{modelLabel(session.model)}</span></span
-                  ></td
-                ><td class="numeric">{compact.format(session.tokens)}</td><td class="numeric">{formatCost(session)}</td
-                ><td class="numeric session-time" title={new Date(session.lastActiveAt).toLocaleString()}
-                  >{relative(session.lastActiveAt)}</td
-                ></tr
-              >{:else}<tr
-                ><td colspan="5" class="table-empty"
-                  >{!data
-                    ? error
-                      ? 'Could not load sessions'
-                      : 'Loading sessions…'
-                    : sessionSearch
-                      ? 'No sessions match your search'
-                      : 'No sessions in this view'}</td
-                ></tr
-              >{/each}</tbody
-          >
-        </table>
+                </div>
+              </div>
+              <table>
+                <thead><tr><th>Project</th><th>Model</th><th>Device</th><th>Started</th><th>Tokens</th></tr></thead
+                ><tbody
+                  >{#each d.sessions.slice(cursor * perPage, (cursor + 1) * perPage) as s (JSON.stringify( [s.deviceId, s.harness, s.id] ))}{@const project =
+                      s.repository ?? s.project}{@const dest =
+                      nativeThreadUrl(s) ?? safeWebUrl(s.t3ThreadUrl) ?? cursorAgentUrl(s)}<tr
+                      ><td
+                        ><div>
+                          <button title={project} onclick={() => inspect({ group: 'projects', name: project })}
+                            >{label('projects', project)}</button
+                          >{#if dest}<a
+                              aria-label={`Open ${sessionDisplayName(s)}`}
+                              href={dest}
+                              title={sessionDisplayName(s)}><Icon name="external" size={12} /></a
+                            >{/if}
+                        </div></td
+                      ><td
+                        >{#if d.filters.models.includes(s.model)}<button
+                            title={s.model}
+                            onclick={() => inspect({ group: 'models', name: s.model })}>{modelLabel(s.model)}</button
+                          >{:else}<span title={s.model}>{s.model}</span>{/if}</td
+                      ><td
+                        ><button onclick={() => inspect({ group: 'devices', name: s.deviceId })}
+                          >{label('devices', s.deviceId)}</button
+                        ></td
+                      ><td>{sessionDate.format(new Date(s.startedAt))}</td><td>{formatValue(s.tokens, 'tokens')}</td
+                      ></tr
+                    >{:else}<tr><td colspan="5">No matching sessions.</td></tr>{/each}</tbody
+                >
+              </table>
+            </section>
+          </div>
+        {:else if !error}<div class="wb-loading" role="status">Reading tracker usage…</div>{/if}
       </div>
-      <div class="table-footer">
-        <span
-          >{filteredSessions.length
-            ? `${currentPage * 8 + 1}–${Math.min((currentPage + 1) * 8, filteredSessions.length)} of ${filteredSessions.length}`
-            : '0 sessions'}</span
-        >
-        <div class="pagination">
-          <button
-            aria-label="Previous page"
-            disabled={currentPage === 0}
-            onclick={() => params.update({ page: currentPage })}
-            ><span class="previous-arrow"><Icon name="arrow" size={16} /></span></button
-          ><span>{currentPage + 1} / {pages}</span><button
-            aria-label="Next page"
-            disabled={currentPage >= pages - 1}
-            onclick={() => params.update({ page: currentPage + 2 })}><Icon name="arrow" size={16} /></button
-          >
-        </div>
-      </div>
-    </section>
-    {#if devices.length}<div class="device-status" aria-label="Device sync status">
-        <Icon name="network" size={16} />{#each devices as device (device.id)}<span
-            ><b>{device.name}</b>
-            {device.revokedAt
-              ? 'revoked'
-              : device.needsReconnect
-                ? 'needs reconnect'
-                : device.lastSeen
-                  ? `synced ${relative(device.lastSeen)}`
-                  : 'awaiting first sync'}</span
-          >{/each}
-      </div>{/if}
-    <footer>
-      <span><Icon name="terminal" size={15} />Local logs & connected devices</span>
-      <div class="footer-actions">
-        {#if page.data.passcodeEnabled}<form method="POST" action="/logout">
-            <button type="submit">Sign out</button>
-          </form>{/if}
-        <a href="/settings/pricing">Model pricing<Icon name="arrow" size={14} /></a><a href="/settings/data"
-          >Data sources<Icon name="arrow" size={14} /></a
-        >
-      </div>
-    </footer>
+    </div>
+    <div class="wb-bottom">
+      <button disabled={loading} onclick={() => void refresh()}
+        >{loading
+          ? 'Updating…'
+          : `Refresh${data ? ' · ' + new Date(data.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}`}</button
+      >
+    </div>
   </main>
+  {#if overlay && data && client}<ScopeDialog
+      {data}
+      {query}
+      {metric}
+      {client}
+      {label}
+      {apply}
+      {close}
+      picked={overlay.picked}
+      initialGroup={overlay.group}
+    />{/if}
 </div>

@@ -49,6 +49,7 @@ const bucket = (value: unknown): value is Record<string, unknown> =>
   array(value.harnesses, breakdown) &&
   optional(value.providers, (items) => array(items, series)) &&
   optional(value.models, (items) => array(items, series)) &&
+  optional(value.devices, (items) => array(items, series)) &&
   optional(value.projects, (items) => array(items, series));
 const session = (value: unknown) =>
   record(value) &&

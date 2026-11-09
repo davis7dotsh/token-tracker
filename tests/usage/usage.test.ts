@@ -311,7 +311,7 @@ describe('dashboard aggregation', () => {
     }
   });
 
-  test('provider, model and project chart buckets conserve filtered accounting, including missing prices', () => {
+  test('provider, model, device and project chart buckets conserve filtered accounting, including missing prices', () => {
     const response = buildDashboard(
       result([
         event({ timestamp: '2026-10-03T10:00:00Z', costUsd: 0.125 }),
@@ -347,7 +347,7 @@ describe('dashboard aggregation', () => {
     expect(response.totals).toMatchObject({ tokens: 252, costUSD: 1.125, unpricedTokens: 67 });
     for (const buckets of [response.daily, response.hourly]) {
       for (const bucket of buckets) {
-        for (const dimension of ['providers', 'models', 'projects'] as const) {
+        for (const dimension of ['providers', 'models', 'projects', 'devices'] as const) {
           const chart = bucket[dimension] ?? [];
           expect(chart.reduce((sum, group) => sum + group.tokens, 0)).toBe(bucket.tokens);
           expect(chart.reduce((sum, group) => sum + group.costUSD, 0)).toBe(bucket.costUSD);
@@ -356,7 +356,7 @@ describe('dashboard aggregation', () => {
           );
         }
       }
-      for (const dimension of ['providers', 'models', 'projects'] as const) {
+      for (const dimension of ['providers', 'models', 'projects', 'devices'] as const) {
         for (const group of response[dimension]) {
           const chart = buckets.flatMap((bucket) => bucket[dimension] ?? []).filter(({ name }) => name === group.name);
           expect(chart.reduce((sum, item) => sum + item.tokens, 0)).toBe(group.tokens);

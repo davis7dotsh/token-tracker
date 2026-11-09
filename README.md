@@ -20,9 +20,9 @@ bun run build
 HOST=127.0.0.1 PORT=8787 bun run start
 ```
 
-The dashboard includes harness/model/provider/device/project filters, token and estimated-cost charts, session details, source diagnostics, and CSV export. The period selector switches between six months, 30 days, seven days, and today. Today shows hourly buckets in the browser's timezone, including daylight saving changes.
+The dashboard at `/` stacks usage by model. Open **Compare** (`/?view=compare`) for trends on a shared or per-series scale. Both views can split by model, device, project, provider, or harness. Hover a time bucket to see every series, click one to inspect it, then choose **Include** or **Only** to filter. Touch and keyboard users can open the same list without hovering.
 
-Runed's `useSearchParams` keeps the period, filters, chart settings, breakdown, and session search/sort/page in the URL. Copying a link or reloading restores the view; browser back/forward restores earlier selections. Chart and table controls work locally without reloading usage data.
+The URL keeps the selected view, range, split, filters, metric, and session page. Bookmarked `/usage` links redirect to the same view at `/`. Switch between six months, 30 days, seven days, and today; today shows hourly buckets in the browser’s timezone. Export the filtered sessions as CSV or visit **Settings → Data** for source diagnostics.
 
 The theme defaults to System, with persistent Light and Dark overrides. Initial loading, refreshes, empty results, and connection failures have separate states; existing results remain visible during refreshes.
 
@@ -241,7 +241,7 @@ Grok Build's native CLI stores a compact accounting ledger for each session unde
 
 Scheduled sync and dashboard collection stream JSONL or read compact Grok accounting ledgers, caching only parsed accounting metadata. File identity, size, and nanosecond modification/change times invalidate changed files; each collection reapplies current pricing and resolves repository identity. Changed files are reparsed completely so late model metadata and corrected counters remain accurate. Manual checks read directly from source files and remain read-only.
 
-Sessions created in T3 Code display their thread title and attached project, with links to the original conversation and Git repository. The collector matches native harness session IDs against T3's local metadata, including worktrees and scratch directories; it never guesses a thread ID from a path. Session titles open the installed T3 app using `t3code://threads/<environment-id>/<thread-id>` (including namespaced IDs such as `mcp:<uuid>`). The adjacent **Web** link uses `https://app.t3.codes/<environment-id>/<thread-id>` for mobile or any browser connected to the owning environment. Native links use the same verified environment and thread binding as the web route; they require the T3 app to handle the protocol. Repository links use credential-free HTTPS URLs. Sessions without T3 metadata keep their repository or directory name.
+Sessions created in T3 Code retain their thread title and attached project. The collector matches native harness session IDs against T3's local metadata, including worktrees and scratch directories; it never guesses a thread ID from a path. The session link opens the installed T3 app using `t3code://threads/<environment-id>/<thread-id>` (including namespaced IDs such as `mcp:<uuid>`). The web fallback uses `https://app.t3.codes/<environment-id>/<thread-id>` for mobile or any browser connected to the owning environment. Native links use the same verified environment and thread binding as the web route; they require the T3 app to handle the protocol. CSV exports include the web link and a credential-free HTTPS repository link. Sessions without T3 metadata keep their repository or directory name.
 
 - T3 metadata defaults to `~/.t3/userdata`. Set `TOKEN_TRACKER_T3_DATA_DIR` to another T3 userdata directory on each collecting machine.
 - Set `TOKEN_TRACKER_T3_URL` to your T3 web base URL if you use a private address instead of `https://app.t3.codes`.
@@ -251,7 +251,7 @@ The hub keeps previously synced titles, thread links, and attached remote reposi
 
 SQLite metadata reads run in an isolated Bun process; the one-second collection deadline kills and waits for that process to exit, so a slow query cannot block the dashboard event loop.
 
-Only thread IDs, titles, project names, and generated links accompany accounting uploads. T3 conversations, tool output, and credentials are not queried or uploaded. Search includes thread titles, project names, paths, repository identities, and thread IDs; CSV exports include the thread and repository links.
+Only thread IDs, titles, project names, and generated links accompany accounting uploads. T3 conversations, tool output, and credentials are not queried or uploaded. CSV exports include the thread and repository links.
 
 Accounting follows [ccusage](https://github.com/ccusage/ccusage) as an upstream reference; this app uses its own TypeScript collector rather than invoking the ccusage CLI. Total tokens are uncached input plus output plus cache reads plus cache writes. Reasoning is already part of output and is never added again.
 

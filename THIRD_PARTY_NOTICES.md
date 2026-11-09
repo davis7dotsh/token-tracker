@@ -38,4 +38,4 @@ Geist is self-hosted through `@fontsource-variable/geist` under the SIL Open Fon
 
 ## D3
 
-D3 v7.9.0 is bundled locally for the interactive usage chart. Its ISC license and copyright notice are included in `static/d3-license.txt`.
+D3 v7.9.0 is distributed as a package dependency. Its ISC license and copyright notice are included in `static/d3-license.txt`.

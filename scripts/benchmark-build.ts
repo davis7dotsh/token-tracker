@@ -80,8 +80,5 @@ const report = async (phase: string) => {
   );
 };
 await report('hydration');
-if (manifest['src/lib/components/UsageChart.svelte']) include('src/lib/components/UsageChart.svelte');
-await report('with-chart');
-if (manifest['src/lib/components/PricingDialog.svelte']) include('src/lib/components/PricingDialog.svelte');
-else if (serverManifest.routes.some((route) => route.id === '/settings/pricing')) includeRoute('/settings/pricing');
+includeRoute('/settings/pricing');
 await report('with-pricing');

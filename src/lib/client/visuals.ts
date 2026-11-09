@@ -95,24 +95,6 @@ const stableHash = (name: string) => {
   return hash >>> 0;
 };
 
-export const distinctSeriesColors = (names: readonly string[]) => {
-  const colors = new Map<string, string>();
-  const used = new Set<string>();
-  for (const [index, name] of [...new Set(names)].sort().entries()) {
-    if (index % distinctColors.length === 0) used.clear();
-    const preferred = stableHash(name) % distinctColors.length;
-    const base =
-      Array.from(
-        { length: distinctColors.length },
-        (_, offset) => distinctColors[(preferred + offset) % distinctColors.length],
-      ).find((color) => !used.has(color)) ?? distinctColors[preferred];
-    const cycle = Math.floor(index / distinctColors.length);
-    colors.set(name, cycle ? `color-mix(in oklab, ${base} ${100 / (1 + cycle * 0.25)}%, var(--series-shade))` : base);
-    used.add(base);
-  }
-  return colors;
-};
-
 export const seriesColor = (name: string, grouping: VisualGrouping) => {
   if (['other', '__other__'].includes(name.toLowerCase())) return 'var(--series-neutral)';
   if (grouping === 'models') {

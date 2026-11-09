@@ -88,6 +88,7 @@ const series = (groups: SeriesGroups | undefined) =>
 const bucketGroups = () => ({
   harnesses: new Map<string, ReturnType<typeof accumulator>>(),
   providers: new Map<string, ReturnType<typeof seriesTotals>>(),
+  devices: new Map<string, ReturnType<typeof seriesTotals>>(),
   models: new Map<string, ReturnType<typeof seriesTotals>>(),
   projects: new Map<string, ReturnType<typeof seriesTotals>>(),
 });
@@ -106,6 +107,7 @@ const addBucket = <Key>(
   }
   addGroup(group.harnesses, event.harness, event, session, tokens);
   addSeries(group.providers, eventProvider, event, tokens);
+  addSeries(group.devices, event.deviceId ?? 'local', event, tokens);
   addSeries(group.models, event.model, event, tokens);
   addSeries(group.projects, event.repository ?? event.project, event, tokens);
 };
@@ -386,6 +388,7 @@ const aggregateDashboard = (
       costUSD: harnesses.reduce((sum, group) => sum + group.costUSD, 0),
       harnesses,
       providers: series(groups?.providers),
+      devices: series(groups?.devices),
       models: series(groups?.models),
       projects: series(groups?.projects),
     });
@@ -407,6 +410,7 @@ const aggregateDashboard = (
         costUSD: harnesses.reduce((sum, group) => sum + group.costUSD, 0),
         harnesses,
         providers: series(groups?.providers),
+        devices: series(groups?.devices),
         models: series(groups?.models),
         projects: series(groups?.projects),
       });
