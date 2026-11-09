@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { DashboardResponse, UsageQuery } from '../../shared/domain';
-  import type { makeDashboardClient } from '../../client/dashboard-rpc';
   import {
     groupNames,
     groups,
@@ -19,7 +18,7 @@
     picked,
     initialGroup,
     metric,
-    client,
+    readContext,
     label,
     apply,
     close,
@@ -29,7 +28,7 @@
     picked?: Picked;
     initialGroup?: Group;
     metric: Metric;
-    client: ReturnType<typeof makeDashboardClient>;
+    readContext: (q: UsageQuery, signal: AbortSignal) => Promise<DashboardResponse>;
     label: (g: Group, id: string) => string;
     apply: (updates: Pick<UsageQuery, Group>, drill?: Group) => void;
     close: () => void;
@@ -101,8 +100,7 @@
     if (picked) {
       if (query[picked.group]?.length === 1 && query[picked.group]?.[0] === picked.name) context = data;
       else
-        void client
-          .getUsage({ ...query, [picked.group]: [picked.name] }, c.signal)
+        void readContext({ ...query, [picked.group]: [picked.name] }, c.signal)
           .then((r) => {
             if (!c.signal.aborted) context = r;
           })

@@ -61,7 +61,7 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
     expect(await rpc('GetPricingPolicy', { deviceId: device.id, token: 'wrong-token' })).toContain('Unauthorized');
     expect(await rpc('GetPricingPolicy', { deviceId: device.id, token })).toContain('catalog');
     expect(await rpc('GetPricingPolicy', { pairingSecret })).toContain('catalog');
-    for (const tag of ['GetUsage', 'GetDevices', 'GetPricing']) {
+    for (const tag of ['GetUsage', 'GetUsagePage', 'GetUsageInfo', 'GetHubInfo', 'GetDevices', 'GetPricing']) {
       const anonymous = await rpc(tag);
       expect(anonymous).not.toContain('Private laptop');
       expect(anonymous).not.toContain('totals');

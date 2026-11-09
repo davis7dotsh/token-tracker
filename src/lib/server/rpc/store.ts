@@ -12,6 +12,17 @@ import {
   type SyncBatch,
 } from '../../shared/domain';
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
+import {
+  makeWindowPages,
+  ownerFilter,
+  priceStamp,
+  rowColumns,
+  utcDay,
+  type StoredRow,
+  type EventWindow,
+  type UsageReadOptions,
+} from './window-pages';
+export type { UsageReadOptions } from './window-pages';
 
 const storageFailure = () => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' });
 const revokedFailure = () =>
@@ -49,9 +60,11 @@ const validateDevice = (device: DeviceRegistration) => {
   return Effect.void;
 };
 
-const eventJson = Schema.fromJsonString(UsageEvent);
+const decodeEventObject = Schema.decodeUnknownSync(UsageEvent);
 const sourcesJson = Schema.fromJsonString(Schema.Array(SourceStatus));
-const decodeEvent = Schema.decodeUnknownSync(eventJson);
+// Validate and strip unknown keys exactly as on the wire, without running a
+// second generic schema transformation for every stored JSON string.
+const decodeEvent = (payload: string) => decodeEventObject(JSON.parse(payload));
 const decodeSources = Schema.decodeUnknownSync(sourcesJson);
 // Optional metadata can disappear temporarily when a collector cannot read
 // T3's database. Absence means unknown, rather than a request to erase it.
@@ -88,12 +101,6 @@ const UsageDimension = Schema.Struct({
   project: Schema.String,
 });
 const decodeDimensions = Schema.decodeUnknownSync(Schema.Array(UsageDimension));
-export type UsageReadOptions = {
-  start?: string;
-  end?: string;
-  devices?: readonly string[];
-  candidateIds?: readonly string[];
-};
 const dimensionValues = (record: 'NEW' | 'OLD') => [
   `${record}.device_id`,
   `json_extract(${record}.payload, '$.harness')`,
@@ -148,6 +155,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     }
     yield* sql
       .unsafe('CREATE INDEX IF NOT EXISTS usage_events_timestamp ON usage_events(timestamp)')
+      .pipe(Effect.mapError(storageFailure));
+    yield* sql
+      .unsafe('CREATE INDEX IF NOT EXISTS usage_events_device_timestamp ON usage_events(device_id, timestamp)')
       .pipe(Effect.mapError(storageFailure));
     yield* sql
       .unsafe('CREATE INDEX IF NOT EXISTS usage_events_record_id ON usage_events(id)')
@@ -236,6 +246,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     let revision = 0;
     let metadataRevision = 0;
     let ownerRevision = 0;
+    const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure);
     let copiedRevision = -1;
     let copiedIds = new Set<string>();
     // Upload work remains cancellable, but a durable commit must publish its
@@ -369,16 +380,22 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           let accepted = 0;
           let updated = 0;
           let deleted = 0;
+          const changedDays = new Set<string>();
           const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
           const existingRows = batch.events.length
-            ? yield* sql.unsafe<{ id: string; payload_hash: string; payload: string }>(
-                'SELECT id, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?))',
+            ? yield* sql.unsafe<{ id: string; timestamp: string; payload_hash: string; payload: string }>(
+                'SELECT id, timestamp, payload_hash, payload FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?))',
                 [deviceId, JSON.stringify(batch.events.map((event) => event.id))],
               )
             : [];
           const existing = yield* Effect.try({
             try: () =>
-              new Map(existingRows.map((row) => [row.id, { hash: row.payload_hash, event: decodeEvent(row.payload) }])),
+              new Map(
+                existingRows.map((row) => [
+                  row.id,
+                  { hash: row.payload_hash, timestamp: row.timestamp, event: decodeEvent(row.payload) },
+                ]),
+              ),
             catch: storageFailure,
           });
           const changedRows: {
@@ -406,17 +423,20 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             const payload = JSON.stringify(normalized);
             const payloadHash = digest(JSON.stringify([pricingSnapshot, payload]));
             if (previous?.hash === payloadHash) continue;
+            const timestamp = new Date(event.timestamp).toISOString();
+            changedDays.add(utcDay(timestamp));
+            if (previous) changedDays.add(utcDay(previous.timestamp));
             changedRows.push({
               device_id: deviceId,
               id: event.id,
-              timestamp: new Date(event.timestamp).toISOString(),
+              timestamp,
               payload,
               payload_hash: payloadHash,
               pricing_snapshot: pricingSnapshot,
             });
             if (previous === undefined) accepted += 1;
             else updated += 1;
-            existing.set(event.id, { hash: payloadHash, event: normalized });
+            existing.set(event.id, { hash: payloadHash, timestamp, event: normalized });
           }
           for (let offset = 0; offset < changedRows.length; offset += rowsPerUpsert) {
             const chunk = changedRows.slice(offset, offset + rowsPerUpsert);
@@ -439,11 +459,12 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           const deletedIds = batch.deletedIds ?? [];
           for (let offset = 0; offset < deletedIds.length; offset += 256) {
             const ids = deletedIds.slice(offset, offset + 256);
-            const rows = yield* sql.unsafe(
-              'DELETE FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?)) RETURNING id',
+            const rows = yield* sql.unsafe<{ timestamp: string }>(
+              'DELETE FROM usage_events WHERE device_id = ? AND id IN (SELECT value FROM json_each(?)) RETURNING timestamp',
               [deviceId, JSON.stringify(ids)],
             );
             deleted += rows.length;
+            for (const { timestamp } of rows) changedDays.add(utcDay(timestamp));
           }
           const receivedAt = new Date().toISOString();
           const sources = batch.sources ? JSON.stringify(batch.sources) : null;
@@ -457,119 +478,77 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           yield* sql`UPDATE devices SET platform = ${batch.device.platform}, last_seen = ${receivedAt},
               sources = COALESCE(${sources}, sources),
               pricing_updated_at = COALESCE(${pricingUpdatedAt}, pricing_updated_at) WHERE id = ${deviceId}`;
-          return { accepted, updated, deleted, receivedAt, metadataChanged };
+          return { accepted, updated, deleted, receivedAt, metadataChanged, changedDays };
         }),
         (result) => {
-          if (result.accepted || result.updated || result.deleted) revision++;
+          if (result.changedDays.size) {
+            revision++;
+            pages.invalidate(result.changedDays);
+          }
           if (result.metadataChanged) metadataRevision++;
           if (result.accepted || result.deleted) ownerRevision++;
         },
       ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
-      const { metadataChanged: _metadataChanged, ...acknowledgement } = result;
+      const { metadataChanged: _metadataChanged, changedDays: _changedDays, ...acknowledgement } = result;
       return acknowledgement;
     });
 
+    // Outside copies can change the selected owner even if their timestamps don't
+    // match the range. Only merge/sort those exceptions, never re-sort the entire
+    // decoded history just because a local log supplied another candidate ID.
+    const readOutside = (excluded: string, options: UsageReadOptions, ids: readonly string[]) => {
+      const owner = ownerFilter(excluded, options.devices);
+      return sql
+        .unsafe<StoredRow>(
+          `SELECT ${rowColumns} FROM usage_events WHERE ${owner.where}
+         AND id IN (SELECT value FROM json_each(?)) AND (timestamp < ? OR timestamp >= ?) ORDER BY timestamp`,
+          [...owner.params, JSON.stringify(ids), options.start || '', options.end || '\uffff'],
+        )
+        .pipe(Effect.mapError(storageFailure));
+    };
+    type Outside = { event: UsageEvent; stamp: ReturnType<typeof priceStamp>; timestamp: string };
+    const withOutside = (inside: EventWindow, outside: Outside[], end: string | undefined) => {
+      if (!outside.length) return { ...inside, inside, outside };
+      const events = outside.map((entry) => entry.event);
+      const stamps = outside.map((entry) => entry.stamp);
+      // Already sorted by the normalized UTC index. Outside copies either
+      // precede the entire inside window or follow its exclusive upper bound.
+      const index = end ? outside.findIndex((entry) => entry.timestamp >= end) : -1;
+      const split = index < 0 ? outside.length : index;
+      return {
+        events: events.slice(0, split).concat(inside.events, events.slice(split)),
+        pricingSnapshots: stamps.slice(0, split).concat(inside.pricingSnapshots, stamps.slice(split)),
+        inside,
+        outside,
+      };
+    };
+    const decodeOutside = (rows: readonly StoredRow[]) =>
+      Effect.try({
+        try: () =>
+          rows.map((row) => ({ event: decodeEvent(row.payload), timestamp: row.timestamp, stamp: priceStamp(row) })),
+        catch: storageFailure,
+      });
     const readWindow = Effect.fn('UsageStore.readWindow')(
-      function* (excludeDeviceId?: string, options: UsageReadOptions = {}) {
-        const filters = ['device_id <> ?'];
-        const parameters: string[] = [excludeDeviceId ?? ''];
-        if (options.devices) {
-          filters.push(options.devices.length ? `device_id IN (${options.devices.map(() => '?').join(', ')})` : '0');
-          parameters.push(...options.devices);
+      function* (excluded: string, options: UsageReadOptions = {}) {
+        const data = yield* pages.read(excluded, options);
+        if ((!options.start && !options.end) || !data.events.length) return withOutside(data, [], options.end);
+        if (copiedRevision !== ownerRevision) {
+          const version = ownerRevision;
+          const copies = yield* sql<{ id: string }>`SELECT id FROM usage_copied_ids`;
+          copiedIds = new Set(copies.map((row) => row.id));
+          copiedRevision = version;
         }
-        const ownerFilter = filters.join(' AND ');
-        const window = [];
-        const windowParameters: string[] = [];
-        if (options.start) {
-          window.push('timestamp >= ?');
-          windowParameters.push(options.start);
-        }
-        if (options.end) {
-          window.push('timestamp < ?');
-          windowParameters.push(options.end);
-        }
-        const columns = 'id, device_id, timestamp, payload, pricing_snapshot';
-        type StoredRow = {
-          id: string;
-          device_id: string;
-          timestamp: string;
-          payload: string;
-          pricing_snapshot: string;
-        };
-        const first = yield* sql.unsafe<StoredRow>(
-          `SELECT ${columns} FROM usage_events WHERE ${ownerFilter}${window.length ? ` AND ${window.join(' AND ')}` : ''} ORDER BY timestamp`,
-          [...parameters, ...windowParameters],
+        const candidates = new Set<string>();
+        if (copiedIds.size)
+          for (const stamp of data.pricingSnapshots) if (copiedIds.has(stamp.eventId)) candidates.add(stamp.eventId);
+        if (!candidates.size) return withOutside(data, [], options.end);
+        return withOutside(
+          data,
+          yield* decodeOutside(yield* readOutside(excluded, options, [...candidates])),
+          options.end,
         );
-        let rows = first;
-        if (window.length) {
-          if (copiedRevision !== ownerRevision) {
-            const version = ownerRevision;
-            const copies = yield* sql<{ id: string }>`SELECT id FROM usage_copied_ids`;
-            copiedIds = new Set(copies.map((row) => row.id));
-            copiedRevision = version;
-          }
-          // Only copied IDs need out-of-window owners. Avoid a full-history ID
-          // join and payload sort on the common path; include live local copies too.
-          const candidates = new Set<string>();
-          for (const row of first) if (copiedIds.has(row.id)) candidates.add(row.id);
-          if (candidates.size) {
-            const outside = yield* sql.unsafe<StoredRow>(
-              `SELECT ${columns} FROM usage_events WHERE ${ownerFilter} AND id IN (SELECT value FROM json_each(?)) AND NOT (${window.join(' AND ')}) ORDER BY timestamp`,
-              [...parameters, JSON.stringify([...candidates]), ...windowParameters],
-            );
-            if (outside.length) {
-              const merged: StoredRow[] = [];
-              let left = 0;
-              let right = 0;
-              while (left < first.length || right < outside.length) {
-                if (
-                  right >= outside.length ||
-                  (left < first.length && first[left].timestamp <= outside[right].timestamp)
-                )
-                  merged.push(first[left++]);
-                else merged.push(outside[right++]);
-              }
-              rows = merged;
-            }
-          }
-        }
-        const metadata = yield* sql<{ name: string; sources: string; pricing_updated_at: string }>`
-        SELECT name, sources, pricing_updated_at FROM devices WHERE id <> ${excludeDeviceId ?? ''}
-      `;
-        const events: UsageEvent[] = [];
-        for (let offset = 0; offset < rows.length; offset += 1_000) {
-          yield* Effect.try({
-            try: () => {
-              for (const row of rows.slice(offset, offset + 1_000)) events.push(decodeEvent(row.payload));
-            },
-            catch: storageFailure,
-          });
-          yield* Effect.yieldNow;
-        }
-        const sources = yield* Effect.try({
-          try: () =>
-            metadata.flatMap((row) =>
-              decodeSources(row.sources).map((source) => ({ ...source, path: `${row.name} · ${source.path}` })),
-            ),
-          catch: storageFailure,
-        });
-        return {
-          events,
-          sources,
-          warnings: [],
-          pricingSnapshots: rows.map((row) => ({
-            eventId: row.id,
-            deviceId: row.device_id,
-            updatedAt: row.pricing_snapshot,
-          })),
-          pricingUpdatedAt:
-            metadata
-              .map((row) => row.pricing_updated_at)
-              .sort()
-              .at(-1) ?? '',
-        };
       },
-      (effect, _excludeDeviceId?: string, _options: UsageReadOptions = {}) => Effect.mapError(effect, storageFailure),
+      (effect) => Effect.mapError(effect, storageFailure),
     );
 
     const decodeWindowKey = Schema.decodeUnknownSync(
@@ -593,94 +572,96 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
     );
     let windowRevision = revision;
+    const metadataCache = yield* Cache.makeWith(
+      (key: string) =>
+        Effect.gen(function* () {
+          const excluded = key.slice(key.indexOf(':') + 1);
+          const metadata = yield* sql<{
+            name: string;
+            sources: string;
+            pricing_updated_at: string;
+          }>`SELECT name, sources, pricing_updated_at FROM devices WHERE id <> ${excluded}`.pipe(
+            Effect.mapError(storageFailure),
+          );
+          const sources = yield* Effect.try({
+            try: () =>
+              metadata.flatMap((row) =>
+                decodeSources(row.sources).map((source) => ({ ...source, path: `${row.name} · ${source.path}` })),
+              ),
+            catch: storageFailure,
+          });
+          return {
+            sources,
+            pricingUpdatedAt:
+              metadata
+                .map((row) => row.pricing_updated_at)
+                .sort()
+                .at(-1) ?? '',
+          };
+        }),
+      { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
+    );
+    const readMetadata = (excluded = '') => Cache.get(metadataCache, `${metadataRevision}:${excluded}`);
+    const getSources = (excluded?: string) => Effect.map(readMetadata(excluded), (metadata) => metadata.sources);
+    const includeLocalOwners = Effect.fn('UsageStore.includeLocalOwners')(function* (
+      data: ReturnType<typeof withOutside>,
+      excluded: string,
+      options: UsageReadOptions,
+    ) {
+      const { candidateIds } = options;
+      if (candidateIds?.length && (options.start || options.end)) {
+        const candidates = yield* readOutside(excluded, options, candidateIds);
+        if (candidates.length) {
+          const known = new Set(data.outside.map(({ stamp }) => JSON.stringify([stamp.deviceId, stamp.eventId])));
+          const rows = known.size
+            ? candidates.filter((row) => !known.has(JSON.stringify([row.device_id, row.id])))
+            : candidates;
+          if (rows.length) {
+            const extra = yield* decodeOutside(rows);
+            const outside = data.outside.length
+              ? data.outside
+                  .concat(extra)
+                  .sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0))
+              : extra;
+            data = withOutside(data.inside, outside, options.end);
+          }
+        }
+      }
+      return data;
+    });
     const getUsage = Effect.fn('UsageStore.getUsage')(function* (
       excludeDeviceId?: string,
       options: UsageReadOptions = {},
     ) {
-      const { candidateIds, ...windowOptions } = options;
+      const { candidateIds: _candidateIds, ...windowOptions } = options;
       // Retire large decoded arrays after a committed event change. Metadata
       // updates reuse them, and the revision in each key isolates in-flight reads.
       if (windowRevision !== revision) {
         yield* Cache.invalidateAll(windows);
         windowRevision = revision;
       }
-      const data = yield* Cache.get(
+      const generation = revision;
+      const excluded = excludeDeviceId ?? '';
+      const cached = yield* Cache.get(
         windows,
-        JSON.stringify({ excluded: excludeDeviceId ?? '', revision, options: windowOptions }),
+        JSON.stringify({ excluded, revision: generation, options: windowOptions }),
       );
-      let events = data.events;
-      let pricingSnapshots = data.pricingSnapshots;
-      if (candidateIds?.length && (options.start || options.end)) {
-        const owner = ['device_id <> ?'];
-        const parameters: string[] = [excludeDeviceId ?? ''];
-        if (options.devices) {
-          owner.push(options.devices.length ? `device_id IN (${options.devices.map(() => '?').join(', ')})` : '0');
-          parameters.push(...options.devices);
-        }
-        const time = [];
-        const timeParameters: string[] = [];
-        if (options.start) {
-          time.push('timestamp >= ?');
-          timeParameters.push(options.start);
-        }
-        if (options.end) {
-          time.push('timestamp < ?');
-          timeParameters.push(options.end);
-        }
-        const rows = yield* sql
-          .unsafe<{ id: string; device_id: string; payload: string; pricing_snapshot: string }>(
-            `SELECT id, device_id, payload, pricing_snapshot FROM usage_events WHERE ${owner.join(' AND ')} AND id IN (SELECT value FROM json_each(?)) AND NOT (${time.join(' AND ')}) ORDER BY timestamp`,
-            [...parameters, JSON.stringify(candidateIds), ...timeParameters],
+      let data = yield* includeLocalOwners(cached, excluded, options);
+      if (generation !== revision) {
+        // A move, correction or deletion may land between date pages or owner
+        // lookups. Retry once under one database transaction; do not await a
+        // shared cache entry here (its producer could need the same connection).
+        data = yield* sql
+          .withTransaction(
+            readWindow(excluded, options).pipe(Effect.flatMap((fresh) => includeLocalOwners(fresh, excluded, options))),
           )
           .pipe(Effect.mapError(storageFailure));
-        if (rows.length) {
-          const known = new Set(events.map((event) => `${event.deviceId}:${event.id}`));
-          const extra: UsageEvent[] = [];
-          const extraSnapshots: typeof pricingSnapshots = [];
-          yield* Effect.try({
-            try: () => {
-              for (const row of rows) {
-                if (known.has(`${row.device_id}:${row.id}`)) continue;
-                extra.push(decodeEvent(row.payload));
-                extraSnapshots.push({ eventId: row.id, deviceId: row.device_id, updatedAt: row.pricing_snapshot });
-              }
-            },
-            catch: storageFailure,
-          });
-          if (extra.length) {
-            // The common path retains the cached array. Exceptional live local
-            // copies are merged in timestamp order to preserve winner selection.
-            events = [...events, ...extra].sort(
-              (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp),
-            );
-            pricingSnapshots = [...pricingSnapshots, ...extraSnapshots];
-          }
-        }
       }
-      const metadata = yield* sql<{
-        name: string;
-        sources: string;
-        pricing_updated_at: string;
-      }>`SELECT name, sources, pricing_updated_at FROM devices WHERE id <> ${excludeDeviceId ?? ''}`.pipe(
-        Effect.mapError(storageFailure),
-      );
-      const sources = yield* Effect.try({
-        try: () =>
-          metadata.flatMap((row) =>
-            decodeSources(row.sources).map((source) => ({ ...source, path: `${row.name} · ${source.path}` })),
-          ),
-        catch: storageFailure,
-      });
       return {
-        ...data,
-        events,
-        pricingSnapshots,
-        sources,
-        pricingUpdatedAt:
-          metadata
-            .map((row) => row.pricing_updated_at)
-            .sort()
-            .at(-1) ?? '',
+        events: data.events,
+        pricingSnapshots: data.pricingSnapshots,
+        warnings: [],
+        ...(yield* readMetadata(excludeDeviceId)),
       };
     });
 
@@ -766,6 +747,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       importUsage: (pairingSecret: string, batch: SyncBatch) =>
         writeUsageBatch(batch.device.id, batch, { pairingSecret }),
       getUsage,
+      getSources,
       getDimensions,
       getRevision: () => revision,
       getMetadataRevision: () => metadataRevision,

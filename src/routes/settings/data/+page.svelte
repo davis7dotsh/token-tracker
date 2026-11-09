@@ -4,14 +4,14 @@
   import { untrack } from 'svelte';
   import { failureMessage, getSettings } from '#lib/client/settings.svelte.ts';
   import { categoryNames, seriesColor } from '#lib/client/visuals.ts';
-  import type { DashboardResponse } from '#lib/shared/domain.ts';
+  import type { UsageInfo } from '#lib/shared/domain.ts';
   import Icon from '#lib/components/Icon.svelte';
 
   let { data: pageData, form }: PageProps = $props();
   let savingKey = $state(false);
   const settings = getSettings();
   const integer = new Intl.NumberFormat('en-US');
-  let data = $state.raw<DashboardResponse>();
+  let data = $state.raw<UsageInfo>();
   let loading = $state(true);
   let error = $state('');
   let request: AbortController | undefined;
@@ -25,7 +25,7 @@
     loading = true;
     error = '';
     try {
-      const next = await client.getUsage(
+      const next = await client.getUsageInfo(
         { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
         controller.signal,
       );

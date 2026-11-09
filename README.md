@@ -307,8 +307,15 @@ Keep the new host's existing device identity distinct from the old host's; do no
 To measure the running dashboard without changing its data:
 
 ```sh
-bun run bench https://tracker.example.ts.net:10007
+bun run bench https://tracker.example.ts.net:10007 30d 9 page # workbench: first 12 sessions
+bun run bench https://tracker.example.ts.net:10007 30d 9 full # legacy clients and full CSV data
 ```
+
+Overview and Compare reuse results for the same scope. Session pages are live: an upload between reads can shift rows; CSV export uses one full result. Within the workbench, recently viewed pages are reused for up to a minute (eight pages, 8 MiB estimated response budget); **Refresh** bypasses that cache. SQLite reuses decoded UTC days across overlapping reads, and an upload invalidates both the old and new days of a moved record. Dense hours reuse session rollups; hours crossing a filter’s time boundary use the underlying events.
+
+On a self-hosted hub, `dashboard-view.json` in the data directory stores only the last short range (today, 7 or 30 days) and timezone. The next hub startup can prepare that view in the background. Upload bursts also precompute a recently viewed short range after the writes settle. Neither path makes a reader wait for speculative work to start; a cold query still calculates the current result. Removing the hint is safe.
+
+On the first request after this upgrade, SQLite builds a device/time index. Allow extra time and disk space on large hubs (about 67 MiB per million events in our benchmark). Warm a representative dashboard range after deployment. If deploying the Cloudflare components separately, upgrade the hub before the dashboard so it recognizes the new paged RPC.
 
 ```sh
 bun run lint          # Oxlint, including type-aware rules and TypeScript checks

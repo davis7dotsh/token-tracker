@@ -42,35 +42,37 @@ const inventory = async (root: string, grok: boolean, onUnavailable: () => void)
   }
   records.push(`root:${root}:${physical}`);
   const pending = [physical];
-  while (pending.length) {
-    const directory = pending.pop();
-    if (!directory) break;
-    let entries;
+  const files: string[] = [];
+  const scanDirectory = async (directory: string) => {
     try {
       const info = await fileInfo(directory);
       records.push(`directory:${directory}:${info ? fingerprint(info) : 'missing'}`);
-      if (!info?.isDirectory()) continue;
-      entries = await readdir(directory, { withFileTypes: true });
+      if (!info?.isDirectory()) return;
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const file = join(directory, entry.name);
+        if (entry.isDirectory()) pending.push(file);
+        else if (
+          entry.isFile() &&
+          (entry.name.toLowerCase().endsWith('.jsonl') || (grok && grokMetadata.has(entry.name)))
+        )
+          files.push(file);
+      }
     } catch (error) {
       unavailable(directory, error);
-      continue;
     }
-    for (const entry of entries) {
-      const file = join(directory, entry.name);
-      if (entry.isDirectory()) pending.push(file);
-      else if (
-        entry.isFile() &&
-        (entry.name.toLowerCase().endsWith('.jsonl') || (grok && grokMetadata.has(entry.name)))
-      ) {
-        try {
-          const info = await fileInfo(file);
-          records.push(`file:${file}:${info ? fingerprint(info) : 'missing'}`);
-        } catch (error) {
-          unavailable(file, error);
-        }
-      }
+  };
+  // Bound I/O fan-out for both deep session trees and large flat directories.
+  // The final fingerprint sorts records and is independent of traversal order.
+  while (pending.length) await Promise.all(pending.splice(-16).map(scanDirectory));
+  const observeFile = async (file: string) => {
+    try {
+      const info = await fileInfo(file);
+      records.push(`file:${file}:${info ? fingerprint(info) : 'missing'}`);
+    } catch (error) {
+      unavailable(file, error);
     }
-  }
+  };
+  for (let i = 0; i < files.length; i += 32) await Promise.all(files.slice(i, i + 32).map(observeFile));
   return records;
 };
 
@@ -87,11 +89,10 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
         const inventoryRecords: string[] = [];
         for (const source of sources) {
           inventoryRecords.push(`source:${source.harness}:${source.path}`);
-          inventoryRecords.push(
-            ...(await inventory(source.path, source.harness === 'grok', () => {
-              observationUnavailable = true;
-            })),
-          );
+          const entries = await inventory(source.path, source.harness === 'grok', () => {
+            observationUnavailable = true;
+          });
+          for (const entry of entries) inventoryRecords.push(entry);
         }
         const snapshot = options.cursorSnapshotFile ?? cursorSnapshotPath(home);
         try {

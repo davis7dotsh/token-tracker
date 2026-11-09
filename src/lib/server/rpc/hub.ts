@@ -6,6 +6,7 @@ import { RpcSerialization, RpcServer } from 'effect/rpc';
 import { InvalidRequest, UsageFailure, UsageRpc, type PricingSettings } from '../../shared/rpc';
 import type { PricingPolicy } from '../../shared/pricing';
 import { UsageQuery, type CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
+import { sessionPageSize } from '../../shared/dashboard-page';
 import { tokenTotal } from '../usage/parsers';
 import {
   describePricingGaps,
@@ -17,15 +18,19 @@ import {
 } from '../usage/pricing';
 import { makePricingRuntime, pricingRefreshDue, sqlPricingStorage, type PricingState } from '../usage/pricing-store';
 import {
-  buildDashboardSnapshot,
+  aggregateDashboard,
+  pricingMethod,
   eventMillis,
   isDashboardCurrent,
-  matchesUsage,
+  usageMatchers,
   provider,
   usageTimeframe,
   type DashboardValidity,
 } from '../usage/dashboard';
+import { makeViewWarmer, type ViewHints } from './view-warmer';
 import { ServerConfiguration, UsageStore } from './store';
+
+const hubVersion = '0.4.0';
 
 // The hub serves the dashboard RPC and sync uploads on any host. A Bun hub also
 // collects its own machine's logs; the Cloudflare hub has no local device.
@@ -125,27 +130,48 @@ export type HubOptions = {
   // A public hub requires the pairing secret for every pricing change.
   readonly trustBrowser: boolean;
   readonly autoRefreshPricing: boolean;
+  readonly viewHints?: ViewHints;
 };
 
 // Store every device's copy for its own view, but count one native request when
 // those logs have been copied between machines. Filtering precedes deduplication
 // so a device remains independently inspectable.
-const uniqueEvents = (events: readonly UsageEvent[], localDeviceId: string, query: UsageQuery) => {
-  const records = new Map<string, UsageEvent>();
+const uniqueEvents = (
+  remote: readonly UsageEvent[],
+  local: readonly UsageEvent[],
+  localDeviceId: string,
+  query: UsageQuery,
+) => {
+  const positions = new Map<UsageEvent['harness'], Map<string, number>>();
+  const records: UsageEvent[] = [];
   const devices = query.devices && new Set(query.devices);
-  for (const incoming of events) {
-    if (devices && !devices.has(incoming.deviceId ?? 'local')) continue;
-    const key = `${incoming.harness}:${incoming.id}`;
-    const existing = records.get(key);
-    const preferredOwner =
-      incoming.deviceId === localDeviceId ||
-      (existing?.deviceId !== localDeviceId && (incoming.deviceId ?? '').localeCompare(existing?.deviceId ?? '') < 0);
-    const incomingTokens = tokenTotal(incoming);
-    const existingTokens = existing ? tokenTotal(existing) : -1;
-    if (!existing || incomingTokens > existingTokens || (incomingTokens === existingTokens && preferredOwner))
-      records.set(key, incoming);
-  }
-  return [...records.values()];
+  for (const events of [remote, local])
+    for (const incoming of events) {
+      if (devices && !devices.has(incoming.deviceId ?? 'local')) continue;
+      let ids = positions.get(incoming.harness);
+      if (!ids) {
+        ids = new Map();
+        positions.set(incoming.harness, ids);
+      }
+      const index = ids.get(incoming.id);
+      if (index === undefined) {
+        ids.set(incoming.id, records.length);
+        records.push(incoming);
+        continue;
+      }
+      const existing = records[index];
+      const incomingTokens = tokenTotal(incoming);
+      const existingTokens = tokenTotal(existing);
+      if (
+        incomingTokens > existingTokens ||
+        (incomingTokens === existingTokens &&
+          (incoming.deviceId === localDeviceId ||
+            (existing.deviceId !== localDeviceId &&
+              (incoming.deviceId ?? '').localeCompare(existing.deviceId ?? '') < 0)))
+      )
+        records[index] = incoming;
+    }
+  return records;
 };
 
 const dashboardProofHeader = 'x-token-tracker-pricing-access';
@@ -172,6 +198,9 @@ const retainResult = <A>(cache: Map<string, A>, key: string, value: A) => {
 // and device administration.
 const CollectorRpc = UsageRpc.omit(
   'GetUsage',
+  'GetUsagePage',
+  'GetUsageInfo',
+  'GetHubInfo',
   'GetDevices',
   'GetPricing',
   'GetAdminAccess',
@@ -222,7 +251,6 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           Schema.Struct({
             query: UsageQuery,
             revision: Schema.Number,
-            metadataRevision: Schema.Number,
             localGeneration: Schema.Number,
             start: Schema.optionalKey(Schema.String),
             end: Schema.optionalKey(Schema.String),
@@ -235,14 +263,13 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         const { current } = yield* SnapshotInput;
         const previousMillis = start ? Date.parse(start) : -Infinity;
         const endMillis = end ? Date.parse(end) : Infinity;
-        const localCandidates = start
-          ? current.events
-              .filter((event) => {
-                const millis = eventMillis(event);
-                return millis >= previousMillis && millis < endMillis;
-              })
-              .map((event) => event.id)
-          : [];
+        const localCandidates: string[] = [];
+        if (start)
+          for (const event of current.events) {
+            if (query.devices && !query.devices.includes(event.deviceId ?? 'local')) continue;
+            const millis = eventMillis(event);
+            if (millis >= previousMillis && millis < endMillis) localCandidates.push(event.id);
+          }
         const [remote, dimensions] = yield* Effect.all(
           [
             store.getUsage(localDeviceId, {
@@ -294,7 +321,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           remote,
           current,
           dimensions: choices,
-          unique: uniqueEvents([...remote.events, ...current.events], localDeviceId, query),
+          unique: uniqueEvents(remote.events, current.events, localDeviceId, query),
         };
       });
       // A pricing edit invalidates calculated prices, not the underlying usage.
@@ -304,46 +331,61 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0),
         requireServicesAt: 'lookup',
       });
+      // Repricing can change both the value and identity of a stored event.
+      // A stable priced record lets the analytics layer reuse an unchanged
+      // block after a neighboring day is updated, without pinning its inputs.
+      const prices = new WeakMap<PricingPolicy, WeakMap<UsageEvent, UsageEvent>>();
       const readSnapshot = Effect.fn('rpc.readSnapshot')(function* (key: string) {
         const { pricingRevision: _, ...rawKey } = decodeReadKey(key);
         const { state } = yield* SnapshotInput;
         const { remote, current, dimensions, unique } = yield* Cache.get(rawSnapshots, JSON.stringify(rawKey));
+        let priced = prices.get(state.policy);
+        if (!priced) {
+          priced = new WeakMap();
+          prices.set(state.policy, priced);
+        }
         const events: UsageEvent[] = [];
         const unknownLocalModels = new Set<string>();
         // Records without pricing metadata keep a reported cost; saved rules
         // can still estimate them when none was reported, and free rules always apply.
-        const retained = new Set<UsageEvent>();
+        const policySnapshot = `${state.info.updatedAt} · ${state.info.revision.slice(0, 12)}`;
+        const legacy = new Map<string, Set<string>>();
+        const snapshotSet = new Set<string>();
+        const unpriced: UsageEvent[] = [];
         for (let offset = 0; offset < unique.length; offset += 1_000) {
           const end = Math.min(offset + 1_000, unique.length);
           for (let index = offset; index < end; index++) {
-            const event = repriceEvent(unique[index], state.policy);
+            const source = unique[index];
+            let event = priced.get(source);
+            if (!event) {
+              event = repriceEvent(source, state.policy);
+              priced.set(source, event);
+            }
             events.push(event);
-            if (retainsRecordedCost(unique[index], state.policy)) retained.add(event);
-            if ((event.deviceId ?? '') === localDeviceId && !event.costKnown)
-              unknownLocalModels.add(event.rawModel ?? event.model);
+            if (!event.costKnown) {
+              unpriced.push(event);
+              if ((event.deviceId ?? '') === localDeviceId) unknownLocalModels.add(event.rawModel ?? event.model);
+            } else if (!retainsRecordedCost(source, state.policy)) snapshotSet.add(policySnapshot);
+            else if (event.deviceId === localDeviceId) snapshotSet.add(current.pricingUpdatedAt || 'unknown');
+            else {
+              const device = event.deviceId ?? '';
+              let ids = legacy.get(device);
+              if (!ids) {
+                ids = new Set();
+                legacy.set(device, ids);
+              }
+              ids.add(event.id);
+            }
           }
           yield* Effect.yieldNow;
         }
-        const policySnapshot = `${state.info.updatedAt} · ${state.info.revision.slice(0, 12)}`;
-        const legacyKeys = new Set<string>();
-        for (const event of retained)
-          if (event.deviceId !== localDeviceId) legacyKeys.add(`${event.deviceId}:${event.id}`);
-        const snapshotsByRecord = new Map<string, string>();
-        if (legacyKeys.size)
+        if (legacy.size) {
           for (const snapshot of remote.pricingSnapshots) {
-            const key = `${snapshot.deviceId}:${snapshot.eventId}`;
-            if (legacyKeys.has(key)) snapshotsByRecord.set(key, snapshot.updatedAt);
+            if (legacy.get(snapshot.deviceId)?.delete(snapshot.eventId))
+              snapshotSet.add(snapshot.updatedAt || 'unknown');
           }
-        const snapshotSet = new Set<string>();
-        for (const event of events)
-          if (event.costKnown)
-            snapshotSet.add(
-              (!retained.has(event)
-                ? policySnapshot
-                : event.deviceId === localDeviceId
-                  ? current.pricingUpdatedAt
-                  : snapshotsByRecord.get(`${event.deviceId}:${event.id}`)) || 'unknown',
-            );
+          if ([...legacy.values()].some((ids) => ids.size)) snapshotSet.add('unknown');
+        }
         const snapshots = [...snapshotSet].sort();
         const pricingWarnings =
           snapshots.length > 1
@@ -355,12 +397,23 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
                   'Some legacy synced costs have no recorded pricing snapshot; they retain the prices reported by that machine.',
                 ]
               : [];
+        const devices = rawKey.query.devices && new Set(rawKey.query.devices);
+        const available = devices ? dimensions.filter((row) => devices.has(row.deviceId)) : dimensions;
+        const models = [...new Set(available.map((row) => resolveDisplayModel(row.model, state.policy)))].sort();
         return {
           state,
-          dimensions,
+          filters: {
+            harnesses: [...new Set(available.map((row) => row.harness))].sort(),
+            models,
+            providers: [...new Set(models.map(provider))].sort(),
+            projects: [...new Set(available.map((row) => row.project))].sort(),
+            modelProviders: models.map((model) => ({ model, provider: provider(model) })),
+            devices: [...new Set(dimensions.map((row) => row.deviceId))].sort(),
+          },
+          unpriced,
           data: {
             events,
-            sources: [...current.sources, ...remote.sources],
+            sources: current.sources,
             warnings: [
               ...current.warnings.filter((warning) => !warning.startsWith('No reliable API price for: ')),
               ...(unknownLocalModels.size
@@ -382,7 +435,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0),
         requireServicesAt: 'lookup',
       });
-      const dashboards = new Map<string, ReturnType<typeof buildDashboardSnapshot>>();
+      const dashboards = new Map<string, ReturnType<typeof aggregateDashboard>>();
       const pricingResults = new Map<
         string,
         { unresolved: PricingSettings['unresolved']; validity: DashboardValidity }
@@ -393,8 +446,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         const { current, generation } = yield* localSnapshot;
         const state = yield* pricing.load;
         const revision = store.getRevision();
-        const metadataRevision = store.getMetadataRevision();
-        const epoch = `${revision}:${metadataRevision}:${generation}`;
+        const epoch = `${revision}:${generation}`;
         if (epoch !== snapshotEpoch) {
           snapshotEpoch = epoch;
           yield* Cache.invalidateAll(rawSnapshots);
@@ -412,13 +464,8 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         const effective = effectiveQuery(query, state.policy);
         const normalized = normalizedQuery(effective);
         const readKey = {
-          query: {
-            range: normalized.range,
-            timezone: normalized.timezone,
-            ...(normalized.devices ? { devices: normalized.devices } : {}),
-          },
+          query: normalized.devices ? { devices: normalized.devices } : {},
           revision,
-          metadataRevision,
           localGeneration: generation,
           ...(timeframe.range !== 'all'
             ? {
@@ -439,68 +486,104 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           timeframe,
         };
       });
+      const getUsage = Effect.fn('rpc.GetUsage')(
+        function* (query: UsageQuery) {
+          const input = yield* readQuery(query);
+          let cached = dashboards.get(input.resultKey);
+          if (!cached || !isDashboardCurrent(cached, input.timeframe, input.now)) {
+            const result = yield* Cache.get(snapshots, input.readKey).pipe(
+              Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
+            );
+            // A concurrent reader can finish the same small response while
+            // this request waits for shared event preparation.
+            cached = dashboards.get(input.resultKey);
+            if (!cached || !isDashboardCurrent(cached, input.timeframe, input.now))
+              cached = yield* Effect.try({
+                try: () =>
+                  aggregateDashboard(
+                    result.data,
+                    input.normalized,
+                    input.now,
+                    local.device?.name ?? 'All devices',
+                    result.state.policy,
+                    input.timeframe,
+                    result.filters,
+                  ),
+                catch: () => new UsageFailure({ message: 'The selected usage timeframe or timezone is invalid.' }),
+              });
+          }
+          retainResult(dashboards, input.resultKey, cached);
+          return {
+            ...cached.response,
+            generatedAt: input.now.toISOString(),
+            sources: [...input.current.sources, ...(yield* store.getSources(localDeviceId))],
+            filters: {
+              ...cached.response.filters,
+              ...(input.query.models ? { selectedModels: input.query.models } : {}),
+            },
+          };
+        },
+        Effect.mapError((error) =>
+          error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+        ),
+      );
+      const warmer = yield* makeViewWarmer(options.viewHints, getUsage, store.getRevision);
       return {
-        GetUsage: Effect.fn('rpc.GetUsage')(
+        GetUsage: getUsage,
+        GetUsagePage: Effect.fn('rpc.GetUsagePage')(function* ({ query, page }) {
+          const { projectInsights: _insights, ...dashboard } = yield* getUsage(query);
+          yield* warmer.visited(query);
+          const sessionCount = dashboard.sessions.length;
+          const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
+          const sessionOffset = (Math.min(page, lastPage) - 1) * sessionPageSize;
+          return {
+            ...dashboard,
+            sessions: dashboard.sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
+            sessionCount,
+            sessionOffset,
+          };
+        }),
+        GetUsageInfo: Effect.fn('rpc.GetUsageInfo')(
           function* (query) {
             const input = yield* readQuery(query);
-            let cached = dashboards.get(input.resultKey);
-            if (!cached || !isDashboardCurrent(cached, input.timeframe, input.now)) {
-              const result = yield* Cache.get(snapshots, input.readKey).pipe(
-                Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
-              );
-              // A concurrent reader can finish the same small response while
-              // this request waits for shared event preparation.
-              cached = dashboards.get(input.resultKey);
-              if (!cached || !isDashboardCurrent(cached, input.timeframe, input.now))
-                cached = yield* Effect.try({
-                  try: () => {
-                    const snapshot = buildDashboardSnapshot(
-                      result.data,
-                      input.normalized,
-                      input.now,
-                      local.device?.name ?? 'All devices',
-                      result.state.policy,
-                    );
-                    const available = result.dimensions.filter(
-                      (dimension) => !input.query.devices || input.query.devices.includes(dimension.deviceId),
-                    );
-                    const models = [
-                      ...new Set(
-                        available.map((dimension) => resolveDisplayModel(dimension.model, result.state.policy)),
-                      ),
-                    ].sort();
-                    return {
-                      ...snapshot,
-                      response: {
-                        ...snapshot.response,
-                        filters: {
-                          harnesses: [...new Set(available.map((dimension) => dimension.harness))].sort(),
-                          models,
-                          providers: [...new Set(models.map(provider))].sort(),
-                          projects: [...new Set(available.map((dimension) => dimension.project))].sort(),
-                          modelProviders: models.map((model) => ({ model, provider: provider(model) })),
-                          devices: [...new Set(result.dimensions.map((dimension) => dimension.deviceId))].sort(),
-                        },
-                      },
-                    };
-                  },
-                  catch: () => new UsageFailure({ message: 'The selected usage timeframe or timezone is invalid.' }),
-                });
-            }
-            retainResult(dashboards, input.resultKey, cached);
+            const sources = [...input.current.sources, ...(yield* store.getSources(localDeviceId))];
+            // Diagnostics depend on the prepared read window, not the rolling chart boundaries.
+            const ready = dashboards.get(input.resultKey)?.response;
+            if (ready) return { machine: ready.machine, pricing: ready.pricing, warnings: ready.warnings, sources };
+            const { data } = yield* Cache.get(snapshots, input.readKey).pipe(
+              Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
+            );
+            const { zone, requestedZone } = input.timeframe;
             return {
-              ...cached.response,
-              generatedAt: input.now.toISOString(),
-              filters: {
-                ...cached.response.filters,
-                ...(input.query.models ? { selectedModels: input.query.models } : {}),
-              },
+              machine: local.device?.name ?? 'All devices',
+              sources,
+              warnings:
+                zone === requestedZone
+                  ? data.warnings
+                  : [...data.warnings, `Timezone ${requestedZone} is unavailable; displaying UTC.`],
+              pricing: { method: pricingMethod, updatedAt: data.pricingUpdatedAt },
             };
           },
-          Effect.mapError((error) =>
-            error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
-          ),
+          Effect.mapError((error) => new UsageFailure({ message: error.message })),
         ),
+        GetHubInfo: Effect.fn('rpc.GetHubInfo')(function* () {
+          const devices = yield* store.getDevices();
+          const localDevice = local.device && devices.find((row) => row.id === local.device?.id);
+          const extra = local.device && !localDevice ? 1 : 0;
+          const { info } = yield* pricing.load;
+          return {
+            version: hubVersion,
+            localDeviceName: localDevice?.name ?? local.device?.name ?? null,
+            devices: devices.length + extra,
+            activeDevices: devices.filter((row) => !row.revokedAt).length + extra,
+            pricing: {
+              source: info.source,
+              updatedAt: info.updatedAt,
+              checkedAt: info.checkedAt,
+              refreshError: info.refreshError,
+            },
+          };
+        }),
         GetPricing: Effect.fn('rpc.GetPricing')(
           function* (query) {
             const input = yield* readQuery(query);
@@ -527,8 +610,9 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
                   previousBefore: -Infinity,
                   previousAfter: Infinity,
                 };
-                for (const event of result.data.events) {
-                  if (event.costKnown || !matchesUsage(input.normalized, event)) continue;
+                const match = usageMatchers(input.normalized);
+                for (const event of result.unpriced) {
+                  if (!match.dimensions(event) || !match.projects(event)) continue;
                   const millis = eventMillis(event);
                   if (!Number.isFinite(millis)) continue;
                   if (millis <= now) validity.nowBefore = Math.max(validity.nowBefore, millis);
@@ -611,8 +695,10 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           return yield* store.restoreDevice(deviceId);
         }),
         RegisterDevice: ({ pairingSecret, device }) => store.registerDevice(pairingSecret, device),
-        SyncUsage: ({ deviceId, token, batch }) => store.syncUsage(deviceId, token, batch),
-        ImportUsage: ({ pairingSecret, batch }) => store.importUsage(pairingSecret, batch),
+        SyncUsage: ({ deviceId, token, batch }) =>
+          store.syncUsage(deviceId, token, batch).pipe(Effect.tap(warmer.changed)),
+        ImportUsage: ({ pairingSecret, batch }) =>
+          store.importUsage(pairingSecret, batch).pipe(Effect.tap(warmer.changed)),
       };
     }),
   );
@@ -640,7 +726,7 @@ export const makeHubWebHandler = <E>(
     Effect.gen(function* () {
       const store = yield* UsageStore;
       const devices = yield* store.getDevices();
-      return HttpServerResponse.jsonUnsafe({ status: 'ok', version: '0.4.0', devices: devices.length });
+      return HttpServerResponse.jsonUnsafe({ status: 'ok', version: hubVersion, devices: devices.length });
     }).pipe(
       Effect.catchTag('StorageFailure', () =>
         Effect.succeed(HttpServerResponse.jsonUnsafe({ status: 'unavailable' }, { status: 503 })),

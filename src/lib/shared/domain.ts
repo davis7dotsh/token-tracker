@@ -190,6 +190,19 @@ export const DashboardResponse = Schema.Struct({
   pricing: Schema.Struct({ method: Schema.String, updatedAt: Schema.String }),
 });
 export type DashboardResponse = typeof DashboardResponse.Type;
+export const DashboardPage = Schema.Struct({
+  ...DashboardResponse.fields,
+  sessionCount: TokenCount,
+  sessionOffset: TokenCount,
+});
+export type DashboardPage = typeof DashboardPage.Type;
+export const UsageInfo = DashboardResponse.mapFields(({ machine, pricing, sources, warnings }) => ({
+  machine,
+  pricing,
+  sources,
+  warnings,
+}));
+export type UsageInfo = typeof UsageInfo.Type;
 
 export const DeviceRegistration = Schema.Struct({ id: Schema.String, name: Schema.String, platform: Schema.String });
 export type DeviceRegistration = typeof DeviceRegistration.Type;

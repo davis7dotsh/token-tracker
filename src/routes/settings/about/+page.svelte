@@ -1,53 +1,34 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { Schema } from 'effect';
   import { failureMessage, getSettings } from '#lib/client/settings.svelte.ts';
   import { safeWebUrl } from '#lib/client/session-links.ts';
-  import type { Device } from '#lib/shared/domain.ts';
-  import type { AdminAccess, PricingSettings } from '#lib/shared/rpc.ts';
+  import type { HubInfo } from '#lib/shared/rpc.ts';
   import Icon from '#lib/components/Icon.svelte';
 
   const settings = getSettings();
-  const decodeHealth = Schema.decodeUnknownSync(Schema.Struct({ version: Schema.String }));
-  let about = $state.raw<{
-    version: string;
-    devices: readonly Device[];
-    access: AdminAccess;
-    pricing: PricingSettings;
-  }>();
+  let about = $state.raw<HubInfo>();
   let loading = $state(true);
   let error = $state('');
   let request: AbortController | undefined;
 
-  const machine = $derived.by(() => {
-    if (!about) return undefined;
-    const local = about.access.localDeviceId;
-    return local === null ? 'None (hosted hub)' : (about.devices.find((device) => device.id === local)?.name ?? local);
-  });
-  const catalogUrl = $derived(about ? safeWebUrl(about.pricing.info.source) : undefined);
+  const catalogUrl = $derived(about ? safeWebUrl(about.pricing.source) : undefined);
   const rows = $derived([
     { label: 'Version', value: about?.version },
-    { label: 'Hub machine', value: machine },
+    { label: 'Hub machine', value: about && (about.localDeviceName ?? 'None (hosted hub)') },
     {
       label: 'Devices',
-      value: about && `${about.devices.length} (${about.devices.filter((device) => !device.revokedAt).length} active)`,
+      value: about && `${about.devices} (${about.activeDevices} active)`,
     },
-    { label: 'Pricing catalog updated', value: about?.pricing.info.updatedAt },
+    { label: 'Pricing catalog updated', value: about?.pricing.updatedAt },
     {
       label: 'Catalog last checked',
-      value: about && (about.pricing.info.checkedAt ? formatTime(about.pricing.info.checkedAt) : 'Never'),
+      value: about && (about.pricing.checkedAt ? formatTime(about.pricing.checkedAt) : 'Never'),
     },
   ]);
 
   function formatTime(value: string) {
     const parsed = new Date(value);
     return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
-  }
-
-  async function readVersion(signal: AbortSignal) {
-    const response = await fetch('/api/health', { signal, headers: { accept: 'application/json' } });
-    if (!response.ok) throw new Error('Could not read the hub version. Try again.');
-    return decodeHealth(await response.json()).version;
   }
 
   async function load() {
@@ -59,13 +40,8 @@
     loading = true;
     error = '';
     try {
-      const [version, devices, access, pricing] = await Promise.all([
-        readVersion(controller.signal),
-        client.getDevices(controller.signal),
-        client.getAdminAccess(controller.signal),
-        client.getPricing({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }, controller.signal),
-      ]);
-      if (!controller.signal.aborted) about = { version, devices, access, pricing };
+      const info = await client.getHubInfo(controller.signal);
+      if (!controller.signal.aborted) about = info;
     } catch (failure) {
       if (!controller.signal.aborted) error = failureMessage(failure, 'Could not load hub details. Try again.');
     } finally {
@@ -99,10 +75,10 @@
         target="_blank"
         rel="noopener noreferrer">{new URL(catalogUrl).hostname}<Icon name="external" size={13} /></a
       >{:else}<span class={['settings-value', !about && loading && 'skeleton']}
-        >{about?.pricing.info.source ?? (loading ? 'Loading source' : '—')}</span
+        >{about?.pricing.source ?? (loading ? 'Loading source' : '—')}</span
       >{/if}
   </div>
 </div>
-{#if about?.pricing.info.refreshError}<div class="notice-region settings-notice">
-    <div class="notice error-notice"><Icon name="warning" /><span>{about.pricing.info.refreshError}</span></div>
+{#if about?.pricing.refreshError}<div class="notice-region settings-notice">
+    <div class="notice error-notice"><Icon name="warning" /><span>{about.pricing.refreshError}</span></div>
   </div>{/if}

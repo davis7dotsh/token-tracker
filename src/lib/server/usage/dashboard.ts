@@ -3,8 +3,12 @@ import type { DashboardResponse, SessionMetadata, UsageEvent, UsageQuery, UsageR
 import type { PricingPolicy } from '../../shared/pricing';
 import { provider } from '../../shared/provider';
 import { tokenTotal } from './parsers';
+import { eventMillis, forEachDashboardRow } from './dashboard-rollups';
+export { eventMillis } from './dashboard-rollups';
 import { bundledPolicy, tokenCostParts } from './pricing';
 export { provider } from '../../shared/provider';
+export const pricingMethod =
+  'API-equivalent cost from complete native Grok accounting, cached model prices, and saved pricing rules. Subscription charges may differ; unavailable costs are excluded.';
 const sessionMetadataKeys = ['sessionTitle', 'projectName'] as const;
 export const validateTimezone = (zone: string) => {
   try {
@@ -111,27 +115,28 @@ const addBucket = <Key>(
   addSeries(group.models, event.model, event, tokens);
   addSeries(group.projects, event.repository ?? event.project, event, tokens);
 };
-const selected = (names: readonly string[] | undefined, value: string) => names === undefined || names.includes(value);
-const projectListed = (names: readonly string[], event: UsageEvent) =>
-  names.includes(event.repository ?? event.project) || names.includes(event.project);
-// Hidden projects win over an explicit project selection.
-export const matchesUsage = (query: UsageQuery, event: UsageEvent, eventProvider = provider(event.model)) =>
-  selected(query.harnesses, event.harness) &&
-  selected(query.models, event.model) &&
-  selected(query.providers, eventProvider) &&
-  (query.projects === undefined || projectListed(query.projects, event)) &&
-  !(query.excludedProjects !== undefined && projectListed(query.excludedProjects, event)) &&
-  selected(query.devices, event.deviceId ?? 'local');
+export const usageMatchers = (query: UsageQuery) => {
+  const harnesses = query.harnesses && new Set(query.harnesses);
+  const models = query.models && new Set(query.models);
+  const providers = query.providers && new Set(query.providers);
+  const devices = query.devices && new Set(query.devices);
+  const included = query.projects && new Set(query.projects);
+  const excluded = query.excludedProjects && new Set(query.excludedProjects);
+  const hasProject = (names: Set<string>, event: UsageEvent) =>
+    names.has(event.repository ?? event.project) || names.has(event.project);
+  return {
+    dimensions: (event: UsageEvent, knownProvider?: string) =>
+      (!harnesses || harnesses.has(event.harness)) &&
+      (!models || models.has(event.model)) &&
+      (!providers || providers.has(knownProvider ?? provider(event.model))) &&
+      (!devices || devices.has(event.deviceId ?? 'local')),
+    // Hidden projects win over an explicit project selection.
+    projects: (event: UsageEvent) =>
+      (!included || hasProject(included, event)) && (!excluded || !hasProject(excluded, event)),
+  };
+};
 const dateString = (value: Temporal.ZonedDateTime) => value.toPlainDate().toString();
 const timestamp = (value: Temporal.ZonedDateTime) => value.toInstant().toString({ fractionalSecondDigits: 3 });
-const eventTimestamps = new WeakMap<UsageEvent, number>();
-export const eventMillis = (event: UsageEvent) => {
-  const cached = eventTimestamps.get(event);
-  if (cached !== undefined) return cached;
-  const millis = Date.parse(event.timestamp);
-  eventTimestamps.set(event, millis);
-  return millis;
-};
 export const usageTimeframe = (query: UsageQuery = {}, now = new Date()) => {
   const requestedZone = query.timezone ?? 'UTC';
   const zone = validateTimezone(requestedZone) ? requestedZone : 'UTC';
@@ -152,38 +157,57 @@ export const usageTimeframe = (query: UsageQuery = {}, now = new Date()) => {
   return { requestedZone, zone, range, today, end, start, previousStart };
 };
 
-const aggregateDashboard = (
+const earliestEvents = new WeakMap<readonly UsageEvent[], number>();
+const earliestEvent = (events: readonly UsageEvent[]) => {
+  const known = earliestEvents.get(events);
+  if (known !== undefined) return known;
+  let earliest = Infinity;
+  for (const event of events) {
+    const millis = eventMillis(event);
+    if (millis < earliest) earliest = millis;
+  }
+  earliestEvents.set(events, earliest);
+  return earliest;
+};
+const calendars = new Map<string, { date: string; start: number; end: number }[]>();
+const daysBetween = (start: Temporal.ZonedDateTime, end: Temporal.ZonedDateTime) => {
+  const first = start.startOfDay();
+  const key = `${first.timeZoneId}:${first.epochMilliseconds}:${end.epochMilliseconds}`;
+  const known = calendars.get(key);
+  if (known) return known;
+  const days = [];
+  for (let date = first; date.epochMilliseconds < end.epochMilliseconds;) {
+    const next = date.add({ days: 1 }).startOfDay();
+    days.push({ date: dateString(date), start: date.epochMilliseconds, end: next.epochMilliseconds });
+    date = next;
+  }
+  if (days.length <= 4096) {
+    if (calendars.size >= 16) {
+      const oldest = calendars.keys().next();
+      if (!oldest.done) calendars.delete(oldest.value);
+    }
+    calendars.set(key, days);
+  }
+  return days;
+};
+export const aggregateDashboard = (
   data: UsageResult,
   query: UsageQuery,
   now: Date,
   machine: string,
   pricingPolicy: PricingPolicy,
   timeframe: ReturnType<typeof usageTimeframe>,
+  indexedFilters?: DashboardResponse['filters'],
 ) => {
   const { requestedZone, zone, range, today, end, previousStart } = timeframe;
   let { start } = timeframe;
   if (range === 'all') {
-    let earliest = start.epochMilliseconds;
-    for (const event of data.events) {
-      const millis = eventMillis(event);
-      if (millis < earliest) earliest = millis;
-    }
+    const earliest = Math.min(start.epochMilliseconds, earliestEvent(data.events));
     start = Temporal.Instant.fromEpochMilliseconds(earliest).toZonedDateTimeISO(zone).startOfDay();
   }
   // Convert calendar boundaries once, rather than running the Temporal polyfill
   // for every request record. Binary search preserves DST and non-hour offsets.
-  const calendarDays: { date: string; start: number; end: number }[] = [];
-  for (
-    let date = start.startOfDay();
-    date.epochMilliseconds < end.epochMilliseconds;
-    date = date.add({ days: 1 }).startOfDay()
-  ) {
-    calendarDays.push({
-      date: dateString(date),
-      start: date.epochMilliseconds,
-      end: date.add({ days: 1 }).startOfDay().epochMilliseconds,
-    });
-  }
+  const calendarDays = daysBetween(start, end);
   const dayFor = (millis: number) => {
     let low = 0;
     let high = calendarDays.length - 1;
@@ -224,7 +248,7 @@ const aggregateDashboard = (
   const projectGroups: Groups = new Map();
   // Project discovery keeps the period and every other dimension, so opening
   // the palette never needs a second dashboard request to see another project.
-  const projectContext = { ...query, projects: undefined, excludedProjects: undefined };
+  const matches = usageMatchers(query);
   const projectInsights = new Map<
     string,
     {
@@ -233,6 +257,7 @@ const aggregateDashboard = (
       projectNames: Set<string>;
       lastActiveAt: string;
       lastActiveMillis: number;
+      lastActiveIndex: number;
     }
   >();
   const deviceGroups: Groups = new Map();
@@ -257,7 +282,14 @@ const aggregateDashboard = (
   const availableProjects = new Set<string>();
   const availableDevices = new Set<string>();
   const modelProviders = new Map<string, string>();
-  for (const event of data.events) {
+  const sameBucket = (min: number, max: number) =>
+    !(min <= nowMillis && max > nowMillis) &&
+    !(min < startMillis && max >= startMillis) &&
+    !(min < previousMillis && max >= previousMillis) &&
+    !(min < endMillis && max >= endMillis) &&
+    dayFor(min) === dayFor(max) &&
+    (range !== 'today' || Math.floor((min - todayMillis) / 3_600_000) === Math.floor((max - todayMillis) / 3_600_000));
+  forEachDashboardRow(data.events, pricingPolicy, sameBucket, (event, index, row) => {
     let eventProvider = modelProviders.get(event.model);
     if (eventProvider === undefined) {
       eventProvider = provider(event.model);
@@ -265,24 +297,27 @@ const aggregateDashboard = (
     }
     const project = event.repository ?? event.project;
     const device = event.deviceId ?? 'local';
-    availableHarnesses.add(event.harness);
-    availableModels.add(event.model);
-    availableProviders.add(eventProvider);
-    availableProjects.add(project);
-    availableDevices.add(device);
-    const millis = eventMillis(event);
-    if (!Number.isFinite(millis) || !matchesUsage(projectContext, event, eventProvider)) continue;
+    if (!indexedFilters) {
+      availableHarnesses.add(event.harness);
+      availableModels.add(event.model);
+      availableProviders.add(eventProvider);
+      availableProjects.add(project);
+      availableDevices.add(device);
+    }
+    const millis = row?.max ?? eventMillis(event);
+    const earliest = row?.min ?? millis;
+    if (!Number.isFinite(millis) || !matches.dimensions(event, eventProvider)) return;
     // These boundaries cover the broader palette context as well as the
     // selected graph; otherwise a hidden project's insight could stay stale.
     if (millis <= nowMillis) nowBefore = Math.max(nowBefore, millis);
-    else nowAfter = Math.min(nowAfter, millis);
+    else nowAfter = Math.min(nowAfter, earliest);
     if (range !== 'all') {
       if (millis < startMillis) startBefore = Math.max(startBefore, millis);
-      else startAfter = Math.min(startAfter, millis);
+      else startAfter = Math.min(startAfter, earliest);
       if (millis < previousMillis) previousBefore = Math.max(previousBefore, millis);
-      else previousAfter = Math.min(previousAfter, millis);
+      else previousAfter = Math.min(previousAfter, earliest);
     }
-    if (millis > nowMillis) continue;
+    if (millis > nowMillis) return;
     const key = `${device}:${event.harness}:${event.sessionId}`;
     const tokens = tokenTotal(event);
     if (millis >= startMillis && millis < endMillis) {
@@ -294,6 +329,7 @@ const aggregateDashboard = (
           projectNames: new Set(),
           lastActiveAt: event.timestamp,
           lastActiveMillis: millis,
+          lastActiveIndex: index,
         };
         projectInsights.set(project, insight);
       }
@@ -301,16 +337,20 @@ const aggregateDashboard = (
       insight.paths.add(event.project);
       const projectName = event.projectName?.trim();
       if (projectName) insight.projectNames.add(projectName);
-      if (millis > insight.lastActiveMillis) {
+      if (
+        millis > insight.lastActiveMillis ||
+        (millis === insight.lastActiveMillis && index < insight.lastActiveIndex)
+      ) {
+        insight.lastActiveIndex = index;
         insight.lastActiveAt = event.timestamp;
         insight.lastActiveMillis = millis;
       }
     }
-    if (!matchesUsage(query, event, eventProvider)) continue;
+    if (!matches.projects(event)) return;
     if (range !== 'all' && millis >= previousMillis && millis < startMillis) previous.add(event);
-    if (millis < startMillis || millis >= endMillis) continue;
+    if (millis < startMillis || millis >= endMillis) return;
     total.add(event, key, tokens);
-    const costParts = tokenCostParts(event, pricingPolicy);
+    const costParts = row ? row.cost : tokenCostParts(event, pricingPolicy);
     if (costParts) {
       tokenCosts.input.costUSD += costParts.input;
       tokenCosts.output.costUSD += costParts.output;
@@ -335,7 +375,7 @@ const aggregateDashboard = (
       addBucket(hourlyGroups, hour, event, eventProvider, key, tokens);
     }
     // Billing exports have event IDs but no conversation identity.
-    if (!event.sessionId) continue;
+    if (!event.sessionId) return;
     let session = sessions.get(key);
     if (!session) {
       session = {
@@ -375,9 +415,11 @@ const aggregateDashboard = (
       if (threadUrl) session.metadata.t3ThreadUrl = threadUrl;
       session.metadataUpdatedAt.set('t3ThreadId', millis);
     }
-    if (event.timestamp < session.startedAt) session.startedAt = event.timestamp;
-    if (event.timestamp > session.lastActiveAt) session.lastActiveAt = event.timestamp;
-  }
+    const startedAt = row?.startedAt ?? event.timestamp;
+    const lastActiveAt = row?.lastActiveAt ?? event.timestamp;
+    if (startedAt < session.startedAt) session.startedAt = startedAt;
+    if (lastActiveAt > session.lastActiveAt) session.lastActiveAt = lastActiveAt;
+  });
   const daily: DashboardResponse['daily'][number][] = [];
   for (const date of calendarDays) {
     const groups = dailyGroups.get(date.date);
@@ -416,7 +458,7 @@ const aggregateDashboard = (
       });
     }
   }
-  const filters = {
+  const filters = indexedFilters ?? {
     harnesses: [...availableHarnesses].sort(),
     models: [...availableModels].sort(),
     providers: [...availableProviders].sort(),
@@ -475,8 +517,7 @@ const aggregateDashboard = (
         ? data.warnings
         : [...data.warnings, `Timezone ${requestedZone} is unavailable; displaying UTC.`],
     pricing: {
-      method:
-        'API-equivalent cost from complete native Grok accounting, cached model prices, and saved pricing rules. Subscription charges may differ; unavailable costs are excluded.',
+      method: pricingMethod,
       updatedAt: data.pricingUpdatedAt,
     },
   } satisfies DashboardResponse;

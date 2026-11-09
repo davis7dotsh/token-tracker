@@ -1,6 +1,15 @@
 import { Schema } from 'effect';
 import { Rpc, RpcGroup } from 'effect/rpc';
-import { DashboardResponse, Device, DeviceRegistration, SyncAck, SyncBatch, UsageQuery } from './domain';
+import {
+  DashboardPage,
+  DashboardResponse,
+  UsageInfo,
+  Device,
+  DeviceRegistration,
+  SyncAck,
+  SyncBatch,
+  UsageQuery,
+} from './domain';
 import { PricingFailure, PricingInfo, PricingPolicy, PricingRule } from './pricing';
 
 export const PricingSettings = Schema.Struct({
@@ -37,8 +46,29 @@ export const AdminAccess = Schema.Struct({
 });
 export type AdminAccess = typeof AdminAccess.Type;
 
+export const HubInfo = Schema.Struct({
+  version: Schema.String,
+  localDeviceName: Schema.NullOr(Schema.String),
+  devices: Schema.Number,
+  activeDevices: Schema.Number,
+  pricing: PricingInfo.mapFields(({ source, updatedAt, checkedAt, refreshError }) => ({
+    source,
+    updatedAt,
+    checkedAt,
+    refreshError,
+  })),
+});
+export type HubInfo = typeof HubInfo.Type;
+
 export const UsageRpc = RpcGroup.make(
   Rpc.make('GetUsage', { payload: UsageQuery, success: DashboardResponse, error: UsageFailure }),
+  Rpc.make('GetUsagePage', {
+    payload: { query: UsageQuery, page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)) },
+    success: DashboardPage,
+    error: UsageFailure,
+  }),
+  Rpc.make('GetUsageInfo', { payload: UsageQuery, success: UsageInfo, error: UsageFailure }),
+  Rpc.make('GetHubInfo', { success: HubInfo, error: Schema.Union([PricingFailure, StorageFailure]) }),
   Rpc.make('GetDevices', { success: Schema.Array(Device), error: StorageFailure }),
   Rpc.make('GetAdminAccess', { success: AdminAccess }),
   Rpc.make('RenameDevice', {

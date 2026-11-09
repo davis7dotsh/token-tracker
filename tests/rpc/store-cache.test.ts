@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { SqliteClient } from '@effect/sql-sqlite-bun';
 import { Effect, Layer, ManagedRuntime } from 'effect';
-import { SqlClient } from 'effect/sql';
+import { SqlClient, Statement } from 'effect/sql';
 import { TestClock } from 'effect/testing';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -380,4 +380,110 @@ test('cancellation rolls back active writes but committed registration, sync, im
     'Imported · /usage',
     'Renamed laptop · /usage',
   ]);
+});
+
+test('overlapping windows share historical pages while moves, deletions and backfills refresh the affected UTC days', async () => {
+  const { runtime } = await storeRuntime();
+  await runtime.runPromise(
+    Effect.gen(function* () {
+      const store = yield* UsageStore;
+      const registration = yield* store.registerDevice(pairingSecret, device);
+      const write = (events: UsageEvent[], deletedIds?: string[]) =>
+        store.syncUsage(device.id, registration.token, { device, events, deletedIds });
+      const record = (id: string, timestamp: string): UsageEvent => ({ ...event, id, timestamp });
+      // The first request is on October 1 in UTC, despite its October 2 wall date.
+      const old = record('moves', '2026-10-02T00:30:00+02:00');
+      const stable = record('stable', '2026-10-03T13:00:00Z');
+      const today = record('deleted', '2026-10-04T13:00:00Z');
+      yield* write([old, stable, today]);
+      const all = yield* store.getUsage();
+      const since = { start: '2026-10-02T07:00:00.000Z', devices: [device.id] };
+      const subset = yield* store.getUsage(undefined, since);
+      expect(subset.events.map((r) => r.id)).toEqual(['stable', 'deleted']);
+      expect(subset.events[0]).toBe(all.events[1]);
+      const moved = { ...old, timestamp: '2026-10-05T01:00:00Z' };
+      const backfill = record('backfill', '2026-09-30T00:00:00Z');
+      yield* write([moved, backfill], [today.id]);
+      const changed = yield* store.getUsage();
+      expect(changed.events.map((r) => [r.id, r.timestamp])).toEqual(
+        [backfill, stable, moved].map((r) => [r.id, r.timestamp]),
+      );
+      expect(changed.events[1]).toBe(all.events[1]);
+      const changedSubset = yield* store.getUsage(undefined, since);
+      expect(changedSubset.events.map((r) => r.id)).toEqual(['stable', 'moves']);
+      expect(changedSubset.events[0]).toBe(all.events[1]);
+      expect((yield* store.getUsage(undefined, { ...since, devices: [] })).events).toEqual([]);
+    }),
+  );
+});
+
+test('a correction between pages or before the local-owner lookup cannot make an event disappear', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-page-race-'));
+  directories.push(directory);
+  let pause: ((sql: string, args: readonly unknown[]) => Promise<void> | undefined) | undefined;
+  const transformer: Statement.Transformer = (statement) => {
+    const gate = pause?.(...statement.compile());
+    return gate
+      ? Effect.as(
+          Effect.promise(() => gate),
+          statement,
+        )
+      : Effect.succeed(statement);
+  };
+  const hooks = Layer.succeed(Statement.CurrentTransformer, transformer);
+  const runtime = ManagedRuntime.make(
+    usageStoreLayer({ dataDirectory: directory, pairingSecret }).pipe(Layer.provideMerge(hooks)),
+  );
+  disposers.push(() => runtime.dispose());
+  const store = await runtime.runPromise(UsageStore);
+  const { token } = await runtime.runPromise(store.registerDevice(pairingSecret, device));
+  const write = (...events: UsageEvent[]) => runtime.runPromise(store.syncUsage(device.id, token, { device, events }));
+  const anchor = { ...event, id: 'anchor', timestamp: '2026-10-01T00:00:00Z' };
+  let moved = { ...event, id: 'moving', timestamp: '2026-10-02T00:00:00Z' };
+  const local = { ...event, id: 'local-candidate', timestamp: '2026-10-03T00:00:00Z' };
+  await write(anchor, moved, local);
+  const race = async (
+    match: (sql: string, args: readonly unknown[]) => boolean,
+    options: Parameters<typeof store.getUsage>[1],
+    change: UsageEvent,
+  ) => {
+    const entered = Promise.withResolvers<void>();
+    const resume = Promise.withResolvers<void>();
+    pause = (sql, args) => {
+      if (!match(sql, args)) return;
+      pause = undefined;
+      entered.resolve();
+      return resume.promise;
+    };
+    const pending = runtime.runPromise(store.getUsage(undefined, options));
+    try {
+      await entered.promise;
+      await write(change);
+    } finally {
+      resume.resolve();
+    }
+    return pending;
+  };
+  moved = { ...moved, timestamp: '2026-10-01T02:00:00Z' };
+  const middle = await race(
+    (sql, args) => sql.includes('INDEXED BY usage_events_timestamp') && args.includes('2026-10-02T'),
+    {},
+    moved,
+  );
+  expect(middle.events.map(({ id, timestamp }) => [id, timestamp])).toEqual(
+    [anchor, moved, local].map(({ id, timestamp }) => [id, timestamp]),
+  );
+  const nowInside = { ...local, timestamp: '2026-10-01T03:00:00Z' };
+  const supplemental = await race(
+    (sql, args) => sql.includes('id IN (SELECT value FROM json_each(?)') && args.includes(JSON.stringify([local.id])),
+    {
+      start: '2026-10-01T00:00:00.000Z',
+      end: '2026-10-02T00:00:00.000Z',
+      candidateIds: [local.id],
+    },
+    nowInside,
+  );
+  expect(supplemental.events.map(({ id, timestamp }) => [id, timestamp])).toEqual(
+    [anchor, moved, nowInside].map(({ id, timestamp }) => [id, timestamp]),
+  );
 });

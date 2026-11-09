@@ -1,8 +1,8 @@
 import { SqliteClient } from '@effect/sql-sqlite-bun';
 import { BunHttpPlatform, BunServices } from '@effect/platform-bun';
-import { Effect, FileSystem, Layer, Path, Result } from 'effect';
+import { Effect, FileSystem, Layer, Path, Result, Schema } from 'effect';
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
@@ -13,6 +13,7 @@ import { usageRevision } from '../usage/revision';
 import { HubPricing, LocalUsage, makeHubWebHandler } from './hub';
 import { getLocalDevice } from './identity';
 import { ServerConfiguration, UsageStore } from './store';
+import type { ViewHints } from './view-warmer';
 import { compressRpcResponse } from './compression';
 
 export { LocalUsage } from './hub';
@@ -28,6 +29,41 @@ const dataDirectory = (options: ServerOptions) =>
   options.dataDirectory ??
   process.env.TOKEN_TRACKER_DATA_DIR ??
   join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'token-tracker');
+
+const decodeViewHint = Schema.decodeUnknownSync(
+  Schema.Struct({
+    range: Schema.Literals(['today', '7d', '30d']),
+    timezone: Schema.String.check(Schema.isMaxLength(128)),
+  }),
+);
+const fileViewHints = (directory: string): ViewHints => {
+  const file = join(directory, 'dashboard-view.json');
+  let last = '';
+  return {
+    read: async () => {
+      const hint = decodeViewHint(JSON.parse(await readFile(file, 'utf8')));
+      last = JSON.stringify(hint);
+      return hint;
+    },
+    remember: async (range, timezone) => {
+      if (timezone.length > 128) return;
+      const value = JSON.stringify({ range, timezone });
+      if (value === last) return;
+      last = value;
+      const temporary = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+      try {
+        await writeFile(temporary, value, { flag: 'wx', mode: 0o600 });
+        // A newer navigation might finish writing its hint first.
+        if (last === value) await rename(temporary, file);
+      } catch (error) {
+        if (last === value) last = '';
+        throw error;
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    },
+  };
+};
 
 // A self-hosted hub keeps its database, pairing secret, and pricing state in a
 // private data directory.
@@ -155,6 +191,7 @@ export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = loca
     services,
     {
       trustBrowser: true,
+      ...(localLayer === localUsageLayer ? { viewHints: fileViewHints(dataDirectory(options)) } : {}),
       autoRefreshPricing: options.autoRefreshPricing ?? localLayer === localUsageLayer,
       ...(publicOrigin ? { expectedOrigin: new URL(publicOrigin).origin } : {}),
     },

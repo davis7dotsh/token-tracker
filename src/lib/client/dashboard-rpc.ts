@@ -1,8 +1,8 @@
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import type { UsageRpc } from '../shared/rpc';
-import type { UsageQuery } from '../shared/domain';
+import type { DashboardPage, UsageQuery } from '../shared/domain';
 import type { PricingRule } from '../shared/pricing';
-import { isDashboardResponse } from './dashboard-response';
+import { isDashboardPage, isDashboardResponse, isHubInfo, isUsageInfo } from './dashboard-response';
 
 type Procedures = RpcGroup.Rpcs<typeof UsageRpc>;
 type Procedure<Tag extends Procedures['_tag']> = Extract<Procedures, { readonly _tag: Tag }>;
@@ -40,6 +40,10 @@ const readResult = (body: string, id: string) => {
   }
   throw new Error(unavailable);
 };
+
+// Keep cache accounting off the render path: reuse the already decoded wire length.
+const pageSizes = new WeakMap<DashboardPage, number>();
+export const usagePageSize = (value: DashboardPage) => pageSizes.get(value) ?? Infinity;
 
 export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: number } = {}) => {
   const endpoint = typeof window === 'undefined' ? url : new URL(url, window.location.href).href;
@@ -84,6 +88,12 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
         }
         const result = readResult(body, id);
         if (tag === 'GetUsage' && !isDashboardResponse(result)) throw new Error(unavailable);
+        if (tag === 'GetUsagePage') {
+          if (!isDashboardPage(result)) throw new Error(unavailable);
+          pageSizes.set(result, body.length * 2);
+        }
+        if (tag === 'GetHubInfo' && !isHubInfo(result)) throw new Error(unavailable);
+        if (tag === 'GetUsageInfo' && !isUsageInfo(result)) throw new Error(unavailable);
         // UsageRpc encodes all results; the dashboard guard also rejects
         // incompatible successful payloads before they reach reactive state.
         return result as Rpc.Success<Procedure<Tag>>;
@@ -103,6 +113,10 @@ export const makeDashboardClient = (url = '/rpc', options: { requestTimeoutMs?: 
 
   return {
     getUsage: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetUsage', query, signal, usageTimeout),
+    getUsagePage: (query: UsageQuery, page: number, signal?: AbortSignal) =>
+      call('GetUsagePage', { query, page }, signal, usageTimeout),
+    getUsageInfo: (query: UsageQuery, signal?: AbortSignal) => call('GetUsageInfo', query, signal, usageTimeout),
+    getHubInfo: (signal?: AbortSignal) => call('GetHubInfo', undefined, signal),
     getDevices: (signal?: AbortSignal) => call('GetDevices', undefined, signal),
     getAdminAccess: (signal?: AbortSignal) => call('GetAdminAccess', undefined, signal),
     renameDevice: (deviceId: string, name: string, adminSecret = '') =>

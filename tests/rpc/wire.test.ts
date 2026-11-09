@@ -822,3 +822,60 @@ test('browser and native RPC clients preserve custom endpoints without a redirec
     await handler.dispose();
   }
 });
+
+test('workbench pages and settings project the same snapshot without truncating exports', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-view-rpc-'));
+  directories.push(directory);
+  const events = Array.from({ length: 25 }, (_, i) => ({ ...localEvent, id: `row-${i}`, sessionId: `session-${i}` }));
+  let collections = 0;
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, {
+      device: localDevice,
+      collect: Effect.sync(() => {
+        collections++;
+        return { ...localData, events };
+      }),
+    }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const browser = makeDashboardClient(`http://127.0.0.1:${server.port}/rpc`);
+  try {
+    expect(await browser.getHubInfo()).toMatchObject({
+      localDeviceName: localDevice.name,
+      devices: 1,
+      activeDevices: 1,
+    });
+    expect(collections).toBe(0);
+    const query = { range: 'all', timezone: 'not-a-zone' } as const;
+    const [full, first, second, last, info] = await Promise.all([
+      browser.getUsage(query),
+      browser.getUsagePage(query, 1),
+      browser.getUsagePage(query, 2),
+      browser.getUsagePage(query, Number.MAX_SAFE_INTEGER),
+      browser.getUsageInfo(query),
+    ]);
+    expect(collections).toBe(1);
+    expect(full.sessions).toHaveLength(25);
+    expect([first.sessionOffset, second.sessionOffset, last.sessionOffset]).toEqual([0, 12, 24]);
+    expect(first.sessionCount).toBe(25);
+    expect([...first.sessions, ...second.sessions, ...last.sessions]).toEqual([...full.sessions]);
+    expect(second.daily).toEqual(full.daily);
+    expect(last.totals).toEqual(full.totals);
+    expect(info).toEqual({
+      machine: full.machine,
+      sources: full.sources,
+      warnings: full.warnings,
+      pricing: full.pricing,
+    });
+    expect(await browser.getUsagePage({ ...query, devices: [] }, 2)).toMatchObject({
+      sessionCount: 0,
+      sessionOffset: 0,
+      sessions: [],
+    });
+  } finally {
+    await browser.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});

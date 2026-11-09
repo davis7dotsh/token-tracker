@@ -1,4 +1,5 @@
-import type { DashboardResponse, SourceStatus, Totals } from '../shared/domain';
+import { sessionPageSize } from '../shared/dashboard-page';
+import type { DashboardPage, DashboardResponse, SourceStatus, Totals, UsageInfo } from '../shared/domain';
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -109,7 +110,34 @@ export const isDashboardResponse = (value: unknown): value is DashboardResponse 
   fields(value, ['harnesses', 'models', 'providers', 'projects', 'devices'], (items) => array(items, breakdown)) &&
   array(value.sessions, session) &&
   filters(value.filters) &&
+  isUsageInfo(value);
+
+export const isUsageInfo = (value: unknown): value is UsageInfo =>
+  record(value) &&
+  string(value.machine) &&
   array(value.sources, source) &&
   strings(value.warnings) &&
   record(value.pricing) &&
   fields(value.pricing, ['method', 'updatedAt'], string);
+
+const count = (value: unknown): value is number => number(value) && Number.isSafeInteger(value) && value >= 0;
+export const isDashboardPage = (value: unknown): value is DashboardPage =>
+  record(value) &&
+  count(value.sessionCount) &&
+  count(value.sessionOffset) &&
+  value.sessionOffset % sessionPageSize === 0 &&
+  value.sessionOffset < Math.max(1, value.sessionCount) &&
+  Array.isArray(value.sessions) &&
+  value.sessions.length === Math.min(sessionPageSize, value.sessionCount - value.sessionOffset) &&
+  isDashboardResponse(value);
+
+const nullableString = (v: unknown) => v === null || string(v);
+export const isHubInfo = (value: unknown) =>
+  record(value) &&
+  string(value.version) &&
+  nullableString(value.localDeviceName) &&
+  count(value.devices) &&
+  count(value.activeDevices) &&
+  record(value.pricing) &&
+  fields(value.pricing, ['source', 'updatedAt'], string) &&
+  fields(value.pricing, ['checkedAt', 'refreshError'], nullableString);

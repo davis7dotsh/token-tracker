@@ -40,14 +40,16 @@ export const periodOf = (d: DashboardResponse) =>
   d.period.start === d.period.end
     ? dayLabel(d.period.start)
     : `${dayLabel(d.period.start)} – ${dayLabel(d.period.end)}`;
-export function timeBuckets(data: DashboardResponse, group: Group) {
+function buildBuckets(data: DashboardResponse, group: Group) {
   const byHour = data.range === 'today';
-  const hour = new Intl.DateTimeFormat('en-GB', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: data.timezone,
-    ...(byHour && data.hourly.length > 24 ? { timeZoneName: 'shortOffset' } : {}),
-  });
+  const hour = byHour
+    ? new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: data.timezone,
+        ...(data.hourly.length > 24 ? { timeZoneName: 'shortOffset' } : {}),
+      })
+    : undefined;
   const source = byHour ? data.hourly : data.daily;
   const size = data.range === '6m' ? 6 : 1;
   const buckets = [];
@@ -71,7 +73,7 @@ export function timeBuckets(data: DashboardResponse, group: Group) {
     }
     const first = span[0],
       last = span[span.length - 1];
-    const label = 'start' in first ? hour.format(new Date(first.start)) : dayLabel(first.date);
+    const label = 'start' in first ? hour!.format(new Date(first.start)) : dayLabel(first.date);
     buckets.push({
       label: span.length > 1 && 'date' in last ? `${label} – ${dayLabel(last.date)}` : label,
       short: label,
@@ -81,6 +83,16 @@ export function timeBuckets(data: DashboardResponse, group: Group) {
       unpricedTokens,
     });
   }
+  return buckets;
+}
+// A response is immutable; metric, scale, view and inspector changes reuse the
+// same series buckets. Evicting the response also releases its derived charts.
+const byResponse = new WeakMap<DashboardResponse, Map<Group, ReturnType<typeof buildBuckets>>>();
+export function timeBuckets(data: DashboardResponse, group: Group) {
+  let byGroup = byResponse.get(data);
+  if (!byGroup) byResponse.set(data, (byGroup = new Map()));
+  let buckets = byGroup.get(group);
+  if (!buckets) byGroup.set(group, (buckets = buildBuckets(data, group)));
   return buckets;
 }
 export function nicePeak(value: number) {

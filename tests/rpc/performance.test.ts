@@ -504,7 +504,10 @@ test('uploaded writes and pricing revisions invalidate immediately without colle
   await runtime.runPromise(store.renameDevice(remoteDevice.id, 'Updated Remote'));
   const renamed = await getUsage(query);
   expect(renamed.sources[0]?.path).toBe('Updated Remote · /changed/source');
-  expect(renamed.sessions).not.toBe(metadata.sessions);
+  // Renames change source labels, not the accounting aggregate.
+  expect(renamed.sessions).toBe(metadata.sessions);
+  expect(metadata.sessions).toBe(first.sessions);
+  expect((await getPricing(query)).unresolved).toBe(firstPricing.unresolved);
   await runtime.runPromise(
     store.syncUsage(remoteDevice.id, registration.token, {
       device: remoteDevice,

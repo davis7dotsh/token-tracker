@@ -3,7 +3,8 @@
   import { onMount, untrack, tick } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
-  import { makeDashboardClient } from '#lib/client/dashboard-rpc';
+  import { makeWorkbenchCache, usageScopeKey } from '#lib/client/workbench-cache';
+  import { makeDashboardClient, usagePageSize } from '#lib/client/dashboard-rpc';
   import {
     dashboardRanges,
     readDefaultRange,
@@ -36,14 +37,16 @@
     type Metric,
     type Picked,
   } from '#lib/client/usage-workbench';
-  import type { DashboardResponse, UsageQuery, Device } from '#lib/shared/domain';
+  import { sessionPageSize as perPage } from '#lib/shared/dashboard-page';
+  import type { DashboardPage, UsageQuery, Device } from '#lib/shared/domain';
   import Icon from '#lib/components/Icon.svelte';
   import Activity from '#lib/components/workbench/Activity.svelte';
   import ChoiceMenu from '#lib/components/workbench/ChoiceMenu.svelte';
   import ScopeDialog from '#lib/components/workbench/ScopeDialog.svelte';
   import './workbench.css';
   let shortcut = $state('Ctrl K');
-  const p = $derived(new URLSearchParams(page.url.search));
+  const currentUrl = $derived(page.shallow?.url ?? page.url);
+  const p = $derived(new URLSearchParams(currentUrl.search));
   const compare = $derived(p.get('view') === 'compare');
   const group = $derived(splitFrom(p.get('split') ?? p.get('chartBy') ?? p.get('breakdown')));
   const metric: Metric = $derived(p.get('metric') === 'cost' ? 'costUSD' : 'tokens');
@@ -62,13 +65,26 @@
         ? hidden
         : undefined,
   });
-  const key = $derived(JSON.stringify(query));
-  let data = $state.raw<DashboardResponse>(),
+  const scope = $derived(usageScopeKey(query));
+  const requestedPage = $derived.by(() => {
+    const n = Number(p.get('page'));
+    return Number.isSafeInteger(n) && n > 0 ? n : 1;
+  });
+  const pageKey = (scope: string, n: number) => `${n}:${scope}`;
+  const key = $derived(pageKey(scope, requestedPage));
+  const cache = makeWorkbenchCache(usagePageSize);
+  let data = $state.raw<DashboardPage>(),
     devices = $state.raw<readonly Device[]>([]),
     client = $state.raw<ReturnType<typeof makeDashboardClient>>();
   let loading = $state(true),
     error = $state(''),
-    loadedKey = $state('');
+    exportError = $state(''),
+    loadedKey = $state(''),
+    loadedScope = $state(''),
+    exporting = $state(false);
+  let exportRequest: AbortController | undefined;
+  let generation = 0;
+  let prefetch: { key: string; stop: AbortController; result: Promise<DashboardPage> } | undefined;
   let request: AbortController | undefined;
   let overlay = $state.raw<{ picked?: Picked; group?: Group }>();
   let returnTo: HTMLElement | undefined;
@@ -85,11 +101,9 @@
           : (categoryNames[id] ?? id);
   const ready = $derived(data && loadedKey === key);
   const narrowed = $derived(Boolean(active.length) && groups.every((g) => data?.[g].length === 1));
-  const count = $derived(data?.sessions.length ?? 0),
-    perPage = 12;
-  const cursor = $derived(
-    Math.max(0, Math.min(Math.ceil(count / perPage) - 1, Math.floor(Number(p.get('page')) || 1) - 1)),
-  );
+  const count = $derived(data?.sessionCount ?? 0),
+    offset = $derived(data?.sessionOffset ?? 0);
+  const cursor = $derived(Math.floor(offset / perPage));
   const sessionDate = $derived(
     new Intl.DateTimeFormat(undefined, {
       month: 'short',
@@ -124,7 +138,8 @@
   }
   function go(change: (q: URLSearchParams) => void, drill = false) {
     const url = href(change);
-    if (url !== page.url.pathname + page.url.search) void goto(url, { reset: false, state: { usageDrill: drill } });
+    if (url !== currentUrl.pathname + currentUrl.search)
+      void goto(url, { shallow: true, reset: false, state: { usageDrill: drill } });
   }
   function updatePage(n: number) {
     go((q) => q.set('page', String(n)));
@@ -135,29 +150,87 @@
       q.delete('page');
     });
   }
-  async function refresh() {
+  async function fetchPage(q: UsageQuery, n: number, k: string, signal: AbortSignal) {
+    if (!client) throw new Error('Dashboard is not ready.');
+    const since = generation,
+      started = new Date();
+    const value = await client.getUsagePage(q, n, signal);
+    if (!signal.aborted && since === generation) cache.put(k, value, started);
+    return value;
+  }
+  async function readPage(q: UsageQuery, n: number, signal: AbortSignal) {
+    const k = pageKey(usageScopeKey(q), n);
+    return cache.get(k) ?? (prefetch?.key === k ? prefetch.result : fetchPage(q, n, k, signal));
+  }
+  function cancelPrefetch() {
+    prefetch?.stop.abort();
+    prefetch = undefined;
+  }
+  function warmPage(n: number) {
+    if (!ready || loading || n < 1 || n > Math.ceil(count / perPage)) return;
+    const k = pageKey(scope, n);
+    if (cache.get(k) || prefetch?.key === k) return;
+    cancelPrefetch();
+    const stop = new AbortController();
+    const result = fetchPage(query, n, k, stop.signal);
+    prefetch = { key: k, stop, result };
+    // Speculation is never an error on the displayed page. Navigation joins
+    // this request, or retries normally if it already failed.
+    void result
+      .catch(() => {})
+      .finally(() => {
+        if (prefetch?.stop === stop) prefetch = undefined;
+      });
+  }
+  async function refresh(force = false) {
     if (!client) return;
     const q = query,
-      k = key;
+      k = key,
+      scopeKey = scope;
     request?.abort();
     const c = new AbortController();
     request = c;
+    if (force || prefetch?.key !== k) cancelPrefetch();
+    if (force) {
+      generation++;
+      cache.clear();
+    }
     loading = true;
     error = '';
     try {
-      const result = await client.getUsage(q, c.signal);
+      const result = await readPage(q, requestedPage, c.signal);
       if (!c.signal.aborted && k === key) {
         if (!data || groups.every((g) => q[g] === undefined))
           railOrder = Object.fromEntries(groups.map((g) => [g, result[g].map((row) => row.name)]));
         chartColors = new Map(groups.map((g) => [g, assignChartColors(result[g], chartColors.get(g))]));
         data = result;
         loadedKey = k;
+        loadedScope = scopeKey;
       }
     } catch (e) {
       if (!c.signal.aborted) error = e instanceof Error ? e.message : 'Could not load usage.';
     } finally {
       if (!c.signal.aborted) loading = false;
     }
+  }
+  async function downloadSessions() {
+    if (!data || !client || !ready || exporting) return;
+    const c = new AbortController(),
+      k = scope;
+    exportRequest = c;
+    exporting = true;
+    exportError = '';
+    try {
+      const full = data.sessions.length === count ? data : await client.getUsage(query, c.signal);
+      if (!c.signal.aborted && k === scope) exportSessions(full, (id) => label('devices', id));
+    } catch (e) {
+      if (!c.signal.aborted) exportError = e instanceof Error ? e.message : 'Could not export sessions.';
+    } finally {
+      if (exportRequest === c) exporting = false;
+    }
+  }
+  function resume() {
+    if (!document.hidden && !overlay && !loading && !cache.get(key)) void refresh(true);
   }
   onMount(() => {
     shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
@@ -174,11 +247,13 @@
       })
       .catch(() => {});
     const timer = setInterval(() => {
-      if (!document.hidden && !overlay && !loading) void refresh();
+      if (!document.hidden && !overlay && !loading) void refresh(true);
     }, 60000);
     return () => {
       clearInterval(timer);
       abort.abort();
+      exportRequest?.abort();
+      cancelPrefetch();
       request?.abort();
       void rpc.dispose();
     };
@@ -189,6 +264,8 @@
     if (rpc && k)
       untrack(() => {
         overlay = undefined;
+        exportRequest?.abort();
+        exportError = '';
         void refresh();
       });
   });
@@ -232,6 +309,7 @@
 
 <svelte:head><title>{compare ? 'Comparison desk' : 'Usage overview'} · Token tracker</title></svelte:head>
 <svelte:window onkeydown={keys} />
+<svelte:document onvisibilitychange={resume} />
 <div class="usage-app" class:compare {@attach theme.attach}>
   <header class="wb-mast">
     <div class="wb-wrap wb-mast-inner">
@@ -269,11 +347,8 @@
   <main class="wb-wrap wb-main">
     <div class="wb-heading">
       <h1>{compare ? 'Comparison desk' : 'Usage overview'}</h1>
-      <button
-        class="wb-link export"
-        disabled={!data || !ready}
-        onclick={() => data && exportSessions(data, (id) => label('devices', id))}
-        ><Icon name="download" size={15} /> Export CSV</button
+      <button class="wb-link export" disabled={!ready || exporting} onclick={() => void downloadSessions()}
+        ><Icon name="download" size={15} /> {exporting ? 'Exporting…' : 'Export CSV'}</button
       >
     </div>
     {#snippet rangeControl()}<ChoiceMenu
@@ -327,17 +402,23 @@
             {@render rangeControl()}{@render filterButton()}{@render chips()}
           </div>{/if}
         {#if error}<div class="wb-error" role="alert">
-            {error} <button class="wb-link" onclick={() => void refresh()}>Retry</button>
+            {error} <button class="wb-link" onclick={() => void refresh(true)}>Retry</button>
+          </div>{/if}
+        {#if exportError}<div class="wb-error" role="alert">
+            {exportError}
+            <button class="wb-link" disabled={!ready || exporting} onclick={() => void downloadSessions()}
+              >Retry export</button
+            >
           </div>{/if}
         {#if data}{@const d = data}
-          <div class="reading" aria-busy={loading} inert={!ready}>
+          <div class="reading" aria-busy={loading} inert={loadedScope !== scope}>
             <section class="wb-kpis" aria-label="Usage summary">
               {#each [['Total tokens', formatValue(d.totals.tokens, 'tokens'), periodOf(d)], ['Estimated API cost', valueOf(d.totals, 'costUSD'), d.totals.unpricedTokens ? 'Priced tokens only' : 'API equivalent'], ['Sessions', d.totals.sessions.toLocaleString(), 'in this scope'], ['Cache hit rate', (d.totals.cacheHitRate * 100).toFixed(1) + '%', 'of input tokens']] as [name, val, sub] (name)}<div
                 >
                   <span>{name}</span><strong>{val}</strong><small>{sub}</small>
                 </div>{/each}
             </section>
-            {#key JSON.stringify([loadedKey, group, metric, compare, p.get('scale')])}<Activity
+            {#key JSON.stringify([loadedScope, group, metric, compare, p.get('scale')])}<Activity
                 data={d}
                 colors={chartColors.get(group) ?? new Map()}
                 {group}
@@ -354,7 +435,7 @@
                 undo={() => history.back()}
                 clear={() => apply({})}
               />{/key}
-            <section class="wb-sessions">
+            <section class="wb-sessions" inert={!ready}>
               <div class="wb-section-head">
                 <div class="wb-title-line">
                   <h2>Sessions</h2>
@@ -363,10 +444,16 @@
                 <div class="wb-pager">
                   <small
                     >{count ? `${cursor * perPage + 1}–${Math.min((cursor + 1) * perPage, count)}` : '0'} of {count.toLocaleString()}</small
-                  ><button aria-label="Previous sessions" disabled={!cursor} onclick={() => updatePage(cursor)}
-                    >‹</button
+                  ><button
+                    aria-label="Previous sessions"
+                    onpointerenter={() => warmPage(cursor)}
+                    onfocus={() => warmPage(cursor)}
+                    disabled={!cursor}
+                    onclick={() => updatePage(cursor)}>‹</button
                   ><button
                     aria-label="Next sessions"
+                    onpointerenter={() => warmPage(cursor + 2)}
+                    onfocus={() => warmPage(cursor + 2)}
                     disabled={(cursor + 1) * perPage >= count}
                     onclick={() => updatePage(cursor + 2)}>›</button
                   >
@@ -375,7 +462,7 @@
               <table>
                 <thead><tr><th>Project</th><th>Model</th><th>Device</th><th>Started</th><th>Tokens</th></tr></thead
                 ><tbody
-                  >{#each d.sessions.slice(cursor * perPage, (cursor + 1) * perPage) as s (JSON.stringify( [s.deviceId, s.harness, s.id] ))}{@const project =
+                  >{#each d.sessions as s (JSON.stringify([s.deviceId, s.harness, s.id]))}{@const project =
                       s.repository ?? s.project}{@const dest =
                       nativeThreadUrl(s) ?? safeWebUrl(s.t3ThreadUrl) ?? cursorAgentUrl(s)}<tr
                       ><td
@@ -408,7 +495,7 @@
       </div>
     </div>
     <div class="wb-bottom">
-      <button disabled={loading} onclick={() => void refresh()}
+      <button disabled={loading} onclick={() => void refresh(true)}
         >{loading
           ? 'Updating…'
           : `Refresh${data ? ' · ' + new Date(data.generatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}`}</button
@@ -419,7 +506,7 @@
       {data}
       {query}
       {metric}
-      {client}
+      readContext={(q, signal) => readPage(q, 1, signal)}
       {label}
       {apply}
       {close}

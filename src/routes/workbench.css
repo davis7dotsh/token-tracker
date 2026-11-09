@@ -246,7 +246,8 @@
   .wb-kpis small {
     display: block;
   }
-  .reading[inert] {
+  .reading[inert],
+  .wb-sessions[inert] {
     opacity: 0.55;
     pointer-events: none;
   }
@@ -540,6 +541,7 @@
   .matrix-body .matrix-entry {
     width: 100%;
     height: 51px;
+    content-visibility: auto;
     border-bottom: 1px solid var(--wb-line);
     text-align: left;
   }
