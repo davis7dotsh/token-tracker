@@ -30,7 +30,11 @@ const revokedFailure = () =>
   new Unauthorized({
     message: 'This device is revoked. Restore it in the dashboard’s device settings, then connect it again.',
   });
-const StoredDevice = Schema.Struct({ ...Device.fields, needsReconnect: Schema.BooleanFromBit });
+const StoredDevice = Schema.Struct({
+  ...Device.fields,
+  collectorVersion: Schema.String,
+  needsReconnect: Schema.BooleanFromBit,
+});
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const equalSecret = (left: string, right: string) =>
   timingSafeEqual(Buffer.from(digest(left)), Buffer.from(digest(right)));
@@ -58,6 +62,9 @@ const validateDevice = (device: DeviceRegistration) => {
     device.platform.length > 100
   ) {
     return Effect.fail(new InvalidRequest({ message: 'A valid device ID, name, and platform are required.' }));
+  }
+  if (device.collectorVersion !== undefined && device.collectorVersion.length > 64) {
+    return Effect.fail(new InvalidRequest({ message: 'A collector version must be at most 64 characters.' }));
   }
   return Effect.void;
 };
@@ -130,7 +137,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       .unsafe(`CREATE TABLE IF NOT EXISTS devices (
       id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL,
       token_hash TEXT NOT NULL, last_seen TEXT,
-      sources TEXT NOT NULL DEFAULT '[]', pricing_updated_at TEXT NOT NULL DEFAULT '', revoked_at TEXT
+      sources TEXT NOT NULL DEFAULT '[]', pricing_updated_at TEXT NOT NULL DEFAULT '', revoked_at TEXT,
+      collector_version TEXT NOT NULL DEFAULT ''
     )`)
       .pipe(Effect.mapError(storageFailure));
     const deviceColumns = yield* sql
@@ -138,6 +146,11 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       .pipe(Effect.mapError(storageFailure));
     if (!deviceColumns.some((column) => column.name === 'revoked_at')) {
       yield* sql.unsafe('ALTER TABLE devices ADD COLUMN revoked_at TEXT').pipe(Effect.mapError(storageFailure));
+    }
+    if (!deviceColumns.some((column) => column.name === 'collector_version')) {
+      yield* sql
+        .unsafe("ALTER TABLE devices ADD COLUMN collector_version TEXT NOT NULL DEFAULT ''")
+        .pipe(Effect.mapError(storageFailure));
     }
     yield* sql
       .unsafe(`CREATE TABLE IF NOT EXISTS usage_events (
@@ -285,11 +298,15 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       function* () {
         const rows = yield* sql`
         SELECT d.id, d.name, d.platform, d.last_seen AS lastSeen, d.revoked_at AS revokedAt,
-          d.token_hash = '' AS needsReconnect,
+          d.collector_version AS collectorVersion, d.token_hash = '' AS needsReconnect,
           COALESCE((SELECT SUM(records) FROM usage_dimensions e WHERE e.device_id = d.id), 0) AS eventCount
         FROM devices d ORDER BY d.name
       `;
-        return yield* Schema.decodeUnknownEffect(Schema.Array(StoredDevice))(rows);
+        const devices = yield* Schema.decodeUnknownEffect(Schema.Array(StoredDevice))(rows);
+        // Devices whose collectors never reported a version omit the field.
+        return devices.map(({ collectorVersion, ...device }): Device =>
+          collectorVersion ? { ...device, collectorVersion } : device,
+        );
       },
       (effect) => Effect.mapError(effect, storageFailure),
     );
@@ -303,6 +320,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       }
       yield* validateDevice(device);
       const token = randomBytes(32).toString('base64url');
+      const collectorVersion = device.collectorVersion?.trim() ?? '';
       // A revoked device stays blocked, even with the pairing secret, until the
       // dashboard restores it. The conflict update skips it atomically.
       yield* commitWrite(
@@ -312,10 +330,11 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             platform: string;
           }>`SELECT name, platform FROM devices WHERE id = ${device.id}`;
           const paired = yield* sql<{ id: string }>`
-              INSERT INTO devices (id, name, platform, token_hash)
-              VALUES (${device.id}, ${device.name}, ${device.platform}, ${digest(token)})
+              INSERT INTO devices (id, name, platform, token_hash, collector_version)
+              VALUES (${device.id}, ${device.name}, ${device.platform}, ${digest(token)}, ${collectorVersion})
               ON CONFLICT (id) DO UPDATE SET name = excluded.name,
-                platform = excluded.platform, token_hash = excluded.token_hash
+                platform = excluded.platform, token_hash = excluded.token_hash,
+                collector_version = COALESCE(NULLIF(excluded.collector_version, ''), devices.collector_version)
               WHERE devices.revoked_at IS NULL
               RETURNING id
             `;
@@ -494,6 +513,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           const receivedAt = new Date().toISOString();
           const sources = batch.sources ? JSON.stringify(batch.sources) : null;
           const pricingUpdatedAt = batch.pricingUpdatedAt || null;
+          const collectorVersion = batch.device.collectorVersion?.trim() || null;
           const metadataChanged =
             createdDevice ||
             previousDevice?.platform !== batch.device.platform ||
@@ -502,7 +522,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           // Pairing sets the name; later uploads keep any rename from the dashboard.
           yield* sql`UPDATE devices SET platform = ${batch.device.platform}, last_seen = ${receivedAt},
               sources = COALESCE(${sources}, sources),
-              pricing_updated_at = COALESCE(${pricingUpdatedAt}, pricing_updated_at) WHERE id = ${deviceId}`;
+              pricing_updated_at = COALESCE(${pricingUpdatedAt}, pricing_updated_at),
+              collector_version = COALESCE(${collectorVersion}, collector_version) WHERE id = ${deviceId}`;
           return { accepted, updated, deleted, receivedAt, metadataChanged, changedDays };
         }),
         (result) => {

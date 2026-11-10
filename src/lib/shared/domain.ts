@@ -214,7 +214,14 @@ export const UsageInfo = DashboardResponse.mapFields(({ machine, pricing, source
 }));
 export type UsageInfo = typeof UsageInfo.Type;
 
-export const DeviceRegistration = Schema.Struct({ id: Schema.String, name: Schema.String, platform: Schema.String });
+export const DeviceRegistration = Schema.Struct({
+  id: Schema.String,
+  name: Schema.String,
+  platform: Schema.String,
+  // Sent on pairing and every sync. Older collectors omit it; the hub keeps the
+  // last reported value.
+  collectorVersion: Schema.optionalKey(Schema.String),
+});
 export type DeviceRegistration = typeof DeviceRegistration.Type;
 export const Device = Schema.Struct({
   ...DeviceRegistration.fields,

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { Effect, ManagedRuntime } from 'effect';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -193,6 +194,37 @@ test('dashboard renames survive uploads, and revoked devices keep history but ca
     expect(await failure((store) => store.syncUsage(device.id, token, { device, events: [event] }))).toContain(
       'Unauthorized',
     );
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test('hubs created before collector versions gain the column and keep their devices', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-collector-column-'));
+  directories.push(directory);
+  const database = new Database(join(directory, 'usage.sqlite'));
+  database.exec(`CREATE TABLE devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL,
+    token_hash TEXT NOT NULL, last_seen TEXT, sources TEXT NOT NULL DEFAULT '[]',
+    pricing_updated_at TEXT NOT NULL DEFAULT '', revoked_at TEXT)`);
+  database
+    .query('INSERT INTO devices (id, name, platform, token_hash, last_seen) VALUES (?, ?, ?, ?, ?)')
+    .run(device.id, device.name, device.platform, 'existing-credential-hash', '2026-10-01T00:00:00.000Z');
+  database.close();
+  const runtime = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }));
+  const run = <A, E>(program: (store: UsageStore['Service']) => Effect.Effect<A, E>) =>
+    runtime.runPromise(UsageStore.use(program));
+  try {
+    const [existing] = await run((store) => store.getDevices());
+    expect(existing).toMatchObject({ id: device.id, lastSeen: '2026-10-01T00:00:00.000Z' });
+    expect(existing).not.toHaveProperty('collectorVersion');
+    const { token } = await run((store) => store.registerDevice(pairingSecret, device));
+    await run((store) =>
+      store.syncUsage(device.id, token, { device: { ...device, collectorVersion: ' 0.4.1+0cebd19 ' }, events: [] }),
+    );
+    expect((await run((store) => store.getDevices()))[0]?.collectorVersion).toBe('0.4.1+0cebd19');
+    // Re-pairing from an older collector keeps the last reported build.
+    await run((store) => store.registerDevice(pairingSecret, device));
+    expect((await run((store) => store.getDevices()))[0]?.collectorVersion).toBe('0.4.1+0cebd19');
   } finally {
     await runtime.dispose();
   }
