@@ -3,7 +3,7 @@ import { Effect, Layer } from 'effect';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compressRpcResponse } from '../../src/lib/server/rpc/compression';
+import { compressPricingPage, compressRpcResponse } from '../../src/lib/server/rpc/compression';
 import { LocalUsage, makeRpcWebHandler } from '../../src/lib/server/rpc/server';
 import type { UsageEvent } from '../../src/lib/shared/domain';
 
@@ -66,6 +66,18 @@ test('native gzip preserves response metadata and removes the original represent
     const untouched = response(payload, headers);
     expect(await compressRpcResponse(request('gzip'), untouched)).toBe(untouched);
   }
+});
+
+test('pricing HTML negotiates native gzip without changing RPC content type handling', async () => {
+  const html = () =>
+    response(payload, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store' });
+  const untouched = html();
+  expect(await compressRpcResponse(request('gzip'), untouched)).toBe(untouched);
+  const zipped = await compressPricingPage(request('gzip'), html());
+  expect(zipped.headers.get('cache-control')).toBe('private, no-store');
+  expect(zipped.headers.get('content-encoding')).toBe('gzip');
+  expect(new TextDecoder().decode(Bun.gunzipSync(await zipped.bytes()))).toBe(payload);
+  expect((await compressPricingPage(request('gzip;q=0'), html())).headers.get('content-encoding')).toBeNull();
 });
 
 test('request abort while waiting for the first chunk cancels and unlocks the original body', async () => {

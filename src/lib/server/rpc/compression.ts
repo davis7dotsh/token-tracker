@@ -19,7 +19,7 @@ const acceptsGzip = (header: string | null) => {
 
 // Unary RPC results arrive in one large NDJSON chunk. Inspect only that chunk,
 // then stream through native gzip; small replies keep their original bytes.
-export const compressRpcResponse = async (request: Request, response: Response) => {
+const compressTextResponse = async (request: Request, response: Response, allowHtml: boolean) => {
   const contentType = response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
   if (
     !response.body ||
@@ -28,7 +28,8 @@ export const compressRpcResponse = async (request: Request, response: Response) 
     response.headers.has('content-range') ||
     response.headers.has('content-encoding') ||
     /(?:^|,)\s*no-transform\s*(?:,|$)/i.test(response.headers.get('cache-control') ?? '') ||
-    !/^(?:application\/(?:json|x-ndjson|ndjson)|application\/[^;]+\+json)$/.test(contentType)
+    (!(allowHtml && contentType === 'text/html') &&
+      !/^(?:application\/(?:json|x-ndjson|ndjson)|application\/[^;]+\+json)$/.test(contentType))
   )
     return response;
 
@@ -113,3 +114,8 @@ export const compressRpcResponse = async (request: Request, response: Response) 
   if (etag && !etag.startsWith('W/')) headers.set('etag', `W/${etag}`);
   return new Response(source.pipeThrough(new CompressionStream('gzip'), { signal: request.signal }), init);
 };
+
+export const compressRpcResponse = (request: Request, response: Response) =>
+  compressTextResponse(request, response, false);
+export const compressPricingPage = (request: Request, response: Response) =>
+  compressTextResponse(request, response, true);

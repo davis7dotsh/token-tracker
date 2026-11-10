@@ -1,5 +1,6 @@
 import { json, redirect } from '@sveltejs/kit';
 import type { Handle } from '@sveltejs/kit/hooks';
+import { compressPricingPage } from '#lib/server/rpc/compression';
 import { dashboardPasscode } from '#hub';
 import { sessionCookie, validSession } from '#lib/server/auth';
 
@@ -7,7 +8,17 @@ export const handle: Handle = async ({ event, resolve }) => {
   const passcode = dashboardPasscode(event);
   event.locals.passcodeEnabled = passcode !== null;
   event.locals.dashboardAuthenticated = false;
-  if (passcode === null) return resolve(event);
+  if (passcode === null) {
+    const response = await resolve(event);
+    // SSR includes thousands of model names. Compress only the canonical
+    // private-network read; leave authenticated, reflected and error pages alone.
+    return event.route.id === '/settings/pricing' &&
+      event.request.method === 'GET' &&
+      !event.url.search &&
+      response.status === 200
+      ? compressPricingPage(event.request, response)
+      : response;
+  }
   event.setHeaders({ 'cache-control': 'private, no-store' });
   // Cloudflare is never public by accident, even with a missing runtime binding.
   if (passcode.length < 16 || passcode.length > 1024)
