@@ -7,40 +7,71 @@ import type { StoredRow } from './window-pages';
 // Only the Bun hub supplies a codec. Packs are disposable copies of raw SQL
 // rows, never prices, aggregates, or a substitute for validating each event.
 export type DayPackCodec = {
-  compress: (text: string) => Promise<Uint8Array>;
-  decompress: (bytes: Uint8Array, limit: number) => Promise<string>;
+  compress: (bytes: Uint8Array) => Promise<Uint8Array>;
+  decompress: (bytes: Uint8Array, limit: number) => Promise<Uint8Array>;
 };
 const maxRaw = 48 * 1024 * 1024;
 const maxPacked = 4 * 1024 * 1024;
 const maxRows = 65_536;
 export const retainedDays = 64;
-const unpack = (text: string): StoredRow[] => {
-  const lines = text.split('\n', maxRows + 2);
-  const metadata: unknown = JSON.parse(lines[0]);
-  if (!Array.isArray(metadata) || metadata.length !== lines.length - 1 || metadata.length > maxRows)
+const isMeta = (m: unknown): m is [string, string, string, string] =>
+  Array.isArray(m) && m.length === 4 && m.every((v: unknown) => typeof v === 'string');
+const unpack = (raw: Uint8Array): Iterable<StoredRow> => {
+  if (raw.byteLength > maxRaw) throw new Error('Invalid day pack');
+  const bytes = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+  const headerEnd = bytes.indexOf(10);
+  if (headerEnd < 0) throw new Error('Invalid day pack');
+  const metadata: unknown = JSON.parse(bytes.toString('utf8', 0, headerEnd));
+  if (!Array.isArray(metadata) || !metadata.length || metadata.length > maxRows || !metadata.every(isMeta))
     throw new Error('Invalid day pack');
-  return metadata.map((m: unknown, i) => {
-    if (!Array.isArray(m) || m.length !== 4 || !m.every((v: unknown) => typeof v === 'string'))
-      throw new Error('Invalid day pack');
-    return { id: m[0], device_id: m[1], pricing_snapshot: m[2], timestamp: m[3], payload: lines[i + 1] };
-  });
+  // Validate the entire v1 frame before offering it to a reader. Keep only
+  // offsets: a day's payload strings need not coexist with the decoded events.
+  const starts = new Uint32Array(metadata.length + 1);
+  starts[0] = headerEnd + 1;
+  for (let i = 0; i < metadata.length; i++) {
+    const newline = bytes.indexOf(10, starts[i]);
+    if ((newline === -1) !== (i === metadata.length - 1)) throw new Error('Invalid day pack');
+    starts[i + 1] = (newline === -1 ? bytes.length : newline) + 1;
+  }
+  return {
+    *[Symbol.iterator]() {
+      for (let i = 0; i < metadata.length; i++) {
+        const [id, device_id, pricing_snapshot, timestamp] = metadata[i];
+        yield {
+          id,
+          device_id,
+          pricing_snapshot,
+          timestamp,
+          payload: bytes.toString('utf8', starts[i], starts[i + 1] - 1),
+        };
+      }
+    },
+  };
 };
 const pack = (rows: readonly StoredRow[]) => {
   if (!rows.length || rows.length > maxRows) return;
-  let bytes = 0;
+  let payloadBytes = 0;
+  let minHeader = 1;
   for (const row of rows) {
-    bytes +=
-      Buffer.byteLength(row.payload) +
+    payloadBytes += Buffer.byteLength(row.payload) + 1; // newline before each payload
+    minHeader +=
       Buffer.byteLength(row.id) +
       Buffer.byteLength(row.device_id) +
       Buffer.byteLength(row.pricing_snapshot) +
       Buffer.byteLength(row.timestamp) +
-      16;
-    if (bytes > maxRaw || row.payload.includes('\n')) return;
+      14;
+    if (payloadBytes + minHeader > maxRaw || row.payload.includes('\n')) return;
   }
   const header = JSON.stringify(rows.map((row) => [row.id, row.device_id, row.pricing_snapshot, row.timestamp]));
-  const text = [header, ...rows.map((row) => row.payload)].join('\n');
-  return Buffer.byteLength(text) <= maxRaw ? text : undefined;
+  const size = Buffer.byteLength(header) + payloadBytes;
+  if (size > maxRaw) return;
+  const bytes = Buffer.allocUnsafe(size);
+  let pos = bytes.write(header);
+  for (const row of rows) {
+    bytes[pos++] = 10;
+    pos += bytes.write(row.payload, pos);
+  }
+  return bytes;
 };
 
 export const makeDayPacks = Effect.fn('UsageStore.makeDayPacks')(function* (
@@ -115,8 +146,8 @@ export const makeDayPacks = Effect.fn('UsageStore.makeDayPacks')(function* (
     const save = Effect.fnUntraced(function* (day: string, rows: readonly StoredRow[]) {
       if (!reserved.has(day)) return;
       const body = yield* Effect.tryPromise(async () => {
-        const text = pack(rows);
-        return text ? codec.compress(text) : undefined;
+        const raw = pack(rows);
+        return raw ? codec.compress(raw) : undefined;
       }).pipe(Effect.catch(() => Effect.succeed(undefined)));
       // A collector edit, eviction, or competing fill removes this ticket.
       if (body && body.byteLength <= maxPacked) {

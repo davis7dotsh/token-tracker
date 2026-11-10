@@ -3,6 +3,7 @@ import type { SqlClient } from 'effect/sql';
 import type { UsageEvent } from '../../shared/domain';
 import type { StorageFailure } from '../../shared/rpc';
 import { retainedDays, type DayPacks } from './day-packs';
+import { makePageStrings } from './page-strings';
 
 export type UsageReadOptions = {
   start?: string;
@@ -129,22 +130,37 @@ export const makeWindowPages = (
           WHERE ${owner.where} AND timestamp >= ? AND timestamp < ? ORDER BY timestamp`,
           [...owner.params, from, until],
         );
-        const decodeRows = Effect.fnUntraced(function* (rows: readonly StoredRow[]) {
+        const decodeRows = Effect.fnUntraced(function* (rows: Iterable<StoredRow>) {
           const decoded = { day, ...emptyWindow(), times: new Array<string>() };
-          for (let offset = 0; offset < rows.length; offset += 1000) {
+          const shareEvent = makePageStrings();
+          let snapshot = '';
+          const iter = rows[Symbol.iterator]();
+          let done = false;
+          while (!done) {
+            let count = 0;
             yield* Effect.try({
               try: () => {
-                const limit = Math.min(offset + 1000, rows.length);
-                for (let i = offset; i < limit; i++) {
-                  const event = decode(rows[i].payload);
+                for (; count < 1000; count++) {
+                  const next = iter.next();
+                  if (next.done) {
+                    done = true;
+                    break;
+                  }
+                  const row = next.value;
+                  const event = shareEvent(decode(row.payload));
+                  if (row.pricing_snapshot !== snapshot) snapshot = row.pricing_snapshot;
                   decoded.events.push(event);
-                  decoded.times.push(event.timestamp === rows[i].timestamp ? event.timestamp : rows[i].timestamp);
-                  decoded.pricingSnapshots.push(priceStamp(rows[i]));
+                  decoded.times.push(event.timestamp === row.timestamp ? event.timestamp : row.timestamp);
+                  decoded.pricingSnapshots.push({
+                    eventId: row.id === event.id ? event.id : row.id,
+                    deviceId: row.device_id === event.deviceId ? event.deviceId : row.device_id,
+                    updatedAt: snapshot,
+                  });
                 }
               },
               catch: failure,
             });
-            yield* Effect.yieldNow;
+            if (count) yield* Effect.yieldNow;
           }
           return decoded;
         });

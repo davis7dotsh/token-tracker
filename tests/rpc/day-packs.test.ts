@@ -4,6 +4,7 @@ import { Effect } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { makeDayPacks, retainedDays, type DayPacks } from '../../src/lib/server/rpc/day-packs';
 
+const materialize = <A>(rows: Iterable<A> | undefined) => rows && [...rows];
 const first = '2026-01-01';
 const second = '2026-01-02';
 const row = (day: string) => ({
@@ -19,8 +20,8 @@ const withPacks = <A, E>(run: (packs: DayPacks, sql: SqlClient.SqlClient) => Eff
       const sql = yield* SqlClient.SqlClient;
       yield* sql`CREATE TABLE usage_events(id TEXT PRIMARY KEY, timestamp TEXT NOT NULL)`;
       const packs = yield* makeDayPacks(sql, {
-        compress: async (text) => Buffer.from(text),
-        decompress: async (bytes) => Buffer.from(bytes).toString('utf8'),
+        compress: async (bytes) => bytes,
+        decompress: async (bytes) => bytes,
       });
       return yield* run(packs, sql);
     }).pipe(Effect.provide(SqliteClient.layer({ filename: ':memory:' }))),
@@ -36,7 +37,7 @@ test('a cross-day upsert invalidates both packs on commit and neither on rollbac
       const move = sql`INSERT INTO usage_events VALUES (${first}, ${row(second).timestamp})
         ON CONFLICT(id) DO UPDATE SET timestamp = excluded.timestamp`;
       yield* sql.withTransaction(move.pipe(Effect.andThen(Effect.fail('rollback')))).pipe(Effect.ignore);
-      for (const day of [first, second]) expect(yield* packs.lookup(day, 'excluded')).toEqual([row(day)]);
+      for (const day of [first, second]) expect(materialize(yield* packs.lookup(day, 'excluded'))).toEqual([row(day)]);
       yield* move;
       for (const day of [first, second]) expect(yield* packs.lookup(day, 'excluded')).toBeUndefined();
     }),
@@ -55,7 +56,7 @@ test('delayed compressed results cannot overwrite a competing fill or revive a c
       yield* sql`INSERT INTO usage_events VALUES (${second}, ${row(second).timestamp})`;
       yield* stale.flush();
       expect(yield* packs.lookup(first, 'old-scope')).toBeUndefined();
-      expect(yield* packs.lookup(first, 'new-scope')).toEqual([row(first)]);
+      expect(materialize(yield* packs.lookup(first, 'new-scope'))).toEqual([row(first)]);
       expect(yield* packs.lookup(second, 'old-scope')).toBeUndefined();
 
       const evicted = yield* packs.begin([first], first, 'new-scope');
@@ -66,5 +67,29 @@ test('delayed compressed results cannot overwrite a competing fill or revive a c
       yield* packs.begin(newer, newer[0], 'new-scope');
       yield* evicted.flush();
       expect(yield* packs.lookup(first, 'new-scope')).toBeUndefined();
+    }),
+  ));
+
+test('v1 packs round-trip Unicode and quoted metadata byte-for-byte and reject mismatched line counts', () =>
+  withPacks((packs, sql) =>
+    Effect.gen(function* () {
+      const rows = [
+        { ...row(first), id: '雪\n"', payload: '{"title":"cafés ☕️ and 😀"}' },
+        { ...row(first), id: 'line\\two', payload: '{"title":"one\\ntwo"}' },
+      ];
+      // Text encoder used by older releases: one JSON header, then one line per payload.
+      const header = JSON.stringify(rows.map((r) => [r.id, r.device_id, r.pricing_snapshot, r.timestamp]));
+      const v1 = Buffer.from([header, ...rows.map((r) => r.payload)].join('\n'));
+      yield* sql`INSERT INTO usage_day_packs_v1 VALUES (${first}, '', 'old-ticket', ${v1})`;
+      expect(materialize(yield* packs.lookup(first, ''))).toEqual(rows);
+      const fill = yield* packs.begin([first], first, '');
+      yield* fill.save(first, rows);
+      yield* fill.flush();
+      const [saved] = yield* sql<{ body: Uint8Array }>`SELECT body FROM usage_day_packs_v1 WHERE day = ${first}`;
+      expect(Buffer.from(saved.body).equals(v1)).toBe(true);
+      for (const text of [header, header + '\n{}', v1.toString('utf8') + '\n{}']) {
+        yield* sql`UPDATE usage_day_packs_v1 SET body = ${Buffer.from(text)} WHERE day = ${first}`;
+        expect(yield* packs.lookup(first, '')).toBeUndefined();
+      }
     }),
   ));

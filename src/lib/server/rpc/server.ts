@@ -115,12 +115,10 @@ const hubFiles = (options: ServerOptions) =>
 const compressDay = promisify(zstdCompress);
 const expandDay = promisify(zstdDecompress);
 const dayPackCodec: DayPackCodec = {
-  compress: (text) =>
-    compressDay(text, { params: { [constants.ZSTD_c_compressionLevel]: 1, [constants.ZSTD_c_checksumFlag]: 1 } }),
-  decompress: async (bytes, limit) =>
-    (await expandDay(bytes, { maxOutputLength: limit, params: { [constants.ZSTD_d_windowLogMax]: 26 } })).toString(
-      'utf8',
-    ),
+  compress: (bytes) =>
+    compressDay(bytes, { params: { [constants.ZSTD_c_compressionLevel]: 1, [constants.ZSTD_c_checksumFlag]: 1 } }),
+  decompress: (bytes, limit) =>
+    expandDay(bytes, { maxOutputLength: limit, params: { [constants.ZSTD_d_windowLogMax]: 26 } }),
 };
 export const usageStoreLayer = (options: ServerOptions = {}) =>
   Layer.unwrap(
