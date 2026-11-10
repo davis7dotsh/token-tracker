@@ -12,6 +12,7 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
+import { SqlClient } from 'effect/sql';
 import { StorageFailure } from '../../shared/rpc';
 import { collectUsage } from '../usage';
 import { filePricing } from '../usage/pricing-runtime';
@@ -120,12 +121,21 @@ const dayPackCodec: DayPackCodec = {
   decompress: (bytes, limit) =>
     expandDay(bytes, { maxOutputLength: limit, params: { [constants.ZSTD_d_windowLogMax]: 26 } }),
 };
+// bun:sqlite blocks the event loop, so a commit's fsync stalls every request.
+// With WAL, NORMAL syncs at checkpoints instead of every commit: an app crash
+// loses nothing, and power loss can only drop the newest commits, never corrupt.
+// On a busy shared disk FULL measured 6–43 s commit stalls; NORMAL stayed < 0.2 s.
+const relaxedSync = <A, E, R>(sql: SqlClient.SqlClient, next: Effect.Effect<A, E, R>) =>
+  sql.unsafe('PRAGMA synchronous = NORMAL').pipe(
+    Effect.mapError(() => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' })),
+    Effect.andThen(next),
+  );
 export const usageStoreLayer = (options: ServerOptions = {}) =>
   Layer.unwrap(
     Effect.map(hubFiles(options), ({ databasePath, pairingSecret }) =>
       Layer.effect(
         UsageStore,
-        UsageStore.make.pipe(
+        Effect.flatMap(SqlClient.SqlClient, (sql) => relaxedSync(sql, UsageStore.make)).pipe(
           Effect.tap(() =>
             Effect.tryPromise({
               try: () => chmod(databasePath, 0o600),
@@ -140,9 +150,9 @@ export const usageStoreLayer = (options: ServerOptions = {}) =>
             pairingSecret,
             indexedPricing: true,
             // Optional cache writes must never wait for a collector's write lock.
-            // Keep the normal connection's durability and busy timeout unchanged.
+            // Keep the normal connection's busy timeout unchanged.
             openDayPacks: SqliteClient.make({ filename: databasePath, disableWAL: true, busyTimeout: 0 }).pipe(
-              Effect.flatMap((sql) => makeDayPacks(sql, dayPackCodec)),
+              Effect.flatMap((sql) => relaxedSync(sql, makeDayPacks(sql, dayPackCodec))),
               Effect.provide(Reactivity.layer),
               Effect.catch(() => Effect.succeed(undefined)),
             ),
