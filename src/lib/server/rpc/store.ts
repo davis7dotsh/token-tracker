@@ -1,4 +1,4 @@
-import { Cache, Context, Effect, Exit, Schema } from 'effect';
+import { Cache, Context, Effect, Exit, Schema, type Scope } from 'effect';
 import { SqlClient } from 'effect/sql';
 import { Buffer } from 'node:buffer';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -11,6 +11,7 @@ import {
   type SessionMetadata,
   type SyncBatch,
 } from '../../shared/domain';
+import type { DayPacks } from './day-packs';
 import { makePricingCandidates, pricingShapeIndex } from './pricing-candidates';
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
 import {
@@ -49,6 +50,7 @@ export class ServerConfiguration extends Context.Service<
   {
     readonly pairingSecret: string;
     readonly indexedPricing?: boolean;
+    readonly openDayPacks?: Effect.Effect<DayPacks | undefined, never, Scope.Scope>;
   }
 >()('token-tracker/ServerConfiguration') {}
 
@@ -284,7 +286,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         : Effect.succeed(undefined);
     let revision = 0;
     let metadataRevision = 0;
-    const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure);
+    const packs = configuration.openDayPacks ? yield* configuration.openDayPacks : undefined;
+    const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure, packs);
     let copiedRevision = -1;
     let copiedIds = new Set<string>();
     // Upload work remains cancellable, but a durable commit must publish its
@@ -574,8 +577,8 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         catch: storageFailure,
       });
     const readWindow = Effect.fn('UsageStore.readWindow')(
-      function* (excluded: string, options: UsageReadOptions = {}) {
-        const data = yield* pages.read(excluded, options);
+      function* (excluded: string, options: UsageReadOptions = {}, allowFills = true) {
+        const data = yield* pages.read(excluded, options, allowFills);
         if ((!options.start && !options.end) || !data.events.length || options.devices?.length === 1)
           return withOutside(data, [], options.end);
         if (copiedRevision !== revision) {
@@ -699,7 +702,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         // shared cache entry here (its producer could need the same connection).
         data = yield* sql
           .withTransaction(
-            readWindow(excluded, options).pipe(Effect.flatMap((fresh) => includeLocalOwners(fresh, excluded, options))),
+            readWindow(excluded, options, false).pipe(
+              Effect.flatMap((fresh) => includeLocalOwners(fresh, excluded, options)),
+            ),
           )
           .pipe(Effect.mapError(storageFailure));
       }

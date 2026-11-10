@@ -1,9 +1,13 @@
 import { SqliteClient } from '@effect/sql-sqlite-bun';
+import * as Reactivity from 'effect/reactivity/Reactivity';
 import { BunHttpPlatform, BunServices } from '@effect/platform-bun';
 import { Effect, FileSystem, Layer, Path, Result, Schema } from 'effect';
 import { enable as compileSchema } from 'effect/schema/SchemaJITCompiler';
 import { UsageEvent } from '../../shared/domain';
 import { randomBytes } from 'node:crypto';
+import { constants, zstdCompress, zstdDecompress } from 'node:zlib';
+import { promisify } from 'node:util';
+import { makeDayPacks, type DayPackCodec } from './day-packs';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -108,6 +112,16 @@ const hubFiles = (options: ServerOptions) =>
       }),
   });
 
+const compressDay = promisify(zstdCompress);
+const expandDay = promisify(zstdDecompress);
+const dayPackCodec: DayPackCodec = {
+  compress: (text) =>
+    compressDay(text, { params: { [constants.ZSTD_c_compressionLevel]: 1, [constants.ZSTD_c_checksumFlag]: 1 } }),
+  decompress: async (bytes, limit) =>
+    (await expandDay(bytes, { maxOutputLength: limit, params: { [constants.ZSTD_d_windowLogMax]: 26 } })).toString(
+      'utf8',
+    ),
+};
 export const usageStoreLayer = (options: ServerOptions = {}) =>
   Layer.unwrap(
     Effect.map(hubFiles(options), ({ databasePath, pairingSecret }) =>
@@ -123,7 +137,19 @@ export const usageStoreLayer = (options: ServerOptions = {}) =>
         ),
       ).pipe(
         Layer.provide(SqliteClient.layer({ filename: databasePath })),
-        Layer.provide(Layer.succeed(ServerConfiguration, { pairingSecret, indexedPricing: true })),
+        Layer.provide(
+          Layer.succeed(ServerConfiguration, {
+            pairingSecret,
+            indexedPricing: true,
+            // Optional cache writes must never wait for a collector's write lock.
+            // Keep the normal connection's durability and busy timeout unchanged.
+            openDayPacks: SqliteClient.make({ filename: databasePath, disableWAL: true, busyTimeout: 0 }).pipe(
+              Effect.flatMap((sql) => makeDayPacks(sql, dayPackCodec)),
+              Effect.provide(Reactivity.layer),
+              Effect.catch(() => Effect.succeed(undefined)),
+            ),
+          }),
+        ),
       ),
     ),
   );

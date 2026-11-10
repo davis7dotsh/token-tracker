@@ -487,3 +487,41 @@ test('a correction between pages or before the local-owner lookup cannot make an
     [anchor, moved, nowInside].map(({ id, timestamp }) => [id, timestamp]),
   );
 });
+
+test('a busy writer cannot delay an optional day fill, and a narrower range clips indexed UTC times', async () => {
+  const { directory, runtime } = await storeRuntime();
+  await runtime.runPromise(TestClock.setTime(Date.parse('2026-10-05T12:00Z')));
+  const store = await runtime.runPromise(UsageStore);
+  const registration = await runtime.runPromise(store.registerDevice(pairingSecret, device));
+  const times = ['2026-10-02T23:30:00-02:00', '2026-10-03T01:45:00Z', '2026-10-03T04:00:00+02:00'];
+  await runtime.runPromise(
+    store.syncUsage(device.id, registration.token, {
+      device,
+      events: times.map((timestamp, i) => ({ ...event, id: `edge-${i}`, timestamp })),
+    }),
+  );
+  const writer = new Database(join(directory, 'usage.sqlite'));
+  try {
+    expect(writer.query("SELECT name FROM sqlite_master WHERE name = 'usage_day_packs_v1'").get()).not.toBeNull();
+    writer.exec('BEGIN IMMEDIATE');
+    const start = performance.now();
+    const full = await runtime.runPromise(store.getUsage(undefined, window));
+    expect(full.events.map((e) => e.id)).toEqual(['edge-0', 'edge-1', 'edge-2']);
+    expect(performance.now() - start).toBeLessThan(2000); // The canonical writer timeout is 5s.
+    expect(writer.query('SELECT day FROM usage_day_packs_v1').all()).toEqual([]);
+    writer.exec('ROLLBACK');
+    const partial = await runtime.runPromise(
+      store.getUsage(undefined, {
+        start: '2026-10-03T01:30:00.000Z',
+        end: '2026-10-03T02:00:00.000Z',
+        devices: [device.id],
+      }),
+    );
+    expect(partial.events.map((e) => e.id)).toEqual(['edge-0', 'edge-1']);
+    // Reuse the immutable parents, not a second SQL scan + decode.
+    expect(partial.events[0]).toBe(full.events[0]);
+    expect(partial.pricingSnapshots[1]).toBe(full.pricingSnapshots[1]);
+  } finally {
+    writer.close();
+  }
+});
