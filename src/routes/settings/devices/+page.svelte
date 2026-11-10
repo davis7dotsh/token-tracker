@@ -192,9 +192,7 @@
             >{:else}<span class="device-meta"
               >{device.platform} · {integer.format(device.eventCount)} records · {device.lastSeen
                 ? `last seen ${relativeTime(device.lastSeen)}`
-                : 'never synced'}{#if device.collectorVersion}
-                · collector {device.collectorVersion}{:else if device.lastSeen}
-                · collector version unknown{/if}</span
+                : 'never synced'}{#if device.collectorVersion}{' · collector '}{device.collectorVersion}{:else if device.lastSeen}{' · collector version unknown'}{/if}</span
             >{/if}
         </div>
         <span class={['device-state', deviceStatus.tone]}><i aria-hidden="true"></i>{deviceStatus.label}</span>
