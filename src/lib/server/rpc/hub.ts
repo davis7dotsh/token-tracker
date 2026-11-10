@@ -5,7 +5,13 @@ import { HttpRouter, HttpServerResponse } from 'effect/http';
 import { RpcSerialization, RpcServer } from 'effect/rpc';
 import { InvalidRequest, UsageFailure, UsageRpc, type PricingSettings } from '../../shared/rpc';
 import type { PricingPolicy } from '../../shared/pricing';
-import { UsageQuery, type CollectionError, type UsageEvent, type UsageResult } from '../../shared/domain';
+import {
+  UsageQuery,
+  type DashboardResponse,
+  type CollectionError,
+  type UsageEvent,
+  type UsageResult,
+} from '../../shared/domain';
 import { sessionPageSize } from '../../shared/dashboard-page';
 import { tokenTotal } from '../usage/parsers';
 import {
@@ -199,10 +205,13 @@ const retainResult = <A>(cache: Map<string, A>, key: string, value: A) => {
 const CollectorRpc = UsageRpc.omit(
   'GetUsage',
   'GetUsagePage',
+  'GetUsagePageUpdate',
   'GetUsageInfo',
   'GetHubInfo',
   'GetDevices',
   'GetPricing',
+  'GetPricingCatalog',
+  'GetUnresolvedPricing',
   'GetAdminAccess',
   'RenameDevice',
   'RevokeDevice',
@@ -486,6 +495,16 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           timeframe,
         };
       });
+      // Tokens are opaque and instance-local. A recomputation (including a clock
+      // boundary), another filter, or refreshed source metadata requires a full page.
+      const pageVersions = new WeakMap<
+        DashboardResponse,
+        {
+          sources: DashboardResponse['sources'];
+          selection: string | undefined;
+          revision: string;
+        }
+      >();
       const getUsage = Effect.fn('rpc.GetUsage')(
         function* (query: UsageQuery) {
           const input = yield* readQuery(query);
@@ -513,10 +532,18 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               });
           }
           retainResult(dashboards, input.resultKey, cached);
+          const sources = yield* store.getSources(localDeviceId);
+          const selection = JSON.stringify(input.query.models);
+          let version = pageVersions.get(cached.response);
+          if (!version || version.sources !== sources || version.selection !== selection) {
+            version = { sources, selection, revision: randomBytes(16).toString('hex') };
+            pageVersions.set(cached.response, version);
+          }
           return {
             ...cached.response,
+            viewRevision: version.revision,
             generatedAt: input.now.toISOString(),
-            sources: [...input.current.sources, ...(yield* store.getSources(localDeviceId))],
+            sources: [...input.current.sources, ...sources],
             filters: {
               ...cached.response.filters,
               ...(input.query.models ? { selectedModels: input.query.models } : {}),
@@ -527,20 +554,101 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
         ),
       );
+      const getPricing = Effect.fn('rpc.GetPricing')(
+        function* (query: UsageQuery) {
+          const input = yield* readQuery(query);
+          let cached = pricingResults.get(input.resultKey);
+          if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
+            const policy = input.state.policy;
+            const candidates =
+              input.timeframe.range === 'all' && query.devices === undefined
+                ? yield* store.getPricingCandidates(localDeviceId, input.current.events, policy)
+                : undefined;
+            const unpriced = candidates
+              ? uniqueEvents(candidates.remote, candidates.local, localDeviceId, query)
+                  .map((event) => repriceEvent(event, policy))
+                  .filter((event) => !event.costKnown)
+              : (yield* Cache.get(snapshots, input.readKey).pipe(
+                  Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
+                )).unpriced;
+            cached = pricingResults.get(input.resultKey);
+            if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
+              const groups = new Map<string, { tokens: number; gaps: number; tiers: Set<string> }>();
+              const timeframe = input.timeframe;
+              const start = timeframe.start.epochMilliseconds;
+              const now = input.now.getTime();
+              const end = Math.min(timeframe.end.epochMilliseconds, now + 1);
+              const validity: DashboardValidity = {
+                todayMillis: timeframe.today.epochMilliseconds,
+                calendarStart: timeframe.range === 'all' ? undefined : timeframe.start.startOfDay().epochMilliseconds,
+                nowBefore: -Infinity,
+                nowAfter: Infinity,
+                startBefore: -Infinity,
+                startAfter: Infinity,
+                previousBefore: -Infinity,
+                previousAfter: Infinity,
+              };
+              const match = usageMatchers(input.normalized);
+              for (const event of unpriced) {
+                if (!match.dimensions(event) || !match.projects(event)) continue;
+                const millis = eventMillis(event);
+                if (!Number.isFinite(millis)) continue;
+                if (millis <= now) validity.nowBefore = Math.max(validity.nowBefore, millis);
+                else validity.nowAfter = Math.min(validity.nowAfter, millis);
+                if (timeframe.range !== 'all') {
+                  if (millis < start) validity.startBefore = Math.max(validity.startBefore, millis);
+                  else validity.startAfter = Math.min(validity.startAfter, millis);
+                }
+                if ((timeframe.range !== 'all' && millis < start) || millis >= end) continue;
+                const raw = event.rawModel ?? event.model;
+                const group = groups.get(raw) ?? { tokens: 0, gaps: 0, tiers: new Set<string>() };
+                const gaps = pricingGaps(event, policy);
+                group.tokens += tokenTotal(event);
+                group.gaps |= gaps;
+                if (gaps & PricingGap.tier) group.tiers.add(event.serviceTier ?? '');
+                groups.set(raw, group);
+              }
+              const unresolved = [...groups]
+                .flatMap(([model, { tokens, gaps, tiers }]) =>
+                  tokens ? [{ model, tokens, reason: describePricingGaps(model, gaps, tiers, policy) }] : [],
+                )
+                .sort((left, right) => right.tokens - left.tokens || left.model.localeCompare(right.model));
+              cached = { unresolved, validity };
+            }
+          }
+          retainResult(pricingResults, input.resultKey, cached);
+          return { info: input.state.info, unresolved: cached.unresolved, secretRequired: !options.trustBrowser };
+        },
+        Effect.mapError((error) =>
+          error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+        ),
+      );
       const warmer = yield* makeViewWarmer(options.viewHints, getUsage, store.getRevision);
+      const getPage = Effect.fn('rpc.GetUsagePage')(function* ({ query, page }: { query: UsageQuery; page: number }) {
+        const { projectInsights: _insights, ...dashboard } = yield* getUsage(query);
+        yield* warmer.visited(query);
+        const sessionCount = dashboard.sessions.length;
+        const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
+        const sessionOffset = (Math.min(page, lastPage) - 1) * sessionPageSize;
+        return {
+          ...dashboard,
+          sessions: dashboard.sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
+          sessionCount,
+          sessionOffset,
+        };
+      });
       return {
         GetUsage: getUsage,
-        GetUsagePage: Effect.fn('rpc.GetUsagePage')(function* ({ query, page }) {
-          const { projectInsights: _insights, ...dashboard } = yield* getUsage(query);
-          yield* warmer.visited(query);
-          const sessionCount = dashboard.sessions.length;
-          const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
-          const sessionOffset = (Math.min(page, lastPage) - 1) * sessionPageSize;
+        GetUsagePage: getPage,
+        GetUsagePageUpdate: Effect.fn('rpc.GetUsagePageUpdate')(function* (request) {
+          const page = yield* getPage(request);
+          if (request.viewRevision !== page.viewRevision) return page;
           return {
-            ...dashboard,
-            sessions: dashboard.sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
-            sessionCount,
-            sessionOffset,
+            _tag: 'PageDelta' as const,
+            viewRevision: page.viewRevision,
+            generatedAt: page.generatedAt,
+            sessionOffset: page.sessionOffset,
+            ...(page.sessionOffset !== request.sessionOffset ? { sessions: page.sessions } : {}),
           };
         }),
         GetUsageInfo: Effect.fn('rpc.GetUsageInfo')(
@@ -584,67 +692,14 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
             },
           };
         }),
-        GetPricing: Effect.fn('rpc.GetPricing')(
-          function* (query) {
-            const input = yield* readQuery(query);
-            let cached = pricingResults.get(input.resultKey);
-            if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
-              const result = yield* Cache.get(snapshots, input.readKey).pipe(
-                Effect.provideService(SnapshotInput, { current: input.current, state: input.state }),
-              );
-              cached = pricingResults.get(input.resultKey);
-              if (!cached || !isDashboardCurrent(cached.validity, input.timeframe, input.now)) {
-                const groups = new Map<string, { tokens: number; gaps: number; tiers: Set<string> }>();
-                const policy = result.state.policy;
-                const timeframe = input.timeframe;
-                const start = timeframe.start.epochMilliseconds;
-                const now = input.now.getTime();
-                const end = Math.min(timeframe.end.epochMilliseconds, now + 1);
-                const validity: DashboardValidity = {
-                  todayMillis: timeframe.today.epochMilliseconds,
-                  calendarStart: timeframe.range === 'all' ? undefined : timeframe.start.startOfDay().epochMilliseconds,
-                  nowBefore: -Infinity,
-                  nowAfter: Infinity,
-                  startBefore: -Infinity,
-                  startAfter: Infinity,
-                  previousBefore: -Infinity,
-                  previousAfter: Infinity,
-                };
-                const match = usageMatchers(input.normalized);
-                for (const event of result.unpriced) {
-                  if (!match.dimensions(event) || !match.projects(event)) continue;
-                  const millis = eventMillis(event);
-                  if (!Number.isFinite(millis)) continue;
-                  if (millis <= now) validity.nowBefore = Math.max(validity.nowBefore, millis);
-                  else validity.nowAfter = Math.min(validity.nowAfter, millis);
-                  if (timeframe.range !== 'all') {
-                    if (millis < start) validity.startBefore = Math.max(validity.startBefore, millis);
-                    else validity.startAfter = Math.min(validity.startAfter, millis);
-                  }
-                  if ((timeframe.range !== 'all' && millis < start) || millis >= end) continue;
-                  const raw = event.rawModel ?? event.model;
-                  const group = groups.get(raw) ?? { tokens: 0, gaps: 0, tiers: new Set<string>() };
-                  const gaps = pricingGaps(event, policy);
-                  group.tokens += tokenTotal(event);
-                  group.gaps |= gaps;
-                  if (gaps & PricingGap.tier) group.tiers.add(event.serviceTier ?? '');
-                  groups.set(raw, group);
-                }
-                const unresolved = [...groups]
-                  .flatMap(([model, { tokens, gaps, tiers }]) =>
-                    tokens ? [{ model, tokens, reason: describePricingGaps(model, gaps, tiers, policy) }] : [],
-                  )
-                  .sort((left, right) => right.tokens - left.tokens || left.model.localeCompare(right.model));
-                cached = { unresolved, validity };
-              }
-            }
-            retainResult(pricingResults, input.resultKey, cached);
-            return { info: input.state.info, unresolved: cached.unresolved, secretRequired: !options.trustBrowser };
-          },
-          Effect.mapError((error) =>
-            error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
-          ),
-        ),
+        GetPricing: getPricing,
+        GetPricingCatalog: Effect.fn('rpc.GetPricingCatalog')(function* () {
+          return { info: (yield* pricing.load).info, secretRequired: !options.trustBrowser };
+        }),
+        GetUnresolvedPricing: Effect.fn('rpc.GetUnresolvedPricing')(function* (query) {
+          const { info, unresolved } = yield* getPricing(query);
+          return { revision: info.revision, unresolved };
+        }),
         GetPricingPolicy: Effect.fn('rpc.GetPricingPolicy')(function* (
           { revision, deviceId, token, pairingSecret },
           { headers },

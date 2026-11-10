@@ -7,26 +7,44 @@ const subsequence = (needle: string, haystack: string) => {
   return index === needle.length;
 };
 
-// Loose catalog search for the alias picker: separator- and order-insensitive
-// token matching with a subsequence fallback. Exact/prefix matches rank first,
-// then clean slugs ahead of namespaced `provider/model` duplicates.
+const indexCatalog = (models: readonly string[]) =>
+  models
+    .map((name) => {
+      const lower = name.toLowerCase();
+      const base = lower.slice(lower.lastIndexOf('/') + 1);
+      return { name, lower, base, plainName: plain(lower), plainBase: plain(base), segments: name.split('/').length };
+    })
+    // Within each match class, fewer namespace segments, shorter base name,
+    // then lexical order win. This order is independent of the search text.
+    .sort(
+      (a, b) =>
+        a.segments - b.segments || a.base.length - b.base.length || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+    );
+
+const catalogIndexes = new WeakMap<readonly string[], ReturnType<typeof indexCatalog>>();
+
+// Build the index only when the picker opens. Bind the cache to its immutable
+// catalog response, so replaced catalogs aren't held in memory. Each keystroke
+// retains only eligible top results, rather than sorting every matching model.
 export const rankCatalogMatches = (
   models: readonly string[],
   query: string,
   limit = 60,
   include: (name: string) => boolean = () => true,
 ) => {
+  let index = catalogIndexes.get(models);
+  if (!index) {
+    index = indexCatalog(models);
+    catalogIndexes.set(models, index);
+  }
   const search = query.trim().toLowerCase();
   const plainSearch = plain(search);
-  const tokens = search.split(/[^a-z0-9.]+/).filter(Boolean);
-  const namespacedLast = !search.includes('/');
-  const ranked: { name: string; rank: readonly [number, number, number, number] }[] = [];
-  for (const name of models) {
-    if (!include(name)) continue;
-    const lower = name.toLowerCase();
-    const base = lower.slice(lower.lastIndexOf('/') + 1);
-    const plainName = plain(lower);
-    const plainBase = plain(base);
+  const tokens = search
+    .split(/[^a-z0-9.]+/)
+    .filter(Boolean)
+    .map(plain);
+  const buckets = Array.from({ length: 7 }, (): string[] => []);
+  for (const { name, lower, base, plainName, plainBase } of index) {
     const matchClass = !search
       ? 3
       : lower === search || base === search || plainBase === plainSearch
@@ -39,27 +57,17 @@ export const rankCatalogMatches = (
               ? 3
               : lower.includes(search) || plainName.includes(plainSearch)
                 ? 4
-                : tokens.length > 0 && tokens.every((token) => plainName.includes(plain(token)))
+                : tokens.length > 0 && tokens.every((token) => plainName.includes(token))
                   ? 5
                   : plainSearch.length >= 3 && subsequence(plainSearch, plainName)
                     ? 6
                     : -1;
     if (matchClass < 0) continue;
-    const segments = name.split('/').length;
-    ranked.push({
-      name,
-      rank: [matchClass, namespacedLast && segments > 1 ? 1 : 0, segments, base.length] as const,
-    });
+    const bucket = buckets[matchClass];
+    if (bucket.length < limit && include(name)) bucket.push(name);
+    if ((!search || matchClass === 0) && bucket.length >= limit) break;
   }
-  return ranked
-    .sort((left, right) => {
-      for (const [index, value] of left.rank.entries()) {
-        if (value !== right.rank[index]) return value - right.rank[index];
-      }
-      return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
-    })
-    .slice(0, limit)
-    .map((entry) => entry.name);
+  return buckets.flat().slice(0, limit);
 };
 
 export const createAliasValidation = (info: Pick<PricingInfo, 'models' | 'rules'>) => {

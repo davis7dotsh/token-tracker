@@ -3,10 +3,19 @@
   import { getSettings } from '#lib/client/settings.svelte.ts';
   import PricingEditor from '#lib/components/PricingEditor.svelte';
 
+  import type { PageProps } from './$types';
+
+  let { data }: PageProps = $props();
   const settings = getSettings();
   // Unpriced models come from all synced history, not a dashboard date range.
   const query = { range: 'all', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone } as const;
 </script>
 
 <h1 class="settings-title">Pricing</h1>
-<PricingEditor client={settings.client} saves={sharedPricingSaves()} {query} bind:adminSecret={settings.adminSecret} />
+<PricingEditor
+  initial={data}
+  client={settings.client}
+  saves={sharedPricingSaves()}
+  {query}
+  bind:adminSecret={settings.adminSecret}
+/>

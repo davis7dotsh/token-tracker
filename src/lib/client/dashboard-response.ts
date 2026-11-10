@@ -1,5 +1,12 @@
 import { sessionPageSize } from '../shared/dashboard-page';
-import type { DashboardPage, DashboardResponse, SourceStatus, Totals, UsageInfo } from '../shared/domain';
+import type {
+  DashboardPageDelta,
+  DashboardPage,
+  DashboardResponse,
+  SourceStatus,
+  Totals,
+  UsageInfo,
+} from '../shared/domain';
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -123,6 +130,7 @@ export const isUsageInfo = (value: unknown): value is UsageInfo =>
 const count = (value: unknown): value is number => number(value) && Number.isSafeInteger(value) && value >= 0;
 export const isDashboardPage = (value: unknown): value is DashboardPage =>
   record(value) &&
+  optional(value.viewRevision, string) &&
   count(value.sessionCount) &&
   count(value.sessionOffset) &&
   value.sessionOffset % sessionPageSize === 0 &&
@@ -130,6 +138,15 @@ export const isDashboardPage = (value: unknown): value is DashboardPage =>
   Array.isArray(value.sessions) &&
   value.sessions.length === Math.min(sessionPageSize, value.sessionCount - value.sessionOffset) &&
   isDashboardResponse(value);
+
+export const isPageDelta = (value: unknown): value is DashboardPageDelta =>
+  record(value) &&
+  value._tag === 'PageDelta' &&
+  string(value.viewRevision) &&
+  string(value.generatedAt) &&
+  count(value.sessionOffset) &&
+  value.sessionOffset % sessionPageSize === 0 &&
+  optional(value.sessions, (v) => array(v, session));
 
 const nullableString = (v: unknown) => v === null || string(v);
 export const isHubInfo = (value: unknown) =>

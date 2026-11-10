@@ -11,6 +11,7 @@ import {
   type SessionMetadata,
   type SyncBatch,
 } from '../../shared/domain';
+import { makePricingCandidates, pricingShapeIndex } from './pricing-candidates';
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
 import {
   makeWindowPages,
@@ -43,6 +44,7 @@ export class ServerConfiguration extends Context.Service<
   ServerConfiguration,
   {
     readonly pairingSecret: string;
+    readonly indexedPricing?: boolean;
   }
 >()('token-tracker/ServerConfiguration') {}
 
@@ -216,36 +218,59 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         }),
       )
       .pipe(Effect.mapError(storageFailure));
-    // Only copied IDs need out-of-window owner checks. Maintain this small
-    // index transactionally instead of rescanning every historical ID after an
-    // upload. LIMIT/OFFSET uses the existing covering event-ID index.
+    // Copies with the same normalized timestamp are either all in the window or
+    // all outside it. Only divergent copies can change ownership across an edge.
+    // Keep that much smaller set transactionally, including timestamp corrections.
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
           const existing =
-            yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_copied_ids'`;
-          yield* sql.unsafe('CREATE TABLE IF NOT EXISTS usage_copied_ids (id TEXT PRIMARY KEY) WITHOUT ROWID');
-          if (!existing.length)
-            yield* sql.unsafe(`INSERT INTO usage_copied_ids
-              SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1`);
-          const addCopy = `INSERT OR IGNORE INTO usage_copied_ids (id)
-            SELECT NEW.id WHERE EXISTS (SELECT 1 FROM usage_events WHERE id = NEW.id LIMIT 1 OFFSET 1);`;
-          const removeCopy = `DELETE FROM usage_copied_ids WHERE id = OLD.id
-            AND NOT EXISTS (SELECT 1 FROM usage_events WHERE id = OLD.id LIMIT 1 OFFSET 1);`;
-          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_insert
-            AFTER INSERT ON usage_events BEGIN ${addCopy} END`);
-          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_delete
-            AFTER DELETE ON usage_events BEGIN ${removeCopy} END`);
-          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_copied_ids_update
-            AFTER UPDATE OF id, device_id ON usage_events
-            WHEN OLD.id IS NOT NEW.id OR OLD.device_id IS NOT NEW.device_id
-            BEGIN ${removeCopy} ${addCopy} END`);
+            yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('usage_cross_window_ids', 'usage_copied_ids')`;
+          if (!existing.some((row) => row.name === 'usage_cross_window_ids')) {
+            yield* sql.unsafe('CREATE TABLE usage_cross_window_ids (id TEXT PRIMARY KEY) WITHOUT ROWID');
+            const hasLegacy = existing.some((row) => row.name === 'usage_copied_ids');
+            const copies = hasLegacy
+              ? 'usage_copied_ids'
+              : '(SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1)';
+            yield* sql.unsafe(`INSERT INTO usage_cross_window_ids
+          SELECT c.id FROM ${copies} c WHERE EXISTS (SELECT 1 FROM usage_events e
+            WHERE e.id = c.id AND e.timestamp <> (SELECT timestamp FROM usage_events WHERE id = c.id LIMIT 1))`);
+          }
+          // The previous binary can recreate its own helper on a rollback. Avoid
+          // maintaining both derived indexes on every subsequent collector write.
+          if (existing.some((row) => row.name === 'usage_copied_ids')) {
+            for (const trigger of ['insert', 'delete', 'update'])
+              yield* sql.unsafe(`DROP TRIGGER IF EXISTS usage_copied_ids_${trigger}`);
+            yield* sql.unsafe('DROP TABLE usage_copied_ids');
+          }
+          const add = `INSERT OR IGNORE INTO usage_cross_window_ids SELECT NEW.id WHERE EXISTS (
+        SELECT 1 FROM usage_events WHERE id = NEW.id AND timestamp <> NEW.timestamp);`;
+          const remove = `DELETE FROM usage_cross_window_ids WHERE id = OLD.id AND NOT EXISTS (
+        SELECT 1 FROM usage_events WHERE id = OLD.id AND timestamp <> (SELECT timestamp FROM usage_events WHERE id = OLD.id LIMIT 1));`;
+          yield* sql.unsafe(
+            `CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_insert AFTER INSERT ON usage_events BEGIN ${add} END`,
+          );
+          yield* sql.unsafe(
+            `CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_delete AFTER DELETE ON usage_events BEGIN ${remove} END`,
+          );
+          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_update AFTER UPDATE OF id, timestamp ON usage_events
+        WHEN OLD.id IS NOT NEW.id OR OLD.timestamp IS NOT NEW.timestamp BEGIN ${remove} ${add} END`);
         }),
       )
       .pipe(Effect.mapError(storageFailure));
+    // Self-hosted SQLite can build this disk index once. Keep Durable Object
+    // migrations within their CPU budget and retain the portable scan there.
+    if (configuration.indexedPricing) yield* sql.unsafe(pricingShapeIndex).pipe(Effect.mapError(storageFailure));
+    const pricingCandidates = makePricingCandidates(sql, decodeEvent);
+    const getPricingCandidates = (...args: Parameters<typeof pricingCandidates>) =>
+      configuration.indexedPricing
+        ? pricingCandidates(...args).pipe(
+            Effect.catchDefect(() => Effect.fail(storageFailure())),
+            Effect.mapError(storageFailure),
+          )
+        : Effect.succeed(undefined);
     let revision = 0;
     let metadataRevision = 0;
-    let ownerRevision = 0;
     const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure);
     let copiedRevision = -1;
     let copiedIds = new Set<string>();
@@ -486,7 +511,6 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             pages.invalidate(result.changedDays);
           }
           if (result.metadataChanged) metadataRevision++;
-          if (result.accepted || result.deleted) ownerRevision++;
         },
       ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
       const { metadataChanged: _metadataChanged, changedDays: _changedDays, ...acknowledgement } = result;
@@ -531,10 +555,11 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     const readWindow = Effect.fn('UsageStore.readWindow')(
       function* (excluded: string, options: UsageReadOptions = {}) {
         const data = yield* pages.read(excluded, options);
-        if ((!options.start && !options.end) || !data.events.length) return withOutside(data, [], options.end);
-        if (copiedRevision !== ownerRevision) {
-          const version = ownerRevision;
-          const copies = yield* sql<{ id: string }>`SELECT id FROM usage_copied_ids`;
+        if ((!options.start && !options.end) || !data.events.length || options.devices?.length === 1)
+          return withOutside(data, [], options.end);
+        if (copiedRevision !== revision) {
+          const version = revision;
+          const copies = yield* sql<{ id: string }>`SELECT id FROM usage_cross_window_ids`;
           copiedIds = new Set(copies.map((row) => row.id));
           copiedRevision = version;
         }
@@ -749,6 +774,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       getUsage,
       getSources,
       getDimensions,
+      getPricingCandidates,
       getRevision: () => revision,
       getMetadataRevision: () => metadataRevision,
       authorizeAdmin,

@@ -2,6 +2,7 @@ import { Schema } from 'effect';
 import { Rpc, RpcGroup } from 'effect/rpc';
 import {
   DashboardPage,
+  DashboardPageDelta,
   DashboardResponse,
   UsageInfo,
   Device,
@@ -12,12 +13,15 @@ import {
 } from './domain';
 import { PricingFailure, PricingInfo, PricingPolicy, PricingRule } from './pricing';
 
-export const PricingSettings = Schema.Struct({
+const unresolvedModels = Schema.Array(
+  Schema.Struct({ model: Schema.String, tokens: Schema.Number, reason: Schema.String }),
+);
+const pricingCatalog = {
   info: PricingInfo,
-  unresolved: Schema.Array(Schema.Struct({ model: Schema.String, tokens: Schema.Number, reason: Schema.String })),
   // Public hubs require the pairing secret for pricing changes from the browser.
   secretRequired: Schema.Boolean,
-});
+};
+export const PricingSettings = Schema.Struct({ ...pricingCatalog, unresolved: unresolvedModels });
 export type PricingSettings = typeof PricingSettings.Type;
 
 export class UsageFailure extends Schema.TaggedError<UsageFailure>()('UsageFailure', {
@@ -67,6 +71,16 @@ export const UsageRpc = RpcGroup.make(
     success: DashboardPage,
     error: UsageFailure,
   }),
+  Rpc.make('GetUsagePageUpdate', {
+    payload: {
+      query: UsageQuery,
+      page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+      viewRevision: Schema.String.check(Schema.isMaxLength(64)),
+      sessionOffset: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+    },
+    success: Schema.Union([DashboardPageDelta, DashboardPage]),
+    error: UsageFailure,
+  }),
   Rpc.make('GetUsageInfo', { payload: UsageQuery, success: UsageInfo, error: UsageFailure }),
   Rpc.make('GetHubInfo', { success: HubInfo, error: Schema.Union([PricingFailure, StorageFailure]) }),
   Rpc.make('GetDevices', { success: Schema.Array(Device), error: StorageFailure }),
@@ -85,6 +99,12 @@ export const UsageRpc = RpcGroup.make(
     payload: { deviceId: Schema.String, adminSecret: Schema.String },
     success: Device,
     error: SyncFailure,
+  }),
+  Rpc.make('GetPricingCatalog', { success: Schema.Struct(pricingCatalog), error: PricingFailure }),
+  Rpc.make('GetUnresolvedPricing', {
+    payload: UsageQuery,
+    success: Schema.Struct({ revision: Schema.String, unresolved: unresolvedModels }),
+    error: Schema.Union([PricingFailure, UsageFailure]),
   }),
   Rpc.make('GetPricing', {
     payload: UsageQuery,

@@ -192,10 +192,20 @@ export const DashboardResponse = Schema.Struct({
 export type DashboardResponse = typeof DashboardResponse.Type;
 export const DashboardPage = Schema.Struct({
   ...DashboardResponse.fields,
+  viewRevision: Schema.optionalKey(Schema.String),
   sessionCount: TokenCount,
   sessionOffset: TokenCount,
 });
 export type DashboardPage = typeof DashboardPage.Type;
+// Omitted rows mean the client already has this exact page of this snapshot.
+export const DashboardPageDelta = Schema.Struct({
+  _tag: Schema.Literal('PageDelta'),
+  viewRevision: Schema.String,
+  generatedAt: Schema.String,
+  sessionOffset: TokenCount,
+  sessions: Schema.optionalKey(Schema.Array(Session)),
+});
+export type DashboardPageDelta = typeof DashboardPageDelta.Type;
 export const UsageInfo = DashboardResponse.mapFields(({ machine, pricing, sources, warnings }) => ({
   machine,
   pricing,

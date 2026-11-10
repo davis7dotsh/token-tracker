@@ -1,6 +1,8 @@
 import { SqliteClient } from '@effect/sql-sqlite-bun';
 import { BunHttpPlatform, BunServices } from '@effect/platform-bun';
 import { Effect, FileSystem, Layer, Path, Result, Schema } from 'effect';
+import { enable as compileSchema } from 'effect/schema/SchemaJITCompiler';
+import { UsageEvent } from '../../shared/domain';
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -15,6 +17,11 @@ import { getLocalDevice } from './identity';
 import { ServerConfiguration, UsageStore } from './store';
 import type { ViewHints } from './view-warmer';
 import { compressRpcResponse } from './compression';
+
+// Compile only the hot accounting schema, before the first database read. The
+// public decoder still enforces refinements and strips unknown properties.
+// This entrypoint is Bun-only; Workers keep their normal interpreted decoder.
+compileSchema(UsageEvent.ast);
 
 export { LocalUsage } from './hub';
 
@@ -116,7 +123,7 @@ export const usageStoreLayer = (options: ServerOptions = {}) =>
         ),
       ).pipe(
         Layer.provide(SqliteClient.layer({ filename: databasePath })),
-        Layer.provide(Layer.succeed(ServerConfiguration, { pairingSecret })),
+        Layer.provide(Layer.succeed(ServerConfiguration, { pairingSecret, indexedPricing: true })),
       ),
     ),
   );

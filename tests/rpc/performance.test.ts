@@ -1071,7 +1071,7 @@ test('aggregate reuse preserves calendar transitions, clock changes, filters, an
   ).toEqual([...freshWarnings, ...invalidZone.warnings]);
 });
 
-test('the copied-ID index bootstraps existing owners and tracks corrections, withdrawals, updates, and rollbacks', async () => {
+test('the cross-window owner index ignores co-timed copies and tracks corrections, withdrawals, updates, and rollbacks', async () => {
   const { directory, runtime } = await storeRuntime();
   const secondDevice = { ...remoteDevice, id: 'second-owner' };
   const thirdDevice = { ...remoteDevice, id: 'third-owner' };
@@ -1079,7 +1079,7 @@ test('the copied-ID index bootstraps existing owners and tracks corrections, wit
   const copied = () => {
     const database = new Database(filename, { readonly: true });
     try {
-      return database.query('SELECT id FROM usage_copied_ids ORDER BY id').all();
+      return database.query('SELECT id FROM usage_cross_window_ids ORDER BY id').all();
     } finally {
       database.close();
     }
@@ -1090,12 +1090,21 @@ test('the copied-ID index bootstraps existing owners and tracks corrections, wit
       const first = yield* store.registerDevice(pairingSecret, remoteDevice);
       const second = yield* store.registerDevice(pairingSecret, secondDevice);
       const third = yield* store.registerDevice(pairingSecret, thirdDevice);
-      const original = event();
+      const original = event({ timestamp: '2026-05-02T00:00:00.000Z' });
+      const shifted = { ...original, timestamp: '2026-04-02T00:00:00.000Z' };
       yield* store.syncUsage(remoteDevice.id, first.token, { device: remoteDevice, events: [original] });
       expect(copied()).toEqual([]);
       yield* store.syncUsage(secondDevice.id, second.token, { device: secondDevice, events: [original] });
+      expect(copied()).toEqual([]);
+      const window = { start: '2026-05-01T00:00:00.000Z', end: '2026-05-03T00:00:00.000Z' };
+      expect((yield* store.getUsage(undefined, window)).events).toHaveLength(2);
+      yield* store.syncUsage(secondDevice.id, second.token, { device: secondDevice, events: [shifted] });
       expect(copied()).toEqual([{ id: original.id }]);
-      yield* store.syncUsage(thirdDevice.id, third.token, { device: thirdDevice, events: [original] });
+      expect((yield* store.getUsage(undefined, window)).events.map(({ timestamp }) => timestamp)).toEqual([
+        shifted.timestamp,
+        original.timestamp,
+      ]);
+      yield* store.syncUsage(thirdDevice.id, third.token, { device: thirdDevice, events: [shifted] });
       yield* store.syncUsage(secondDevice.id, second.token, {
         device: secondDevice,
         events: [],
@@ -1113,16 +1122,16 @@ test('the copied-ID index bootstraps existing owners and tracks corrections, wit
         events: [{ ...original, inputTokens: 200 }],
       });
       expect(copied()).toEqual([]);
-      yield* store.syncUsage(secondDevice.id, second.token, { device: secondDevice, events: [original] });
+      yield* store.syncUsage(secondDevice.id, second.token, { device: secondDevice, events: [shifted] });
     }),
   );
   await runtime.dispose();
   const database = new Database(filename);
   try {
-    database.exec(`DROP TRIGGER usage_copied_ids_insert;
-      DROP TRIGGER usage_copied_ids_delete;
-      DROP TRIGGER usage_copied_ids_update;
-      DROP TABLE usage_copied_ids;`);
+    database.exec(`DROP TRIGGER usage_cross_window_ids_insert;
+      DROP TRIGGER usage_cross_window_ids_delete;
+      DROP TRIGGER usage_cross_window_ids_update;
+      ALTER TABLE usage_cross_window_ids RENAME TO usage_copied_ids;`);
   } finally {
     database.close();
   }
@@ -1138,14 +1147,87 @@ test('the copied-ID index bootstraps existing owners and tracks corrections, wit
     updated.exec('BEGIN');
     updated.query('UPDATE usage_events SET id = ? WHERE device_id = ?').run('renamed-request', secondDevice.id);
     expect(copied()).toEqual([{ id: 'performance-request' }]);
-    expect(updated.query('SELECT id FROM usage_copied_ids').all()).toEqual([]);
+    expect(updated.query('SELECT id FROM usage_cross_window_ids').all()).toEqual([]);
     updated.query('UPDATE usage_events SET id = ? WHERE device_id = ?').run('performance-request', secondDevice.id);
-    expect(updated.query('SELECT id FROM usage_copied_ids').all()).toEqual([{ id: 'performance-request' }]);
+    expect(updated.query('SELECT id FROM usage_cross_window_ids').all()).toEqual([{ id: 'performance-request' }]);
     updated.query('DELETE FROM usage_events WHERE device_id = ?').run(secondDevice.id);
-    expect(updated.query('SELECT id FROM usage_copied_ids').all()).toEqual([]);
+    expect(updated.query('SELECT id FROM usage_cross_window_ids').all()).toEqual([]);
     updated.exec('ROLLBACK');
     expect(copied()).toEqual([{ id: 'performance-request' }]);
   } finally {
     updated.close();
   }
+});
+
+test('indexed all-history pricing matches the full scan across owners, modeling inputs, rules and corrections', async () => {
+  const stamp = '2026-10-15T10:00:00.000Z';
+  const base = event({ timestamp: stamp, model: 'synthetic-rates' });
+  const local = { ...base, deviceId: localDevice.id, id: 'locally-shadowed', inputTokens: 100 };
+  const { runtime, getPricing } = await controlledHub(
+    Effect.succeed(usage([local, { ...local, id: 'remote-shadowed', costKnown: true, serviceTier: undefined }])),
+  );
+  await runtime.runPromise(TestClock.setTime(Date.parse(stamp) + 1));
+  const store = await runtime.runPromise(UsageStore);
+  const pricing = await runtime.runPromise(HubPricing);
+  const other = { ...remoteDevice, id: 'another-device' };
+  const register = (device: DeviceRegistration) => runtime.runPromise(store.registerDevice(pairingSecret, device));
+  const [a, b] = await Promise.all([register(remoteDevice), register(other)]);
+  const upload = (events: UsageEvent[], deletedIds: string[] = []) =>
+    runtime.runPromise(store.syncUsage(remoteDevice.id, a.token, { device: remoteDevice, events, deletedIds }));
+  const inputs = [0, 1, 200_000, 200_001, 272_000, 272_001];
+  const records = Array.from({ length: 900 }, (_, i) => ({
+    ...base,
+    id: `shape-${i}`,
+    inputTokens: inputs[i % inputs.length],
+    outputTokens: i % 7,
+    cacheReadTokens: i % 2,
+    cacheWriteTokens: i % 5,
+    cacheWrite1hTokens: [0, 1, 8, undefined][i % 4],
+    harness: i % 13 ? ('codex' as const) : ('grok' as const),
+    serviceTier: [undefined, '', 'standard', 'unmapped'][i % 4],
+    reportedCostUsd: i % 3,
+    costKnown: i % 7 === 0,
+    model: i % 3 ? 'synthetic-rates' : 'synthetic-free',
+    rawModel: i % 11 ? undefined : 'synthetic-alias',
+  }));
+  await upload([
+    ...records,
+    { ...base, id: 'utf16-id-\ud800', model: 'model-\ud800' },
+    { ...base, id: 'locally-shadowed', inputTokens: 200, model: 'synthetic-free' },
+    { ...base, id: 'remote-shadowed', inputTokens: 50 },
+    { ...base, id: 'two-remote', inputTokens: 75 },
+  ]);
+  await runtime.runPromise(
+    store.syncUsage(other.id, b.token, {
+      device: other,
+      events: [{ ...base, id: 'two-remote', inputTokens: 300, timestamp: '2026-10-15T10:00:00.100Z' }],
+    }),
+  );
+  const devices = [localDevice.id, remoteDevice.id, other.id];
+  const compare = async () =>
+    expect((await getPricing({ range: 'all' })).unresolved).toEqual(
+      (await getPricing({ range: 'all', devices })).unresolved,
+    );
+  await compare();
+  await runtime.runPromise(pricing.setRule({ kind: 'free', model: 'synthetic-free' }));
+  await runtime.runPromise(
+    pricing.setRule({ kind: 'rates', model: 'synthetic-rates', rates: { inputPerMillion: 1, outputPerMillion: 2 } }),
+  );
+  await runtime.runPromise(pricing.setRule({ kind: 'alias', model: 'synthetic-alias', target: 'synthetic-rates' }));
+  await compare();
+  await runtime.runPromise(TestClock.adjust('1 second'));
+  await compare();
+  await upload(
+    [{ ...base, id: 'remote-shadowed', inputTokens: 101, cacheWriteTokens: 3 }],
+    ['locally-shadowed', 'shape-8'],
+  );
+  await compare();
+  await runtime.runPromise(
+    pricing.setRule({
+      kind: 'rates',
+      model: 'synthetic-rates',
+      rates: { inputPerMillion: 1e307, outputPerMillion: 2 },
+    }),
+  );
+  await compare();
 });

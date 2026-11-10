@@ -71,6 +71,30 @@
         return [...rows].sort((a, b) => b[metric] - a[metric]).map((r) => ({ group: g, name: r.name }));
       });
   });
+  // Search every option, but mount a bounded number of native checkboxes per
+  // group. A large project history should not stall the palette or its search.
+  const batchSize = 40;
+  let expanded = $state<Partial<Record<Group, number>>>({});
+  const needle = $derived(q.trim().toLowerCase());
+  const options = $derived.by(() =>
+    groups.map((group) => {
+      const names = new Set(data.filters[group]);
+      const option = (value: string) => {
+        const text = label(group, value);
+        return { value, text, search: `${value} ${text}`.toLowerCase() };
+      };
+      return { group, names, rows: [...names].map(option), option };
+    }),
+  );
+  const matches = $derived.by(() =>
+    options
+      .filter(({ group }) => tab === 'all' || tab === group)
+      .map(({ group, names, rows, option }) => {
+        const extras = (draft[group] ?? []).filter((value) => !names.has(value)).map(option);
+        const all = extras.length ? [...rows, ...extras] : rows;
+        return { group, rows: needle ? all.filter((row) => row.search.includes(needle)) : all };
+      }),
+  );
   const selected = $derived(target ? (query[target.group] ?? []) : []);
   const count = $derived(groups.reduce((n, g) => n + (draft[g]?.length ?? 0), 0));
   function toggle(g: Group, v: string) {
@@ -178,12 +202,14 @@
       aria-label="Search filters"
       bind:this={search}
       bind:value={q}
+      oninput={() => (expanded = {})}
     />
     <div class="wb-tabs filter-tabs">
       {#each ['all', ...groups] as g (g)}<button
           aria-pressed={tab === g}
           onclick={() => {
             tab = groups.find((k) => k === g) ?? 'all';
+            expanded = {};
           }}>{groups.find((k) => k === g) ? groupNames[g as Group] : 'All'}</button
         >{/each}
     </div>
@@ -194,16 +220,23 @@
             >{/each}{/each}
       </div>{/if}
     <div class="wb-results">
-      {#each groups.filter((g) => tab === 'all' || tab === g) as g (g)}
-        {@const values = [...new Set([...data.filters[g], ...(draft[g] ?? [])])].filter((v) =>
-          `${v} ${label(g, v)}`.toLowerCase().includes(q.trim().toLowerCase()),
-        )}
-        {#if values.length}<div class="group-label">{groupNames[g]}</div>
-          {#each values as v (v)}<label class="wb-facet-row"
-              ><input type="checkbox" checked={draft[g]?.includes(v) ?? false} onchange={() => toggle(g, v)} /><span
-                >{label(g, v)}</span
-              ></label
-            >{/each}{/if}
+      {#each matches as { group: g, rows } (g)}
+        {@const limit = expanded[g] ?? batchSize}
+        {#if rows.length}<div class="group-label">{groupNames[g]}</div>
+          {#each rows.slice(0, limit) as { value, text } (value)}<label class="wb-facet-row"
+              ><input
+                type="checkbox"
+                checked={draft[g]?.includes(value) ?? false}
+                onchange={() => toggle(g, value)}
+              /><span>{text}</span></label
+            >{/each}
+          {#if rows.length > limit}<button
+              class="wb-link more-options"
+              aria-label={`Show more ${g}`}
+              onclick={() => (expanded[g] = limit + batchSize)}
+              >Show {Math.min(batchSize, rows.length - limit)} more · {rows.length - limit} left</button
+            >{/if}
+        {/if}
       {/each}<span class="no-results">No matching values.</span>
     </div>
     <div class="wb-dialog-foot">

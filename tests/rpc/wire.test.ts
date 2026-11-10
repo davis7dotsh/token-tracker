@@ -860,6 +860,15 @@ test('workbench pages and settings project the same snapshot without truncating 
     expect([first.sessionOffset, second.sessionOffset, last.sessionOffset]).toEqual([0, 12, 24]);
     expect(first.sessionCount).toBe(25);
     expect([...first.sessions, ...second.sessions, ...last.sessions]).toEqual([...full.sessions]);
+    const delta = await browser.getUsagePage(query, 2, undefined, first);
+    expect(delta.sessions).toEqual(second.sessions);
+    expect(delta.daily).toBe(first.daily);
+    const poll = await browser.getUsagePage(query, 2, undefined, delta);
+    expect(poll.sessions).toBe(delta.sessions);
+    expect(poll.daily).toBe(delta.daily);
+    const outOfScope = await browser.getUsagePage({ ...query, devices: [] }, 1, undefined, first);
+    expect(outOfScope.viewRevision).not.toBe(first.viewRevision);
+    expect(outOfScope.totals.tokens).toBe(0);
     expect(second.daily).toEqual(full.daily);
     expect(last.totals).toEqual(full.totals);
     expect(info).toEqual({

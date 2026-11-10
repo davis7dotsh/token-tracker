@@ -76,6 +76,7 @@
   let data = $state.raw<DashboardPage>(),
     devices = $state.raw<readonly Device[]>([]),
     client = $state.raw<ReturnType<typeof makeDashboardClient>>();
+  let chartData = $state.raw<DashboardPage>();
   let loading = $state(true),
     error = $state(''),
     exportError = $state(''),
@@ -154,7 +155,7 @@
     if (!client) throw new Error('Dashboard is not ready.');
     const since = generation,
       started = new Date();
-    const value = await client.getUsagePage(q, n, signal);
+    const value = await client.getUsagePage(q, n, signal, loadedScope === usageScopeKey(q) ? data : undefined);
     if (!signal.aborted && since === generation) cache.put(k, value, started);
     return value;
   }
@@ -200,9 +201,12 @@
     try {
       const result = await readPage(q, requestedPage, c.signal);
       if (!c.signal.aborted && k === key) {
-        if (!data || groups.every((g) => q[g] === undefined))
-          railOrder = Object.fromEntries(groups.map((g) => [g, result[g].map((row) => row.name)]));
-        chartColors = new Map(groups.map((g) => [g, assignChartColors(result[g], chartColors.get(g))]));
+        if (chartData?.daily !== result.daily) {
+          if (!data || groups.every((g) => q[g] === undefined))
+            railOrder = Object.fromEntries(groups.map((g) => [g, result[g].map((row) => row.name)]));
+          chartColors = new Map(groups.map((g) => [g, assignChartColors(result[g], chartColors.get(g))]));
+          chartData = result;
+        }
         data = result;
         loadedKey = k;
         loadedScope = scopeKey;
@@ -419,7 +423,7 @@
                 </div>{/each}
             </section>
             {#key JSON.stringify([loadedScope, group, metric, compare, p.get('scale')])}<Activity
-                data={d}
+                data={chartData ?? d}
                 colors={chartColors.get(group) ?? new Map()}
                 {group}
                 {metric}

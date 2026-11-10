@@ -6,6 +6,7 @@
     draftIssue,
     rankCatalogMatches,
     ruleFromDraft,
+    sameRule,
   } from '#lib/client/pricing-editor.ts';
   import {
     catalogKey,
@@ -18,33 +19,41 @@
   } from '#lib/client/pricing-saves.ts';
   import type { makeDashboardClient } from '#lib/client/dashboard-rpc.ts';
   import type { UsageQuery } from '#lib/shared/domain.ts';
-  import type { PricingInfo, PricingRule } from '#lib/shared/pricing.ts';
+  import type { PricingRule } from '#lib/shared/pricing.ts';
+  import type { PricingSettings } from '#lib/shared/rpc.ts';
   import Icon from './Icon.svelte';
 
   let {
     client,
+    initial,
     saves,
     query,
     adminSecret = $bindable(''),
   }: {
     client: ReturnType<typeof makeDashboardClient> | undefined;
+    initial: { catalog: Omit<PricingSettings, 'unresolved'> | null; catalogError: string };
     saves: PricingSaves | undefined;
     query: UsageQuery;
     adminSecret?: string;
   } = $props();
 
-  let settings = $state.raw<{
-    info: PricingInfo;
-    unresolved: readonly { model: string; tokens: number; reason: string }[];
-    secretRequired: boolean;
-  }>();
+  // A hover may have prefetched the server load before a write in this tab.
+  // After any write, reread the catalog on mount rather than acknowledging it.
+  const startingCatalog = untrack(() => {
+    const state = saves?.state();
+    return state && (state.generation || !isIdle(state)) ? undefined : (initial.catalog ?? undefined);
+  });
+  const firstRule = startingCatalog?.info.rules[0];
+  let settings = $state.raw(startingCatalog);
+
+  let unknowns = $state.raw<PricingSettings['unresolved']>();
   let saveState = $state.raw(untrack(() => saves?.state()));
-  let loading = $state(false);
-  let error = $state('');
-  let loadFailed = $state(false);
+  let error = $state(untrack(() => initial.catalogError));
+  let loading = $state(untrack(() => !initial.catalogError));
+  let loadFailed = $state(untrack(() => Boolean(initial.catalogError)));
   let success = $state('');
-  let editing = $state(false);
-  let draft = $state(draftFromRule('', undefined));
+  let editing = $state(Boolean(firstRule));
+  let draft = $state(draftFromRule(firstRule?.model ?? '', firstRule));
   let targetOpen = $state(false);
   let targetHighlight = $state(0);
   let targetWrapper = $state.raw<HTMLElement>();
@@ -56,11 +65,11 @@
   let dirty = false;
   // The model this draft was opened for or last submitted under. Locking
   // follows it rather than the typed ID, so typing cannot lock the field.
-  let identity = $state('');
+  let identity = $state(firstRule?.model ?? '');
 
   const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
   const saved = $derived(settings?.info.rules ?? []);
-  const unresolved = $derived(settings?.unresolved ?? []);
+  const unresolved = $derived(unknowns ?? []);
   const pending = $derived(saveState ? pendingWrite(saveState, draft.model) : undefined);
   const resetting = $derived(pending?.type === 'delete');
   const hasRule = $derived(resetting || pending?.type === 'set' || saved.some((rule) => rule.model === draft.model));
@@ -97,7 +106,7 @@
   const modelLocked = $derived(draft.model === identity && (hasRule || Boolean(currentUnknown)));
   const validateAlias = $derived(settings ? createAliasValidation(settings.info) : undefined);
   const issue = $derived(validateAlias ? draftIssue(draft, validateAlias) : undefined);
-  const draftRule = $derived(validateAlias && !loadFailed ? ruleFromDraft(draft, validateAlias) : undefined);
+  const draftRule = $derived(validateAlias ? ruleFromDraft(draft, validateAlias) : undefined);
   // Hint only once the user has entered something the rule needs.
   const touched = $derived(
     draft.kind === 'alias'
@@ -227,7 +236,6 @@
     targetHighlight = 0;
     editing = true;
     success = '';
-    loadFailed = false;
     identity = value;
     draft = draftFromRule(
       value,
@@ -257,7 +265,19 @@
     loading = false;
   }
 
-  // A background load follows writes settling; `persisted` is whether the last one did.
+  // A prefetched catalog can be obsolete by the time usage arrives. Update
+  // a clean, selected draft too; never overwrite a user's unsubmitted intent.
+  function acceptCatalog(next: Omit<PricingSettings, 'unresolved'>, since: number) {
+    if (saves && !saves.acknowledge(next.info.rules, since)) return false;
+    const rule = (rules: readonly PricingRule[] | undefined) => rules?.find((entry) => entry.model === draft.model);
+    const changed = !sameRule(rule(settings?.info.rules), rule(next.info.rules));
+    settings = next;
+    if (editing && !dirty && changed && !saveState?.failures.has(draft.model)) selectModel(draft.model);
+    return true;
+  }
+
+  // Show the editable catalog before asking the hub about all usage history.
+  // Successful writes already return fresh catalog info; only reload usage then.
   async function load(persisted?: boolean) {
     if (!client) return;
     cancelLoad();
@@ -265,29 +285,37 @@
     request = controller;
     const version = ++requestVersion;
     const since = saves?.state().generation ?? 0;
+    const current = () => !controller.signal.aborted && version === requestVersion;
     loading = true;
     error = '';
     loadFailed = false;
     try {
-      const next = await client.getPricing({ ...query }, controller.signal);
-      if (controller.signal.aborted || version !== requestVersion) return;
-      // A write that settled during this read reloads once the queue is idle.
-      if (saves && !saves.acknowledge(next.info.rules, since)) return;
-      settings = next;
-      if (!editing) {
-        const first = next.unresolved[0]?.model ?? next.info.rules[0]?.model;
-        if (first) selectModel(first);
+      if (!settings || persisted === false) {
+        const catalog = await client.getPricingCatalog(controller.signal);
+        if (!current() || !acceptCatalog(catalog, since)) return;
+        const first = catalog.info.rules[0]?.model;
+        if (!editing && first) selectModel(first);
       }
+      const result = await client.getUnresolvedPricing(query, controller.signal);
+      if (!current()) return;
+      if (result.revision === settings?.info.revision) unknowns = result.unresolved;
+      else {
+        // Another tab changed the policy between the two reads. Reconcile using
+        // one snapshot so catalog rules and missing prices agree.
+        const next = await client.getPricing(query, controller.signal);
+        if (!current() || !acceptCatalog(next, since)) return;
+        unknowns = next.unresolved;
+      }
+      const first = unknowns[0]?.model ?? settings?.info.rules[0]?.model;
+      if (!editing && first) selectModel(first);
     } catch (failure) {
-      if (!controller.signal.aborted && version === requestVersion) {
-        // The failed write's own message stays visible over a stale list.
+      if (current()) {
         if (persisted === false && settings) return;
         error = persisted ? `Changes saved. ${messageFor(failure)}` : messageFor(failure);
-        // Without settings there is nothing to edit, so any failed load offers Retry.
-        loadFailed = persisted === undefined || !settings;
+        loadFailed = true;
       }
     } finally {
-      if (version === requestVersion) loading = false;
+      if (current()) loading = false;
     }
   }
 
@@ -317,7 +345,12 @@
       // unresolved-model list catches up; the dashboard rereads usage when opened.
       if (result && isIdle(state)) void load(result.ok);
     });
-    untrack(() => void load());
+    untrack(() => {
+      const state = saves?.state();
+      if (startingCatalog && saves) saves.acknowledge(startingCatalog.info.rules, 0);
+      // In-flight writes trigger their own refresh when the shared queue settles.
+      if ((!state || isIdle(state)) && !initial.catalogError) void load();
+    });
     return () => {
       // Leaving settings still persists the last complete edit; the shared
       // queue keeps sending after this editor is gone.
@@ -358,7 +391,7 @@
   <div class="pricing-catalog-meta">
     <span>{settings ? `Catalog updated ${settings.info.updatedAt}` : 'Loading model prices…'}</span><button
       class="text-button"
-      disabled={!saves || refreshing}
+      disabled={!settings || !saves || refreshing}
       onclick={refreshCatalog}>Refresh prices</button
     >
   </div>
@@ -393,12 +426,12 @@
           class={['pricing-model-row', draft.model === rule.model && 'selected']}
           onclick={() => switchModel(rule.model)}><strong>{rule.model}</strong><span>Saving…</span></button
         >{/each}
-      {#if settings && !failedNew.length && !unresolved.length && !saved.length && !savingNew.length}<p
+      {#if unknowns && !failedNew.length && !unresolved.length && !saved.length && !savingNew.length}<p
           class="pricing-list-empty"
         >
           All models have catalog prices.
         </p>{/if}
-      {#if loading && !settings}<div class="pricing-list-loading">
+      {#if loading && !unknowns}<div class="pricing-list-loading">
           <span class="spinner"></span><span>Loading models</span>
         </div>{/if}
       <button class="text-button pricing-add" disabled={!settings} onclick={() => switchModel('')}>Add a rule</button>

@@ -760,6 +760,12 @@
     max-height: min(350px, 42dvh);
     scrollbar-width: thin;
   }
+  .wb-results {
+    height: min(350px, 42dvh);
+  }
+  .more-options {
+    min-height: 32px;
+  }
   .group-label,
   .field-label {
     font-size: 12px;

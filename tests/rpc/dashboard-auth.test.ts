@@ -61,7 +61,17 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
     expect(await rpc('GetPricingPolicy', { deviceId: device.id, token: 'wrong-token' })).toContain('Unauthorized');
     expect(await rpc('GetPricingPolicy', { deviceId: device.id, token })).toContain('catalog');
     expect(await rpc('GetPricingPolicy', { pairingSecret })).toContain('catalog');
-    for (const tag of ['GetUsage', 'GetUsagePage', 'GetUsageInfo', 'GetHubInfo', 'GetDevices', 'GetPricing']) {
+    for (const tag of [
+      'GetUsage',
+      'GetUsagePage',
+      'GetUsagePageUpdate',
+      'GetUsageInfo',
+      'GetHubInfo',
+      'GetDevices',
+      'GetPricing',
+      'GetPricingCatalog',
+      'GetUnresolvedPricing',
+    ]) {
       const anonymous = await rpc(tag);
       expect(anonymous).not.toContain('Private laptop');
       expect(anonymous).not.toContain('totals');
@@ -76,6 +86,8 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
     expect(await rpc('GetDevices', {}, cookie)).toContain('Private laptop');
     expect(await rpc('GetUsage', {}, cookie)).toContain('totals');
     expect(await rpc('GetPricing', {}, cookie)).toContain('unresolved');
+    expect(await rpc('GetPricingCatalog', null, cookie)).toContain('secretRequired');
+    expect(await rpc('GetUnresolvedPricing', {}, cookie)).toContain('unresolved');
     expect(await rpc('GetDevices', {}, cookie + 'tampered')).not.toContain('Private laptop');
     expect(await rpc('SetPricingRule', { rule: { model: 'test', kind: 'free' }, adminSecret: '' }, cookie)).toContain(
       'Unauthorized',
