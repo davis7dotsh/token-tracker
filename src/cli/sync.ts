@@ -1,7 +1,8 @@
 import { join } from 'node:path';
 import { Console, Effect, Schedule } from 'effect';
 import { UsageClient, rpcClientLayer } from '../lib/client/rpc';
-import type { SyncAck, UsageEvent } from '../lib/shared/domain';
+import type { DeviceRegistration, SyncAck, UsageEvent } from '../lib/shared/domain';
+import { collectorVersion } from '../lib/shared/version';
 import { collectUsage } from '../lib/server/usage';
 import { installPricingPolicy, loadPricing } from '../lib/server/usage/pricing-runtime';
 import { acknowledgeEvents, batchesOf, changedRecords } from './checkpoint';
@@ -16,6 +17,10 @@ import {
   readConnection,
   syncLock,
 } from './state';
+
+// The hub records which build last paired or synced, so stale collectors show up
+// in its device list. The saved connection never stores it; upgrades report anew.
+export const reportedDevice = (device: DeviceRegistration) => ({ ...device, collectorVersion });
 
 export const commitBatch = <E, R, E2, R2>(
   checkpoint: Checkpoint,
@@ -146,7 +151,7 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
             deviceId: connection.device.id,
             token: connection.token,
             batch: {
-              device: connection.device,
+              device: reportedDevice(connection.device),
               events,
               sources: data.sources,
               pricingUpdatedAt: data.pricingUpdatedAt,
@@ -165,7 +170,7 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
             deviceId: connection.device.id,
             token: connection.token,
             batch: {
-              device: connection.device,
+              device: reportedDevice(connection.device),
               events: [],
               deletedIds,
             },

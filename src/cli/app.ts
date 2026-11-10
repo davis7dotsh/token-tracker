@@ -18,7 +18,7 @@ import {
   readConnection,
   writePrivateJson,
 } from './state';
-import { syncOnce, watchSync } from './sync';
+import { reportedDevice, syncOnce, watchSync } from './sync';
 
 const truth = (name: string, fallback = false) => Flag.Boolean(name).pipe(Flag.withDefault(fallback));
 const optionalString = (name: string) => Flag.String(name).pipe(Flag.optional);
@@ -167,7 +167,7 @@ const connect = Command.make(
       const client = yield* UsageClient;
       return yield* client.RegisterDevice({
         pairingSecret: secret,
-        device,
+        device: reportedDevice(device),
       });
     }).pipe(Effect.timeout('30 seconds'), Effect.provide(rpcClientLayer(new URL('rpc', `${url}/`).href)));
     const connection: Connection = {

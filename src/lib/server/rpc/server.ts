@@ -170,6 +170,7 @@ const downloads = HttpRouter.add(
     const allowed = new Set([
       'token-tracker-0.3.0.tgz',
       'token-tracker-0.4.0.tgz',
+      'token-tracker-0.4.1.tgz',
       'token-tracker-linux-x64',
       'token-tracker-linux-arm64',
       'token-tracker-darwin-x64',

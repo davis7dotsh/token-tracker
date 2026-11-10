@@ -1,11 +1,12 @@
 import { afterEach, expect, jest, test } from 'bun:test';
-import { Cause, Effect, Layer, ManagedRuntime, Option } from 'effect';
+import { Cause, Effect, Layer, ManagedRuntime, Option, Schema } from 'effect';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeDashboardClient, rpcClientLayer, UsageClient } from '../../src/lib/client/rpc';
 import { handleRpcRequest, LocalUsage, makeRpcWebHandler } from '../../src/lib/server/rpc/server';
-import type { UsageEvent } from '../../src/lib/shared/domain';
+import { Device, SyncBatch, type UsageEvent } from '../../src/lib/shared/domain';
+import { collectorVersion } from '../../src/lib/shared/version';
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -887,4 +888,76 @@ test('workbench pages and settings project the same snapshot without truncating 
     await server.stop(true);
     await handler.dispose();
   }
+});
+
+test('collector versions round-trip on pairing and sync, and older payloads keep the last reported value', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-collector-version-'));
+  directories.push(directory);
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, { device: localDevice, collect: Effect.succeed({ ...localData, events: [] }) }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const endpoint = `http://127.0.0.1:${server.port}/rpc`;
+  const runtime = ManagedRuntime.make(rpcClientLayer(endpoint));
+  const browser = makeDashboardClient(endpoint);
+  const legacy = { id: 'old-laptop', name: 'Old laptop', platform: 'linux' };
+  const device = { id: 'new-laptop', name: 'New laptop', platform: 'darwin' };
+  const call = <A, E>(program: (client: UsageClient['Service']) => Effect.Effect<A, E>) =>
+    runtime.runPromise(Effect.flatMap(UsageClient, program));
+  const reported = async (id: string) => (await browser.getDevices()).find((item) => item.id === id);
+  try {
+    // The hub's own machine reports the hub's build.
+    expect((await reported(localDevice.id))?.collectorVersion).toBe(collectorVersion);
+
+    // A collector predating versions pairs and syncs as before, without a version.
+    const old = await call((client) => client.RegisterDevice({ pairingSecret, device: legacy }));
+    expect(old.device).not.toHaveProperty('collectorVersion');
+    await call((client) =>
+      client.SyncUsage({ deviceId: legacy.id, token: old.token, batch: { device: legacy, events: [] } }),
+    );
+    expect(await reported(legacy.id)).not.toHaveProperty('collectorVersion');
+    expect((await reported(legacy.id))?.lastSeen).toEqual(expect.any(String));
+
+    const registration = await call((client) =>
+      client.RegisterDevice({ pairingSecret, device: { ...device, collectorVersion: '0.4.1+0cebd19' } }),
+    );
+    expect(registration.device.collectorVersion).toBe('0.4.1+0cebd19');
+    const sync = (batch: SyncBatch) =>
+      call((client) => client.SyncUsage({ deviceId: device.id, token: registration.token, batch }));
+    await sync({ device: { ...device, collectorVersion: '0.4.2+1234abc' }, events: [] });
+    expect((await reported(device.id))?.collectorVersion).toBe('0.4.2+1234abc');
+    // An upload without the field (an older payload shape) keeps the last value.
+    await sync({ device, events: [] });
+    expect((await reported(device.id))?.collectorVersion).toBe('0.4.2+1234abc');
+
+    const tooLong = await runtime.runPromiseExit(
+      Effect.flatMap(UsageClient, (client) =>
+        client.SyncUsage({
+          deviceId: device.id,
+          token: registration.token,
+          batch: { device: { ...device, collectorVersion: 'x'.repeat(65) }, events: [] },
+        }),
+      ),
+    );
+    expect(tooLong._tag === 'Failure' ? JSON.stringify(tooLong.cause) : 'succeeded').toContain('InvalidRequest');
+  } finally {
+    await browser.dispose();
+    await runtime.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
+test('collector version wire fields stay optional in both directions', () => {
+  const registration = { id: 'laptop', name: 'Laptop', platform: 'linux' };
+  expect(Schema.decodeUnknownSync(SyncBatch)({ device: registration, events: [] }).device).toEqual(registration);
+  expect(
+    Schema.decodeUnknownSync(SyncBatch)({ device: { ...registration, collectorVersion: '0.4.1' }, events: [] }).device,
+  ).toEqual({ ...registration, collectorVersion: '0.4.1' });
+  const stored = { ...registration, lastSeen: null, eventCount: 0, revokedAt: null, needsReconnect: false };
+  expect(Schema.decodeUnknownSync(Device)(stored)).toEqual(stored);
+  // Clients built before the field existed still decode a newer hub's devices.
+  const { collectorVersion: _, ...previous } = Device.fields;
+  expect(Schema.decodeUnknownSync(Schema.Struct(previous))({ ...stored, collectorVersion: '0.4.1' })).toEqual(stored);
 });

@@ -15,6 +15,18 @@ if (requested && !targets.some((target) => target === requested)) {
   process.exit(1);
 }
 
+// Compiled collectors report `<version>+<commit>`; outside a git checkout they
+// report the plain release version.
+const commit = (() => {
+  try {
+    const result = Bun.spawnSync(['git', 'rev-parse', '--short', 'HEAD'], { stdout: 'pipe', stderr: 'ignore' });
+    const value = result.success ? result.stdout.toString().trim() : '';
+    return /^[0-9a-f]{4,40}$/.test(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+
 await mkdir('dist', { recursive: true });
 const target = targets.find((target) => target === requested);
 // cli.cjs maps process.platform win32 to this `windows` name and adds `.exe`.
@@ -24,6 +36,7 @@ const result = await Bun.build({
   entrypoints: ['./src/cli/run.ts'],
   target: 'bun',
   minify: true,
+  ...(commit ? { define: { TOKEN_TRACKER_BUILD: JSON.stringify(commit) } } : {}),
   compile: {
     ...(target ? { target } : {}),
     outfile,
@@ -37,4 +50,4 @@ if (!result.success) {
   for (const message of result.logs) console.error(message);
   process.exit(1);
 }
-console.log(`Built ${outfile}`);
+console.log(`Built ${outfile}${commit ? ` (${commit})` : ''}`);

@@ -35,8 +35,7 @@ import {
 } from '../usage/dashboard';
 import { makeViewWarmer, type ViewHints } from './view-warmer';
 import { ServerConfiguration, UsageStore } from './store';
-
-const hubVersion = '0.4.0';
+import { collectorVersion, releaseVersion } from '../../shared/version';
 
 // The hub serves the dashboard RPC and sync uploads on any host. A Bun hub also
 // collects its own machine's logs; the Cloudflare hub has no local device.
@@ -680,7 +679,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           const extra = local.device && !localDevice ? 1 : 0;
           const { info } = yield* pricing.load;
           return {
-            version: hubVersion,
+            version: releaseVersion,
             localDeviceName: localDevice?.name ?? local.device?.name ?? null,
             devices: devices.length + extra,
             activeDevices: devices.filter((row) => !row.revokedAt).length + extra,
@@ -731,7 +730,14 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           const device = local.device;
           if (!device || devices.some((item) => item.id === device.id)) return devices;
           return [
-            { ...device, lastSeen: new Date().toISOString(), eventCount: 0, revokedAt: null, needsReconnect: false },
+            {
+              ...device,
+              collectorVersion,
+              lastSeen: new Date().toISOString(),
+              eventCount: 0,
+              revokedAt: null,
+              needsReconnect: false,
+            },
             ...devices,
           ];
         }),
@@ -781,7 +787,7 @@ export const makeHubWebHandler = <E>(
     Effect.gen(function* () {
       const store = yield* UsageStore;
       const devices = yield* store.getDevices();
-      return HttpServerResponse.jsonUnsafe({ status: 'ok', version: hubVersion, devices: devices.length });
+      return HttpServerResponse.jsonUnsafe({ status: 'ok', version: releaseVersion, devices: devices.length });
     }).pipe(
       Effect.catchTag('StorageFailure', () =>
         Effect.succeed(HttpServerResponse.jsonUnsafe({ status: 'unavailable' }, { status: 503 })),

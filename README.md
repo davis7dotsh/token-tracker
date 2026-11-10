@@ -122,6 +122,7 @@ Alternatively pass `--pairing-secret <secret>`. `--name <name>` sets the device 
 - Each machine pushes independently. The server does not poll machines or require incoming connections to laptops.
 - Before collecting, sync downloads changed pricing rules and catalog rates from the hub into a validated local cache. Manual checks use that cache offline and remain read-only.
 - Uploads contain token/cost counters and session/project metadata, never prompts, responses, tool output, or provider credentials.
+- Pairing and every sync report the collector build (e.g. `0.4.1+0cebd19`), shown in **Settings → Devices**; collectors older than 0.4.1 show `collector version unknown`.
 
 ```sh
 bun run cli sync                 # One push
@@ -140,7 +141,7 @@ Native Windows (x64 or arm64, no WSL) pairs the same way. The hub's package tarb
 $hub = 'https://tracker.example.ts.net:10007'
 $dir = "$env:LOCALAPPDATA\token-tracker-cli"
 New-Item -ItemType Directory -Force $dir | Out-Null
-curl.exe -fL -o "$dir\token-tracker.tgz" "$hub/downloads/token-tracker-0.4.0.tgz"
+curl.exe -fL -o "$dir\token-tracker.tgz" "$hub/downloads/token-tracker-0.4.1.tgz"
 tar -xzf "$dir\token-tracker.tgz" -C $dir
 $env:TOKEN_TRACKER_PAIRING_SECRET = 'the-secret-from-your-dashboard-machine'
 & "$dir\package\dist\token-tracker-windows-x64.exe" connect $hub
@@ -173,14 +174,14 @@ bun run build:cli bun-windows-arm64 # dist/token-tracker-windows-arm64.exe
 The npm `token-tracker` executable selects its bundled platform binary. This draft is private and has not been published to npm. After building the dashboard and platform binaries, `bun pm pack` creates a local tarball for npm/npx:
 
 ```sh
-npx --yes --package ./davis7-token-tracker-0.4.0.tgz token-tracker check --range 7d
+npx --yes --package ./davis7-token-tracker-0.4.1.tgz token-tracker check --range 7d
 ```
 
 The dashboard also hosts the package for a quick check from another machine on the tailnet:
 
 ```sh
-bunx --package https://tracker.example.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
-npx --yes --allow-remote=root --package https://tracker.example.ts.net:10007/downloads/token-tracker-0.4.0.tgz token-tracker check --range 30d
+bunx --package https://tracker.example.ts.net:10007/downloads/token-tracker-0.4.1.tgz token-tracker check --range 30d
+npx --yes --allow-remote=root --package https://tracker.example.ts.net:10007/downloads/token-tracker-0.4.1.tgz token-tracker check --range 30d
 ```
 
 The `--allow-remote=root` option permits this URL package on npm 12.
