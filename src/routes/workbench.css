@@ -148,8 +148,9 @@
   :root[data-theme='dark'] & .light-icon {
     display: none;
   }
-  :root[data-theme='dark'] & .dark-icon {
-    display: inline;
+  .mast-tools .light-icon,
+  :root[data-theme='dark'] & .mast-tools .dark-icon {
+    display: grid;
   }
   .wb-main {
     padding-top: 32px;
