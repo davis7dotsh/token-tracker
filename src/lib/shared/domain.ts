@@ -1,4 +1,4 @@
-import { Schema } from 'effect';
+import { Schema, Struct } from 'effect';
 
 export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok', 'muse', 'cursor']);
 export const UsageRange = Schema.Literals(['today', '7d', '30d', '6m', '90d', 'all']);
@@ -190,6 +190,29 @@ export const DashboardResponse = Schema.Struct({
   pricing: Schema.Struct({ method: Schema.String, updatedAt: Schema.String }),
 });
 export type DashboardResponse = typeof DashboardResponse.Type;
+const exportRow = Session.mapFields((fields) =>
+  Struct.pick(fields, [
+    'sessionTitle',
+    'projectName',
+    't3ThreadId',
+    't3ThreadUrl',
+    'id',
+    'harness',
+    'model',
+    'project',
+    'repository',
+    'deviceId',
+    'lastActiveAt',
+    'tokens',
+    'costUSD',
+    'unpricedTokens',
+  ]),
+);
+export const SessionExport = Schema.Struct({
+  period: DashboardResponse.fields.period,
+  sessions: Schema.Array(exportRow),
+});
+export type SessionExport = typeof SessionExport.Type;
 export const DashboardPage = Schema.Struct({
   ...DashboardResponse.fields,
   viewRevision: Schema.optionalKey(Schema.String),

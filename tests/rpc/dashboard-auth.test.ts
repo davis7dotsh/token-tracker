@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { SqliteClient } from '@effect/sql-sqlite-bun';
 import { Layer } from 'effect';
 import { createSession, sessionCookie, validSession } from '../../src/lib/server/auth';
-import { dashboardPasscode, handleHubRequest } from '../../src/lib/server/host/cloudflare';
+import { dashboardPasscode, handleHubRequest, readPricingCatalog } from '../../src/lib/server/host/cloudflare';
 import { makeHubWebHandler, sqlHubServices } from '../../src/lib/server/rpc/hub';
 
 const passcode = 'test-only-dashboard-passcode';
@@ -15,6 +15,13 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
     sqlHubServices(pairingSecret).pipe(Layer.provide(SqliteClient.layer({ filename: ':memory:' }))),
     { trustBrowser: false, autoRefreshPricing: false },
   );
+  const platform = {
+    env: {
+      HUB: { fetch: (request: Request) => hub.handler(request) },
+      TOKEN_TRACKER_DASHBOARD_PASSCODE: passcode,
+      LOGIN_RATE_LIMITER: { limit: async () => ({ success: true }) },
+    },
+  };
   const request = async (body: string, cookie?: string, pathname = '/rpc') => {
     const authenticated = await validSession(cookie, passcode);
     return handleHubRequest({
@@ -23,13 +30,7 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
         headers: { 'content-type': 'application/ndjson', cookie: `${sessionCookie}=${cookie ?? ''}` },
         body,
       }),
-      platform: {
-        env: {
-          HUB: { fetch: (request) => hub.handler(request) },
-          TOKEN_TRACKER_DASHBOARD_PASSCODE: passcode,
-          LOGIN_RATE_LIMITER: { limit: async () => ({ success: true }) },
-        },
-      },
+      platform,
       locals: { passcodeEnabled: true, dashboardAuthenticated: authenticated },
     });
   };
@@ -63,6 +64,7 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
     expect(await rpc('GetPricingPolicy', { pairingSecret })).toContain('catalog');
     for (const tag of [
       'GetUsage',
+      'GetSessionExport',
       'GetUsagePage',
       'GetUsagePageUpdate',
       'GetUsageInfo',
@@ -84,9 +86,20 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
       expect(await (await request(message('GetDevices'), undefined, path)).text()).not.toContain('Private laptop');
     const cookie = await createSession(passcode);
     expect(await rpc('GetDevices', {}, cookie)).toContain('Private laptop');
+    expect(await rpc('GetSessionExport', {}, cookie)).toContain('sessions');
     expect(await rpc('GetUsage', {}, cookie)).toContain('totals');
     expect(await rpc('GetPricing', {}, cookie)).toContain('unresolved');
     expect(await rpc('GetPricingCatalog', null, cookie)).toContain('secretRequired');
+    const url = new URL('https://dashboard.test/settings/pricing');
+    const ssrCatalog = (dashboardAuthenticated: boolean) =>
+      readPricingCatalog({
+        request: new Request(url),
+        url,
+        platform,
+        locals: { passcodeEnabled: true, dashboardAuthenticated },
+      });
+    expect(ssrCatalog(false)).rejects.toThrow();
+    expect((await ssrCatalog(true)).secretRequired).toBe(true);
     expect(await rpc('GetUnresolvedPricing', {}, cookie)).toContain('unresolved');
     expect(await rpc('GetDevices', {}, cookie + 'tampered')).not.toContain('Private laptop');
     expect(await rpc('SetPricingRule', { rule: { model: 'test', kind: 'free' }, adminSecret: '' }, cookie)).toContain(

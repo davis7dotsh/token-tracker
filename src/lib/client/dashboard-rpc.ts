@@ -3,7 +3,14 @@ import type { UsageRpc } from '../shared/rpc';
 import type { DashboardPage, UsageQuery } from '../shared/domain';
 import { sessionPageSize } from '../shared/dashboard-page';
 import type { PricingRule } from '../shared/pricing';
-import { isDashboardPage, isDashboardResponse, isPageDelta, isHubInfo, isUsageInfo } from './dashboard-response';
+import {
+  isDashboardPage,
+  isDashboardResponse,
+  isSessionExport,
+  isPageDelta,
+  isHubInfo,
+  isUsageInfo,
+} from './dashboard-response';
 
 type Procedures = RpcGroup.Rpcs<typeof UsageRpc>;
 type Procedure<Tag extends Procedures['_tag']> = Extract<Procedures, { readonly _tag: Tag }>;
@@ -16,8 +23,8 @@ const unavailable = 'Could not load usage. Try again.';
 // The server validates requests and schema-encodes every successful result.
 // This unary browser transport checks the Effect NDJSON envelope and dashboard
 // result shape without shipping the collector's Effect runtime.
-class PageUpdateUnavailable extends Error {}
-const readResult = (body: string, id: string) => {
+class ProcedureUnavailable extends Error {}
+const readResult = (body: string, id: string, tag: Procedures['_tag']) => {
   for (const line of body.split('\n')) {
     if (!line.trim()) continue;
     let message: unknown;
@@ -34,8 +41,13 @@ const readResult = (body: string, id: string) => {
     if (exit._tag === 'Success' && 'value' in exit) return exit.value;
     if (exit._tag === 'Failure' && Array.isArray(exit.cause)) {
       for (const cause of exit.cause) {
-        if (record(cause) && cause._tag === 'Die' && cause.defect === 'Unknown request tag: GetUsagePageUpdate')
-          throw new PageUpdateUnavailable(unavailable);
+        if (
+          exit.cause.length === 1 &&
+          record(cause) &&
+          cause._tag === 'Die' &&
+          cause.defect === `Unknown request tag: ${tag}`
+        )
+          throw new ProcedureUnavailable(unavailable);
         if (record(cause) && cause._tag === 'Fail' && record(cause.error) && typeof cause.error.message === 'string')
           throw new Error(cause.error.message);
       }
@@ -94,7 +106,8 @@ export const makeDashboardClient = (
         } catch {
           throw new Error(unreachable);
         }
-        const result = readResult(body, id);
+        const result = readResult(body, id, tag);
+        if (tag === 'GetSessionExport' && !isSessionExport(result)) throw new Error(unavailable);
         if (tag === 'GetUsage' && !isDashboardResponse(result)) throw new Error(unavailable);
         if (tag === 'GetUsagePage' || tag === 'GetUsagePageUpdate') {
           if (tag === 'GetUsagePageUpdate' && isPageDelta(result)) pageSizes.set(result, body.length * 2);
@@ -125,6 +138,11 @@ export const makeDashboardClient = (
 
   return {
     getUsage: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetUsage', query, signal, usageTimeout),
+    getSessionExport: (query: UsageQuery, signal?: AbortSignal) =>
+      call('GetSessionExport', query, signal, usageTimeout).catch((error: unknown) => {
+        if (error instanceof ProcedureUnavailable) return call('GetUsage', query, signal, usageTimeout);
+        throw error;
+      }),
     getUsagePage: async (query: UsageQuery, page: number, signal?: AbortSignal, base?: DashboardPage) => {
       if (!base?.viewRevision) return call('GetUsagePage', { query, page }, signal, usageTimeout);
       const result = await call(
@@ -135,7 +153,7 @@ export const makeDashboardClient = (
       ).catch((error: unknown) => {
         // A tab may outlive a server rollback. Only an explicit missing method
         // retries on the original RPC; auth, timeout and transport errors stand.
-        if (error instanceof PageUpdateUnavailable) return call('GetUsagePage', { query, page }, signal, usageTimeout);
+        if (error instanceof ProcedureUnavailable) return call('GetUsagePage', { query, page }, signal, usageTimeout);
         throw error;
       });
       if (!('_tag' in result)) return result;

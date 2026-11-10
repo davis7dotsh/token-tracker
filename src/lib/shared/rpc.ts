@@ -4,6 +4,7 @@ import {
   DashboardPage,
   DashboardPageDelta,
   DashboardResponse,
+  SessionExport,
   UsageInfo,
   Device,
   DeviceRegistration,
@@ -66,6 +67,7 @@ export type HubInfo = typeof HubInfo.Type;
 
 export const UsageRpc = RpcGroup.make(
   Rpc.make('GetUsage', { payload: UsageQuery, success: DashboardResponse, error: UsageFailure }),
+  Rpc.make('GetSessionExport', { payload: UsageQuery, success: SessionExport, error: UsageFailure }),
   Rpc.make('GetUsagePage', {
     payload: { query: UsageQuery, page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)) },
     success: DashboardPage,

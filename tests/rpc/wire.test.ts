@@ -858,6 +858,13 @@ test('workbench pages and settings project the same snapshot without truncating 
     ]);
     expect(collections).toBe(1);
     expect(full.sessions).toHaveLength(25);
+    const exported = await browser.getSessionExport(query);
+    expect(Object.keys(exported).sort()).toEqual(['period', 'sessions']);
+    expect(exported.period).toEqual(full.period);
+    expect(exported.sessions.map((row) => row.id)).toEqual(full.sessions.map((row) => row.id));
+    expect(exported.sessions[0]).not.toHaveProperty('inputTokens');
+    expect((await browser.getSessionExport({ ...query, devices: [] })).sessions).toEqual([]);
+    expect(collections).toBe(1);
     expect([first.sessionOffset, second.sessionOffset, last.sessionOffset]).toEqual([0, 12, 24]);
     expect(first.sessionCount).toBe(25);
     expect([...first.sessions, ...second.sessions, ...last.sessions]).toEqual([...full.sessions]);

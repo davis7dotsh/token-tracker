@@ -525,3 +525,27 @@ test('a busy writer cannot delay an optional day fill, and a narrower range clip
     writer.close();
   }
 });
+
+test('a fully migrated hub can restart under a writer lock and still fill packs after the lock clears', async () => {
+  const { directory, runtime } = await storeRuntime();
+  const first = await runtime.runPromise(UsageStore);
+  const registration = await runtime.runPromise(first.registerDevice(pairingSecret, device));
+  await runtime.runPromise(first.syncUsage(device.id, registration.token, { device, events: [event] }));
+  const writer = new Database(join(directory, 'usage.sqlite'));
+  const restarted = ManagedRuntime.make(
+    usageStoreLayer({ dataDirectory: directory, pairingSecret }).pipe(Layer.provideMerge(TestClock.layer())),
+  );
+  disposers.push(() => restarted.dispose());
+  try {
+    writer.exec('BEGIN IMMEDIATE');
+    // This connection cannot ever acquire the lock while awaiting the read.
+    const store = await restarted.runPromise(UsageStore);
+    expect((await restarted.runPromise(store.getDevices()))[0]?.id).toBe(device.id);
+    writer.exec('ROLLBACK');
+    await restarted.runPromise(TestClock.setTime(Date.parse('2026-10-05T12:00Z')));
+    expect((await restarted.runPromise(store.getUsage(undefined, window))).events).toHaveLength(1);
+    expect(writer.query('SELECT 1 AS ok FROM usage_day_packs_v1 WHERE body IS NOT NULL').get()).toEqual({ ok: 1 });
+  } finally {
+    writer.close();
+  }
+});

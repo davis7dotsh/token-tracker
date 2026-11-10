@@ -93,3 +93,29 @@ test('v1 packs round-trip Unicode and quoted metadata byte-for-byte and reject m
       }
     }),
   ));
+
+test('a clipped pack uses half-open indexed UTC bounds and preserves timestamp ties', () =>
+  withPacks((packs, sql) =>
+    Effect.gen(function* () {
+      const at = (time: string) => `${first}T${time}:00:00.000Z`;
+      const rows = ['02', ...Array.from({ length: 128 }, () => '08'), '20'].map((hour, i) => ({
+        ...row(first),
+        id: String(i),
+        timestamp: at(hour),
+        // Payload timestamps may have different offsets than the UTC index.
+        payload: JSON.stringify({ timestamp: `${first}T00:00:00-08:00` }),
+      }));
+      yield* sql`CREATE INDEX usage_events_timestamp ON usage_events(timestamp)`;
+      // 128 index hits at 08:00 qualify the dense slice; the lone 20:00 hit does not.
+      yield* sql`INSERT INTO usage_events SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]')
+        FROM json_each(${JSON.stringify(rows.map((r) => [r.id, r.timestamp]))})`;
+      const fill = yield* packs.begin([first], first, 'local');
+      yield* fill.save(first, rows);
+      yield* fill.flush();
+      const bounds = { from: at('08'), until: at('20') };
+      expect(materialize(yield* packs.lookup(first, 'local', bounds))).toEqual(rows.slice(1, -1));
+      expect(yield* packs.lookup(first, 'other', bounds)).toBeUndefined();
+      expect(yield* packs.lookup(first, 'local', { from: at('12'), until: first + 'U' })).toBeUndefined();
+      expect(materialize(yield* packs.lookup(first, 'local'))).toEqual(rows);
+    }),
+  ));

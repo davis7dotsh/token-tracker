@@ -22,6 +22,16 @@ export const handleHubRequest = async ({
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 };
 
+// On Workers the catalog belongs to the bound hub, not the dashboard. Preserve
+// its authenticated/collector-only routing and the normal RPC timeout.
+export const readPricingCatalog = async (event: Parameters<typeof handleHubRequest>[0] & Pick<RequestEvent, 'url'>) => {
+  const { makeDashboardClient } = await import('../../client/dashboard-rpc');
+  const client = makeDashboardClient('/rpc', {
+    fetch: (path, init) => handleHubRequest({ ...event, request: new Request(new URL(path, event.url), init) }),
+  });
+  return client.getPricingCatalog(event.request.signal);
+};
+
 // A Worker has no collector filesystem on which to keep a Cursor key.
 export const supportsCursorKey = (_url: URL) => false;
 export const cursorKeyConfigured = async () => false;

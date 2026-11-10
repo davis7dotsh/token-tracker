@@ -224,3 +224,48 @@ test('pre-cancelled requests and disposed clients do not send HTTP traffic', asy
     await server.stop(true);
   }
 });
+
+test('CSV falls back only for an explicitly missing export RPC', async () => {
+  const missing = (tag: string) => ({ _tag: 'Die', defect: `Unknown request tag: ${tag}` });
+  const failure = (id: string, ...cause: unknown[]) => ({
+    _tag: 'Exit',
+    requestId: id,
+    exit: { _tag: 'Failure', cause },
+  });
+  const query = { projects: ['/work/app'], timezone: 'UTC' };
+  const attempts: string[] = [];
+  const replies = [
+    (id: string) => failure(id, missing('GetSessionExport')),
+    (id: string) => success(id, dashboard),
+    (id: string) => failure(id, missing('GetUsagePageUpdate')),
+    (id: string) => failure(id, { _tag: 'Fail', error: { message: 'Unauthorized' } }),
+    (id: string) => success(id, { period: dashboard.period, sessions: [{}] }),
+  ];
+  const client = makeDashboardClient('/rpc', {
+    fetch: async (_, { body }) => {
+      if (typeof body !== 'string') throw new Error('expected wire message');
+      const { id, tag, payload } = JSON.parse(body);
+      expect(payload).toEqual(query);
+      attempts.push(tag);
+      const reply = replies.shift();
+      if (!reply) throw new Error('unexpected retry');
+      return Response.json(reply(id));
+    },
+  });
+  try {
+    expect(await client.getSessionExport(query)).toEqual(dashboard);
+    for (const message of [unavailable, 'Unauthorized', unavailable]) {
+      const [result] = await Promise.allSettled([client.getSessionExport(query)]);
+      expect(result).toMatchObject({ status: 'rejected', reason: { message } });
+    }
+    expect(attempts).toEqual([
+      'GetSessionExport',
+      'GetUsage',
+      'GetSessionExport',
+      'GetSessionExport',
+      'GetSessionExport',
+    ]);
+  } finally {
+    await client.dispose();
+  }
+});

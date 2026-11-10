@@ -1,7 +1,7 @@
-import type { DashboardResponse } from '../shared/domain';
+import type { SessionExport } from '../shared/domain';
 import { cursorAgentUrl, nativeThreadUrl, repositoryWebUrl, safeWebUrl } from './session-links';
 
-export function exportSessions(data: DashboardResponse, deviceName: (id: string) => string) {
+export function exportSessions(data: SessionExport, deviceName: (id: string) => string) {
   const escape = (value: string | number) => {
     const text = String(value);
     return `"${text.replace(/^\s*[=+@-]/, "'$&").replaceAll('"', '""')}"`;

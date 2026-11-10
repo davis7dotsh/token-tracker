@@ -3,6 +3,7 @@ import type {
   DashboardPageDelta,
   DashboardPage,
   DashboardResponse,
+  SessionExport,
   SourceStatus,
   Totals,
   UsageInfo,
@@ -59,13 +60,19 @@ const bucket = (value: unknown): value is Record<string, unknown> =>
   optional(value.models, (items) => array(items, series)) &&
   optional(value.devices, (items) => array(items, series)) &&
   optional(value.projects, (items) => array(items, series));
-const session = (value: unknown) =>
+const sessionIdentity = (value: unknown): value is Record<string, unknown> =>
   record(value) &&
-  totals(value) &&
-  fields(value, ['id', 'model', 'provider', 'project', 'deviceId', 'startedAt', 'lastActiveAt'], string) &&
+  fields(value, ['id', 'model', 'project', 'deviceId', 'lastActiveAt'], string) &&
   member(value.harness, harnesses) &&
   (value.repository === null || string(value.repository)) &&
   fields(value, ['sessionTitle', 'projectName', 't3ThreadId', 't3ThreadUrl'], (item) => optional(item, string));
+const session = (value: unknown) =>
+  sessionIdentity(value) && totals(value) && fields(value, ['provider', 'startedAt'], string);
+const period = (value: unknown) => record(value) && fields(value, ['start', 'end'], string);
+export const isSessionExport = (value: unknown): value is SessionExport =>
+  record(value) &&
+  period(value.period) &&
+  array(value.sessions, (row) => sessionIdentity(row) && fields(row, ['tokens', 'costUSD', 'unpricedTokens'], number));
 const source = (value: unknown) =>
   record(value) &&
   member(value.harness, harnesses) &&
@@ -106,8 +113,7 @@ export const isDashboardResponse = (value: unknown): value is DashboardResponse 
   record(value) &&
   fields(value, ['machine', 'generatedAt', 'timezone'], string) &&
   member(value.range, ranges) &&
-  record(value.period) &&
-  fields(value.period, ['start', 'end'], string) &&
+  period(value.period) &&
   totals(value.totals) &&
   (value.previous === null || totals(value.previous)) &&
   optional(value.tokenCosts, tokenCosts) &&

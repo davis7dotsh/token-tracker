@@ -11,6 +11,7 @@ import {
   type SessionMetadata,
   type SyncBatch,
 } from '../../shared/domain';
+import { schemaInventory } from './schema-inventory';
 import type { DayPacks } from './day-packs';
 import { makePricingCandidates, pricingShapeIndex } from './pricing-candidates';
 import { InvalidRequest, StorageFailure, Unauthorized } from '../../shared/rpc';
@@ -179,100 +180,109 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     yield* sql
       .unsafe('CREATE INDEX IF NOT EXISTS usage_events_record_id ON usage_events(id)')
       .pipe(Effect.mapError(storageFailure));
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          yield* sql.unsafe('CREATE TABLE IF NOT EXISTS usage_migrations (name TEXT PRIMARY KEY)');
-          const migrated = yield* sql`SELECT name FROM usage_migrations WHERE name = 'utc-timestamps-v1'`;
-          if (!migrated.length) {
-            // Date.parse accepts timezone forms and fractional precision that SQLite
-            // does not. Normalize the indexed column, preserving the original payload/hash.
-            const legacy = yield* sql<{
-              device_id: string;
-              id: string;
-              timestamp: string;
-            }>`SELECT device_id, id, timestamp FROM usage_events
+    const inventory = yield* schemaInventory(sql).pipe(Effect.mapError(storageFailure));
+    const normalized =
+      inventory.tables.has('usage_migrations') &&
+      (yield* sql`SELECT 1 FROM usage_migrations WHERE name = 'utc-timestamps-v1'`.pipe(
+        Effect.mapError(storageFailure),
+      )).length > 0;
+    if (!normalized)
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql.unsafe('CREATE TABLE IF NOT EXISTS usage_migrations (name TEXT PRIMARY KEY)');
+            const migrated = yield* sql`SELECT name FROM usage_migrations WHERE name = 'utc-timestamps-v1'`;
+            if (!migrated.length) {
+              // Date.parse accepts timezone forms and fractional precision that SQLite
+              // does not. Normalize the indexed column, preserving the original payload/hash.
+              const legacy = yield* sql<{
+                device_id: string;
+                id: string;
+                timestamp: string;
+              }>`SELECT device_id, id, timestamp FROM usage_events
           WHERE (timestamp NOT LIKE '____-__-__T__:__:__.___Z' AND timestamp NOT LIKE '_______-__-__T__:__:__.___Z') OR substr(timestamp, 12, 2) = '24'`;
-            for (const row of legacy) {
-              yield* sql`UPDATE usage_events SET timestamp = ${new Date(row.timestamp).toISOString()} WHERE device_id = ${row.device_id} AND id = ${row.id}`;
+              for (const row of legacy) {
+                yield* sql`UPDATE usage_events SET timestamp = ${new Date(row.timestamp).toISOString()} WHERE device_id = ${row.device_id} AND id = ${row.id}`;
+              }
+              yield* sql`INSERT INTO usage_migrations (name) VALUES ('utc-timestamps-v1')`;
             }
-            yield* sql`INSERT INTO usage_migrations (name) VALUES ('utc-timestamps-v1')`;
-          }
-        }),
-      )
-      .pipe(Effect.mapError(storageFailure));
+          }),
+        )
+        .pipe(Effect.mapError(storageFailure));
     // Keep active filter dimensions and device counts in SQLite. Repeated reads
     // must not decode a million payloads just to populate five small dropdowns.
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const existing =
-            yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_dimensions'`;
-          yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS usage_dimensions (
+    if (!inventory.complete('usage_dimensions'))
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const existing =
+              yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'usage_dimensions'`;
+            yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS usage_dimensions (
         device_id TEXT NOT NULL, harness TEXT NOT NULL, model TEXT NOT NULL, project TEXT NOT NULL,
         records INTEGER NOT NULL, PRIMARY KEY (device_id, harness, model, project)
       ) WITHOUT ROWID`);
-          if (!existing.length) {
-            yield* sql.unsafe(`INSERT INTO usage_dimensions
+            if (!existing.length) {
+              yield* sql.unsafe(`INSERT INTO usage_dimensions
           SELECT device_id, json_extract(payload, '$.harness'),
             COALESCE(json_extract(payload, '$.rawModel'), json_extract(payload, '$.model')),
             COALESCE(json_extract(payload, '$.repository'), json_extract(payload, '$.project')), COUNT(*)
           FROM usage_events GROUP BY 1, 2, 3, 4`);
-          }
-          yield* sql.unsafe(
-            `CREATE TRIGGER IF NOT EXISTS usage_dimensions_insert AFTER INSERT ON usage_events BEGIN ${addDimension('NEW')} END`,
-          );
-          yield* sql.unsafe(
-            `CREATE TRIGGER IF NOT EXISTS usage_dimensions_delete AFTER DELETE ON usage_events BEGIN ${removeDimension('OLD')} END`,
-          );
-          const changed = dimensionValues('OLD')
-            .map((value, index) => `${value} IS NOT ${dimensionValues('NEW')[index]}`)
-            .join(' OR ');
-          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_dimensions_update AFTER UPDATE OF payload ON usage_events
+            }
+            yield* sql.unsafe(
+              `CREATE TRIGGER IF NOT EXISTS usage_dimensions_insert AFTER INSERT ON usage_events BEGIN ${addDimension('NEW')} END`,
+            );
+            yield* sql.unsafe(
+              `CREATE TRIGGER IF NOT EXISTS usage_dimensions_delete AFTER DELETE ON usage_events BEGIN ${removeDimension('OLD')} END`,
+            );
+            const changed = dimensionValues('OLD')
+              .map((value, index) => `${value} IS NOT ${dimensionValues('NEW')[index]}`)
+              .join(' OR ');
+            yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_dimensions_update AFTER UPDATE OF payload ON usage_events
         WHEN ${changed} BEGIN ${removeDimension('OLD')} ${addDimension('NEW')} END`);
-        }),
-      )
-      .pipe(Effect.mapError(storageFailure));
+          }),
+        )
+        .pipe(Effect.mapError(storageFailure));
     // Copies with the same normalized timestamp are either all in the window or
     // all outside it. Only divergent copies can change ownership across an edge.
     // Keep that much smaller set transactionally, including timestamp corrections.
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          const existing =
-            yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('usage_cross_window_ids', 'usage_copied_ids')`;
-          if (!existing.some((row) => row.name === 'usage_cross_window_ids')) {
-            yield* sql.unsafe('CREATE TABLE usage_cross_window_ids (id TEXT PRIMARY KEY) WITHOUT ROWID');
-            const hasLegacy = existing.some((row) => row.name === 'usage_copied_ids');
-            const copies = hasLegacy
-              ? 'usage_copied_ids'
-              : '(SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1)';
-            yield* sql.unsafe(`INSERT INTO usage_cross_window_ids
+    if (inventory.tables.has('usage_copied_ids') || !inventory.complete('usage_cross_window_ids'))
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const existing =
+              yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('usage_cross_window_ids', 'usage_copied_ids')`;
+            if (!existing.some((row) => row.name === 'usage_cross_window_ids')) {
+              yield* sql.unsafe('CREATE TABLE usage_cross_window_ids (id TEXT PRIMARY KEY) WITHOUT ROWID');
+              const hasLegacy = existing.some((row) => row.name === 'usage_copied_ids');
+              const copies = hasLegacy
+                ? 'usage_copied_ids'
+                : '(SELECT id FROM usage_events GROUP BY id HAVING COUNT(*) > 1)';
+              yield* sql.unsafe(`INSERT INTO usage_cross_window_ids
           SELECT c.id FROM ${copies} c WHERE EXISTS (SELECT 1 FROM usage_events e
             WHERE e.id = c.id AND e.timestamp <> (SELECT timestamp FROM usage_events WHERE id = c.id LIMIT 1))`);
-          }
-          // The previous binary can recreate its own helper on a rollback. Avoid
-          // maintaining both derived indexes on every subsequent collector write.
-          if (existing.some((row) => row.name === 'usage_copied_ids')) {
-            for (const trigger of ['insert', 'delete', 'update'])
-              yield* sql.unsafe(`DROP TRIGGER IF EXISTS usage_copied_ids_${trigger}`);
-            yield* sql.unsafe('DROP TABLE usage_copied_ids');
-          }
-          const add = `INSERT OR IGNORE INTO usage_cross_window_ids SELECT NEW.id WHERE EXISTS (
+            }
+            // The previous binary can recreate its own helper on a rollback. Avoid
+            // maintaining both derived indexes on every subsequent collector write.
+            if (existing.some((row) => row.name === 'usage_copied_ids')) {
+              for (const trigger of ['insert', 'delete', 'update'])
+                yield* sql.unsafe(`DROP TRIGGER IF EXISTS usage_copied_ids_${trigger}`);
+              yield* sql.unsafe('DROP TABLE usage_copied_ids');
+            }
+            const add = `INSERT OR IGNORE INTO usage_cross_window_ids SELECT NEW.id WHERE EXISTS (
         SELECT 1 FROM usage_events WHERE id = NEW.id AND timestamp <> NEW.timestamp);`;
-          const remove = `DELETE FROM usage_cross_window_ids WHERE id = OLD.id AND NOT EXISTS (
+            const remove = `DELETE FROM usage_cross_window_ids WHERE id = OLD.id AND NOT EXISTS (
         SELECT 1 FROM usage_events WHERE id = OLD.id AND timestamp <> (SELECT timestamp FROM usage_events WHERE id = OLD.id LIMIT 1));`;
-          yield* sql.unsafe(
-            `CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_insert AFTER INSERT ON usage_events BEGIN ${add} END`,
-          );
-          yield* sql.unsafe(
-            `CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_delete AFTER DELETE ON usage_events BEGIN ${remove} END`,
-          );
-          yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_update AFTER UPDATE OF id, timestamp ON usage_events
+            yield* sql.unsafe(
+              `CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_insert AFTER INSERT ON usage_events BEGIN ${add} END`,
+            );
+            yield* sql.unsafe(
+              `CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_delete AFTER DELETE ON usage_events BEGIN ${remove} END`,
+            );
+            yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS usage_cross_window_ids_update AFTER UPDATE OF id, timestamp ON usage_events
         WHEN OLD.id IS NOT NEW.id OR OLD.timestamp IS NOT NEW.timestamp BEGIN ${remove} ${add} END`);
-        }),
-      )
-      .pipe(Effect.mapError(storageFailure));
+          }),
+        )
+        .pipe(Effect.mapError(storageFailure));
     // Self-hosted SQLite can build this disk index once. Keep Durable Object
     // migrations within their CPU budget and retain the portable scan there.
     if (configuration.indexedPricing) yield* sql.unsafe(pricingShapeIndex).pipe(Effect.mapError(storageFailure));

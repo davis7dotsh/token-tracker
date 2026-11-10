@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import type { BigIntStats } from 'node:fs';
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { constants, type BigIntStats } from 'node:fs';
+import { chmod, mkdir, open, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { PricingPolicy, PricingRule } from '../../shared/pricing';
@@ -42,23 +42,49 @@ const rememberStored = (directory: string, fingerprint: string | null, stored: S
 // File identity and nanosecond timestamps detect atomic replacement and edits
 // from other processes, while unchanged requests reuse a validated snapshot.
 const fingerprintFor = (file: BigIntStats) => `${file.dev}:${file.ino}:${file.size}:${file.mtimeNs}:${file.ctimeNs}`;
-const storedFingerprint = async (directory: string) => {
-  const file = await stat(join(directory, stateFile), { bigint: true });
+const checkedFingerprint = (file: BigIntStats) => {
+  if (!file.isFile()) throw pricingFailure('The saved pricing catalog is not a regular file.');
   if (file.size > BigInt(maximumStateBytes)) throw pricingFailure('The saved pricing catalog is too large.');
   return fingerprintFor(file);
+};
+const storedFingerprint = async (directory: string) =>
+  checkedFingerprint(await stat(join(directory, stateFile), { bigint: true }));
+// On startup, SSR, RPC, and background refresh can all see the same cold
+// catalog. Share only reads that observed the identical on-disk version. Each
+// caller still handles failures according to its own strict/fallback policy.
+const pendingReads = new Map<string, { fingerprint: string; read: Promise<StoredPricing> }>();
+const readMatching = async (directory: string, fingerprint: string) => {
+  const pending = pendingReads.get(directory);
+  if (pending?.fingerprint === fingerprint) return pending.read;
+  const read = (async () => {
+    // A path replaced with a FIFO between stat and open must not pin an I/O worker.
+    const handle = await open(join(directory, stateFile), constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const opened = checkedFingerprint(await handle.stat({ bigint: true }));
+      const contents = await handle.readFile();
+      if (contents.byteLength > maximumStateBytes) throw pricingFailure('The saved pricing catalog is too large.');
+      const stored = decodeStoredPricing(contents.toString('utf8'));
+      // An external writer can replace the file before open or while reading.
+      if (opened === fingerprint && fingerprint === (await storedFingerprint(directory)))
+        rememberStored(directory, fingerprint, stored);
+      return stored;
+    } finally {
+      await handle.close();
+    }
+  })();
+  if (pending || pendingReads.size < 32) pendingReads.set(directory, { fingerprint, read });
+  try {
+    return await read;
+  } finally {
+    if (pendingReads.get(directory)?.read === read) pendingReads.delete(directory);
+  }
 };
 const readStored = async (directory: string, strict = false): Promise<StoredPricing> => {
   try {
     const fingerprint = await storedFingerprint(directory);
     const cached = storedByDirectory.get(directory);
     if (cached?.fingerprint === fingerprint) return cached.stored;
-    const contents = await readFile(join(directory, stateFile));
-    if (contents.byteLength > maximumStateBytes) throw pricingFailure('The saved pricing catalog is too large.');
-    const stored = decodeStoredPricing(contents.toString('utf8'));
-    // A concurrent external write can change the path between stat and read.
-    // Its snapshot is usable for this request but must not enter the cache.
-    if (fingerprint === (await storedFingerprint(directory))) rememberStored(directory, fingerprint, stored);
-    return stored;
+    return await readMatching(directory, fingerprint);
   } catch (error) {
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
       const cached = storedByDirectory.get(directory);

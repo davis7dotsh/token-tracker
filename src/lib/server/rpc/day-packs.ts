@@ -2,6 +2,7 @@ import { Effect } from 'effect';
 import type { SqlClient } from 'effect/sql';
 import { randomBytes } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { schemaInventory } from './schema-inventory';
 import type { StoredRow } from './window-pages';
 
 // Only the Bun hub supplies a codec. Packs are disposable copies of raw SQL
@@ -16,7 +17,8 @@ const maxRows = 65_536;
 export const retainedDays = 64;
 const isMeta = (m: unknown): m is [string, string, string, string] =>
   Array.isArray(m) && m.length === 4 && m.every((v: unknown) => typeof v === 'string');
-const unpack = (raw: Uint8Array): Iterable<StoredRow> => {
+type PackBounds = { from: string; until: string };
+const unpack = (raw: Uint8Array, bounds?: PackBounds): Iterable<StoredRow> => {
   if (raw.byteLength > maxRaw) throw new Error('Invalid day pack');
   const bytes = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
   const headerEnd = bytes.indexOf(10);
@@ -37,6 +39,8 @@ const unpack = (raw: Uint8Array): Iterable<StoredRow> => {
     *[Symbol.iterator]() {
       for (let i = 0; i < metadata.length; i++) {
         const [id, device_id, pricing_snapshot, timestamp] = metadata[i];
+        // Bounds apply to the indexed UTC timestamp, not the offset in the event payload.
+        if (bounds && (timestamp < bounds.from || timestamp >= bounds.until)) continue;
         yield {
           id,
           device_id,
@@ -78,31 +82,39 @@ export const makeDayPacks = Effect.fn('UsageStore.makeDayPacks')(function* (
   sql: SqlClient.SqlClient,
   codec: DayPackCodec,
 ) {
-  yield* sql.withTransaction(
-    Effect.gen(function* () {
-      yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS usage_day_packs_v1 (
+  const inventory = yield* schemaInventory(sql);
+  if (!inventory.complete('usage_day_packs_v1'))
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS usage_day_packs_v1 (
       day TEXT PRIMARY KEY, excluded TEXT NOT NULL, ticket TEXT NOT NULL, body BLOB) WITHOUT ROWID`);
-      const invalidate = (row: 'OLD' | 'NEW') =>
-        `DELETE FROM usage_day_packs_v1 WHERE day = substr(${row}.timestamp, 1, instr(${row}.timestamp,'T') - 1);`;
-      // Keep invalidation in the database: previous binaries using INSERT/UPDATE/DELETE/UPSERT must
-      // also invalidate packs, even across rollback/re-upgrade and process crashes.
-      for (const [op, body] of [
-        ['INSERT', invalidate('NEW')],
-        ['DELETE', invalidate('OLD')],
-        ['UPDATE', invalidate('OLD') + invalidate('NEW')],
-      ])
-        yield* sql.unsafe(
-          `CREATE TRIGGER IF NOT EXISTS usage_day_packs_v1_${op} AFTER ${op} ON usage_events BEGIN ${body} END`,
-        );
-    }),
-  );
+        const invalidate = (row: 'OLD' | 'NEW') =>
+          `DELETE FROM usage_day_packs_v1 WHERE day = substr(${row}.timestamp, 1, instr(${row}.timestamp,'T') - 1);`;
+        // Keep invalidation in the database: previous binaries using INSERT/UPDATE/DELETE/UPSERT must
+        // also invalidate packs, even across rollback/re-upgrade and process crashes.
+        for (const [op, body] of [
+          ['INSERT', invalidate('NEW')],
+          ['DELETE', invalidate('OLD')],
+          ['UPDATE', invalidate('OLD') + invalidate('NEW')],
+        ])
+          yield* sql.unsafe(
+            `CREATE TRIGGER IF NOT EXISTS usage_day_packs_v1_${op} AFTER ${op} ON usage_events BEGIN ${body} END`,
+          );
+      }),
+    );
   const lookup = Effect.fnUntraced(
-    function* (day: string, excluded: string) {
+    function* (day: string, excluded: string, bounds?: PackBounds) {
+      // A long clock span can still contain just one event. Before reading a
+      // whole blob, seek at most 128 entries in the covering timestamp index.
+      const enoughRows = bounds
+        ? sql`AND EXISTS (SELECT 1 FROM usage_events INDEXED BY usage_events_timestamp
+            WHERE timestamp >= ${bounds.from} AND timestamp < ${bounds.until} LIMIT 1 OFFSET 127)`
+        : sql``;
       const rows = yield* sql<{
         body: Uint8Array;
-      }>`SELECT body FROM usage_day_packs_v1 WHERE day = ${day} AND excluded = ${excluded} AND length(body) BETWEEN 1 AND ${maxPacked}`;
+      }>`SELECT body FROM usage_day_packs_v1 WHERE day = ${day} AND excluded = ${excluded} AND length(body) BETWEEN 1 AND ${maxPacked} ${enoughRows}`;
       if (rows.length)
-        return yield* Effect.tryPromise(async () => unpack(await codec.decompress(rows[0].body, maxRaw)));
+        return yield* Effect.tryPromise(async () => unpack(await codec.decompress(rows[0].body, maxRaw), bounds));
     },
     Effect.catch(() => Effect.succeed(undefined)),
   );

@@ -203,6 +203,7 @@ const retainResult = <A>(cache: Map<string, A>, key: string, value: A) => {
 // and device administration.
 const CollectorRpc = UsageRpc.omit(
   'GetUsage',
+  'GetSessionExport',
   'GetUsagePage',
   'GetUsagePageUpdate',
   'GetUsageInfo',
@@ -638,6 +639,10 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       });
       return {
         GetUsage: getUsage,
+        GetSessionExport: Effect.fn('rpc.GetSessionExport')(function* (query) {
+          const { period, sessions } = yield* getUsage(query);
+          return { period, sessions };
+        }),
         GetUsagePage: getPage,
         GetUsagePageUpdate: Effect.fn('rpc.GetUsagePageUpdate')(function* (request) {
           const page = yield* getPage(request);

@@ -715,7 +715,11 @@ test('cached pricing snapshots detect external edits, atomic replacement, deleti
   const editedBytes = initialBytes.replace('"model-a"', '"model-b"');
   expect(editedBytes.length).toBe(initialBytes.length);
   await writeFile(filename, editedBytes);
-  const edited = await Effect.runPromise(loadPricing(directory));
+  const [edited, concurrent] = await Promise.all([
+    Effect.runPromise(loadPricing(directory)),
+    Effect.runPromise(loadPricing(directory, { strict: true })),
+  ]);
+  expect(concurrent).toBe(edited);
   expect(edited.info.rules).toEqual([{ model: 'model-b', kind: 'free' }]);
   expect(edited.policy.revision).not.toBe(original.policy.revision);
   expect(await Effect.runPromise(loadPricing(directory))).toBe(edited);
@@ -733,7 +737,11 @@ test('cached pricing snapshots detect external edits, atomic replacement, deleti
   expect(absent.info.refreshError).toBeNull();
   expect(await Effect.runPromise(loadPricing(directory))).toBe(absent);
   await writeFile(filename, '{invalid-json');
-  const invalid = await Effect.runPromise(loadPricing(directory));
+  const [invalid, strict] = await Promise.all([
+    Effect.runPromise(loadPricing(directory)),
+    Effect.runPromiseExit(loadPricing(directory, { strict: true })),
+  ]);
+  expect(strict._tag).toBe('Failure');
   expect(invalid.info.rules).toEqual([]);
   expect(invalid.info.refreshError).toContain('could not be read');
   await writeFile(filename, editedBytes);

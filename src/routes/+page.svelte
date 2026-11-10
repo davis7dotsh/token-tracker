@@ -225,7 +225,7 @@
     exporting = true;
     exportError = '';
     try {
-      const full = data.sessions.length === count ? data : await client.getUsage(query, c.signal);
+      const full = data.sessions.length === count ? data : await client.getSessionExport(query, c.signal);
       if (!c.signal.aborted && k === scope) exportSessions(full, (id) => label('devices', id));
     } catch (e) {
       if (!c.signal.aborted) exportError = e instanceof Error ? e.message : 'Could not export sessions.';

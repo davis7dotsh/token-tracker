@@ -164,11 +164,18 @@ export const makeWindowPages = (
           }
           return decoded;
         });
-        const disk = diskDays && day >= diskDays.first && day < diskDays.today && isFull ? packs : undefined;
-        const cached = disk ? yield* disk.lookup(day, excluded) : undefined;
+        const disk = diskDays && day >= diskDays.first && day < diskDays.today ? packs : undefined;
+        // Local midnights often cut a large slice out of an already packed day.
+        // Keep short slices on the indexed seek; only whole days may be *written*.
+        const noon = day + 'T12:00:00.000Z';
+        const largeEdge = (until === day + 'U' && from <= noon) || (from === day + 'T' && until >= noon);
+        const cached =
+          disk && (isFull || largeEdge)
+            ? yield* disk.lookup(day, excluded, isFull ? undefined : { from, until })
+            : undefined;
         if (cached) page = yield* decodeRows(cached).pipe(Effect.catch(() => Effect.succeed(undefined)));
         if (!page) {
-          if (disk && diskDays && !fill) {
+          if (isFull && disk && diskDays && !fill) {
             const candidates = days
               .map((entry) => entry.day)
               .filter(
@@ -178,7 +185,7 @@ export const makeWindowPages = (
           }
           const rows = yield* loadRows;
           page = yield* decodeRows(rows);
-          if (disk && fill) yield* fill.save(day, rows);
+          if (isFull && disk && fill) yield* fill.save(day, rows);
         }
       }
       used.set(key, page);
