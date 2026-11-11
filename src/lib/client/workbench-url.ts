@@ -55,8 +55,8 @@ export const workbenchUrlSchema: StandardSchemaV1<unknown, WorkbenchParams> = {
 
 // An explicit `split` wins; otherwise honour a legacy key. Writing a split
 // clears the legacy keys, so choosing the default later is not overridden.
-export const splitOf = (params: Pick<WorkbenchParams, 'split' | 'chartBy' | 'breakdown'>) =>
-  params.split !== 'models' ? params.split : params.chartBy || params.breakdown || params.split;
+export const splitOf = (params: Pick<WorkbenchParams, 'split' | 'chartBy' | 'breakdown'>, url: URLSearchParams) =>
+  url.has('split') ? params.split : params.chartBy || params.breakdown || params.split;
 export const splitTo = (split: Group) => ({ split, chartBy: '', breakdown: '' }) as const;
 
 export const filtersOf = (params: Pick<WorkbenchParams, Group>) =>

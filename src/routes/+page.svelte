@@ -61,7 +61,7 @@
     params.update(values, { pushHistory: push });
   }
   const compare = $derived(params.view === 'compare');
-  const group = $derived(splitOf(params));
+  const group = $derived(splitOf(params, currentUrl.searchParams));
   const metric: Metric = $derived(params.metric === 'cost' ? 'costUSD' : 'tokens');
   const chart = $derived(params.chart);
   const sort: SessionSort = $derived({ by: params.sort, order: params.order });
