@@ -5,46 +5,45 @@
     groups,
     groupNames,
     timeBuckets,
-    periodOf,
     nicePeak,
     valueOf,
     axisValue,
     type Group,
     type Metric,
-    type Picked,
   } from '../../client/usage-workbench';
   import ChoiceMenu from './ChoiceMenu.svelte';
+  import Icon from '../Icon.svelte';
   let {
     data,
     colors,
     group,
     metric,
+    chart,
     compare,
     independent,
     narrowed,
-    canUndo,
     label,
-    inspect,
+    select,
     setGroup,
     setMetric,
+    setChart,
     setScale,
-    undo,
     clear,
   }: {
     data: DashboardResponse;
     colors: ReadonlyMap<string, string>;
     group: Group;
     metric: Metric;
+    chart: 'bar' | 'line';
     compare: boolean;
     independent: boolean;
     narrowed: boolean;
-    canUndo: boolean;
     label: (g: Group, id: string) => string;
-    inspect: (p: Picked) => void;
+    select: (name: string) => void;
     setGroup: (v: Group) => void;
     setMetric: (v: Metric) => void;
+    setChart: (v: 'bar' | 'line') => void;
     setScale: (v: boolean) => void;
-    undo: () => void;
     clear: () => void;
   } = $props();
   const buckets = $derived(timeBuckets(data, group));
@@ -65,12 +64,24 @@
     }),
   );
   const shared = $derived(Math.max(1, ...trends.map((r) => r.peak)));
+  const lines = $derived(chart === 'line' && !compare);
+  // Lines plot each series on its own, so the scale follows the largest series, not the stack.
+  const scale = $derived(lines ? nicePeak(Math.max(0, ...trends.flatMap((t) => t.points))) : peak);
+  const mid = (i: number) => ((i + 0.5) / Math.max(1, buckets.length)) * 100;
+  const linePath = (p: number[]) =>
+    p.map((v, i) => `${(mid(i) * 10).toFixed(2)},${(200 - (200 * v) / scale).toFixed(2)}`).join(' ');
   const pct = (n: number) => (data.totals[metric] ? ((n / data.totals[metric]) * 100).toFixed(1) + '%' : '—');
   const at = (index: number) => (100 * index) / Math.max(1, buckets.length - 1);
   const coordinates = (p: number[], max: number) =>
     p.map((v, i) => `${(at(i) * 6).toFixed(2)},${(40 - (40 * v) / max).toFixed(2)}`).join(' ');
   const cadence = $derived(data.range === 'today' ? 'Hourly' : data.range === '6m' ? '6-day buckets' : 'Daily');
   const ticks = $derived([...new Set([0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(f * (buckets.length - 1))))]);
+  // Label every day of a short range; otherwise thin to evenly spaced buckets.
+  const barTicks = $derived(
+    buckets.length <= 14
+      ? buckets.map((_, i) => i)
+      : [...new Set(Array.from({ length: 6 }, (_, k) => Math.round(((buckets.length - 1) * k) / 5)))],
+  );
   const splitChoices = groups.map((g) => ({ value: g, label: groupNames[g] }));
   type Hover = {
     i: number;
@@ -130,14 +141,23 @@
       pinned,
     };
   }
-  function segment(e: Event) {
-    return e.target instanceof Element ? e.target.closest<HTMLElement>('[data-series]')?.dataset.series : undefined;
+  // Bars hit-test their segments; lines take the nearest point within reach of the cursor.
+  function segment(e: MouseEvent, el: HTMLElement, i: number) {
+    if (!lines)
+      return e.target instanceof Element ? e.target.closest<HTMLElement>('[data-series]')?.dataset.series : undefined;
+    const r = el.getBoundingClientRect();
+    const y = (t: (typeof trends)[number]) => r.bottom - (r.height * t.points[i]) / scale;
+    const near = trends.reduce<(typeof trends)[number] | undefined>(
+      (best, t) => (!best || Math.abs(y(t) - e.clientY) < Math.abs(y(best) - e.clientY) ? t : best),
+      undefined,
+    );
+    return near && near.points[i] > 0 && Math.abs(y(near) - e.clientY) < 28 ? near.row.name : undefined;
   }
   function onBar(e: PointerEvent, el: HTMLElement, i: number) {
     if (e.pointerType === 'touch') return;
     const r = el.getBoundingClientRect();
     opener = el;
-    show(i, r, r.left + r.width / 2, segment(e));
+    show(i, r, r.left + r.width / 2, segment(e, el, i));
   }
   async function pin(el: HTMLElement, i: number, series?: string, x?: number, focus = true) {
     const r = el.getBoundingClientRect();
@@ -148,15 +168,15 @@
       panel?.querySelector('button')?.focus({ preventScroll: true });
     }
   }
-  function pick(name: string, bucket?: number) {
+  function pick(name: string) {
     if (panel?.contains(document.activeElement)) opener?.focus({ preventScroll: true });
     hide();
-    inspect({ group, name, bucket });
+    select(name);
   }
   function barClick(e: MouseEvent, el: HTMLElement, i: number) {
-    const s = segment(e);
+    const s = segment(e, el, i);
     if (s && !narrowed && !isTouchClick(e)) {
-      pick(s, i);
+      pick(s);
       return;
     }
     void pin(el, i, s);
@@ -191,7 +211,7 @@
       void pin(target, i, name, x);
       return;
     }
-    pick(name, i);
+    pick(name);
   }
   function trendKeys(e: KeyboardEvent, name: string) {
     const el = e.currentTarget instanceof HTMLElement ? e.currentTarget.querySelector<HTMLElement>('.spark') : null;
@@ -230,7 +250,6 @@
 <section class="wb-activity" bind:this={zone}>
   <div class="wb-section-head">
     <div class="wb-title-line">
-      {#if canUndo}<button class="wb-link" onclick={undo}>‹ Back</button>{/if}
       <h2>
         {narrowed
           ? 'Session activity'
@@ -261,6 +280,14 @@
             >{m === 'tokens' ? 'Tokens' : 'Cost'}</button
           >{/each}
       </div>
+      {#if !compare}<div class="wb-tabs chart-kind" aria-label="Chart type">
+          {#each [['bar', 'bars', 'Bar chart'], ['line', 'line', 'Line chart']] as const as [kind, icon, name] (kind)}<button
+              aria-pressed={chart === kind}
+              aria-label={name}
+              title={name}
+              onclick={() => setChart(kind)}><Icon name={icon} size={16} /></button
+            >{/each}
+        </div>{/if}
     </div>
   </div>
   {#if !ranked.length}<div class="wb-empty">
@@ -327,13 +354,30 @@
   {:else}
     <div class="stack-chart">
       <div class="y-axis">
-        {#each [4, 3, 2, 1, 0] as n (n)}<span>{axisValue((peak * n) / 4, metric)}</span>{/each}
+        {#each [4, 3, 2, 1, 0] as n (n)}<span>{axisValue((scale * n) / 4, metric)}</span>{/each}
       </div>
       <div class="plot-grid">
         <div class="guides">
           {#each [0, 1, 2, 3, 4] as n (n)}<i></i>{/each}
         </div>
-        <div role="group" aria-label="Time buckets" class="columns" onpointerleave={leave}>
+        {#if lines}<svg class="line-plot" viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true"
+            >{#each [...trends].reverse() as t (t.row.name)}<polyline
+                points={linePath(t.points)}
+                stroke={colors.get(t.row.name)}
+                stroke-width="2"
+                stroke-linejoin="round"
+                stroke-linecap="round"
+                vector-effect="non-scaling-stroke"
+                fill="none"
+              />{/each}</svg
+          >{#if hover && current}{#each trends as t (t.row.name)}{#if t.points[hover.i] > 0}<i
+                  class="dot"
+                  class:bright={hover.series === t.row.name}
+                  style:left={`${mid(hover.i)}%`}
+                  style:top={`${100 - (100 * t.points[hover.i]) / scale}%`}
+                  style:--sw={colors.get(t.row.name)}
+                ></i>{/if}{/each}{/if}{/if}
+        <div role="group" aria-label="Time buckets" class="columns" class:lines onpointerleave={leave}>
           {#each buckets as b, i (i)}<button
               data-index={i}
               class:marked={hover?.i === i}
@@ -342,17 +386,17 @@
               onclick={(e) => barClick(e, e.currentTarget, i)}
               onpointermove={(e) => onBar(e, e.currentTarget, i)}
               onkeydown={(e) => bucketKeys(e, i)}
-              >{#each heights[i] as [name, x] (name)}{#if x[metric] > 0}<span
-                    data-series={name}
-                    class:bright={hover?.i === i && hover.series === name}
-                    style:height={`${(100 * x[metric]) / peak}%`}
-                    style:--sw={colors.get(name)}
-                  ></span>{/if}{/each}</button
+              >{#if !lines}{#each heights[i] as [name, x] (name)}{#if x[metric] > 0}<span
+                      data-series={name}
+                      class:bright={hover?.i === i && hover.series === name}
+                      style:height={`${(100 * x[metric]) / peak}%`}
+                      style:--sw={colors.get(name)}
+                    ></span>{/if}{/each}{/if}</button
             >{/each}
         </div>
       </div>
       <div class="axis bar-axis">
-        {#each ticks as i (i)}<span>{buckets[i].short}</span>{/each}
+        {#each barTicks as i (i)}<span style:left={`${mid(i)}%`}>{buckets[i].short}</span>{/each}
       </div>
     </div>
     {#if !narrowed}<div class="legend" aria-label={`${groupNames[group]} breakdown`}>
@@ -362,14 +406,8 @@
           >{/each}
       </div>{/if}
   {/if}
-  <div class="chart-end">
-    <span
-      >{narrowed
-        ? 'Fully narrowed'
-        : compare
-          ? 'Select a trend to inspect'
-          : 'Select a segment or series to inspect'}</span
-    >{#if compare && !narrowed}<ChoiceMenu
+  {#if compare && !narrowed && ranked.length}<div class="chart-end">
+      <ChoiceMenu
         label="Trend scale"
         prefix="Scale"
         value={independent ? 'series' : 'shared'}
@@ -378,8 +416,8 @@
           { value: 'series', label: 'Per series' },
         ]}
         onchange={(v) => setScale(v === 'series')}
-      />{:else}<span>{periodOf(data)} · {data.timezone}</span>{/if}
-  </div>
+      />
+    </div>{/if}
 </section>
 {#if hover && current}
   <div
@@ -404,7 +442,7 @@
     <div class="pop-list">
       {#each tipRows ?? [] as row (row.name)}<button
           class:over={hover.series === row.name}
-          onclick={() => pick(row.name, hover?.i)}
+          onclick={() => pick(row.name)}
           ><i style:--sw={colors.get(row.name)}></i><span>{label(group, row.name)}</span><b
             >{valueOf(current.rows.get(row.name) ?? zero, metric)}</b
           ></button

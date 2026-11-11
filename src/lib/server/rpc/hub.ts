@@ -11,8 +11,11 @@ import {
   type CollectionError,
   type UsageEvent,
   type UsageResult,
+  type Session,
+  type SessionSort,
 } from '../../shared/domain';
 import { sessionPageSize } from '../../shared/dashboard-page';
+import { isDefaultSessionSort, sortSessions } from '../../shared/session-sort';
 import { tokenTotal } from '../usage/parsers';
 import {
   describePricingGaps,
@@ -624,15 +627,65 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         ),
       );
       const warmer = yield* makeViewWarmer(options.viewHints, getUsage, store.getRevision);
-      const getPage = Effect.fn('rpc.GetUsagePage')(function* ({ query, page }: { query: UsageQuery; page: number }) {
+      // The dashboard's device list: registered devices plus this hub's own
+      // machine, which collects directly and may never have registered.
+      const listDevices = Effect.fn('rpc.listDevices')(function* () {
+        const devices = yield* store.getDevices();
+        const device = local.device;
+        if (!device || devices.some((item) => item.id === device.id)) return devices;
+        return [
+          {
+            ...device,
+            collectorVersion,
+            lastSeen: new Date().toISOString(),
+            eventCount: 0,
+            revokedAt: null,
+            needsReconnect: false,
+          },
+          ...devices,
+        ];
+      });
+      // One sorted copy per dashboard snapshot and order; paging reuses it.
+      // Device order also depends on names, which renames change without new usage.
+      const sorted = new WeakMap<readonly Session[], Map<string, readonly Session[]>>();
+      const sortedSessions = Effect.fnUntraced(function* (
+        sessions: readonly Session[],
+        machine: string,
+        sort: SessionSort | undefined,
+      ) {
+        if (!sort || isDefaultSessionSort(sort)) return sessions;
+        const names = new Map(
+          sort.by === 'device'
+            ? (yield* listDevices().pipe(Effect.orElseSucceed(() => []))).map((d) => [d.id, d.name] as const)
+            : [],
+        );
+        const key = `${sort.by}:${sort.order}:${JSON.stringify([...names])}`;
+        let bySort = sorted.get(sessions);
+        if (!bySort) sorted.set(sessions, (bySort = new Map()));
+        const cached = bySort.get(key);
+        if (cached) return cached;
+        const result = sortSessions(sessions, sort, (id) => names.get(id) ?? (id === 'local' ? machine : id));
+        bySort.set(key, result);
+        return result;
+      });
+      const getPage = Effect.fn('rpc.GetUsagePage')(function* ({
+        query,
+        page,
+        sort,
+      }: {
+        query: UsageQuery;
+        page: number;
+        sort?: SessionSort;
+      }) {
         const { projectInsights: _insights, ...dashboard } = yield* getUsage(query);
         yield* warmer.visited(query);
-        const sessionCount = dashboard.sessions.length;
+        const sessions = yield* sortedSessions(dashboard.sessions, dashboard.machine, sort);
+        const sessionCount = sessions.length;
         const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
         const sessionOffset = (Math.min(page, lastPage) - 1) * sessionPageSize;
         return {
           ...dashboard,
-          sessions: dashboard.sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
+          sessions: sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
           sessionCount,
           sessionOffset,
         };
@@ -646,7 +699,8 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         GetUsagePage: getPage,
         GetUsagePageUpdate: Effect.fn('rpc.GetUsagePageUpdate')(function* (request) {
           const page = yield* getPage(request);
-          if (request.viewRevision !== page.viewRevision) return page;
+          // A rename can reorder device-sorted rows within the same usage revision.
+          if (request.viewRevision !== page.viewRevision || request.sort?.by === 'device') return page;
           return {
             _tag: 'PageDelta' as const,
             viewRevision: page.viewRevision,
@@ -731,20 +785,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           return (yield* pricing.refresh).info;
         }),
         GetDevices: Effect.fn('rpc.GetDevices')(function* () {
-          const devices = yield* store.getDevices();
-          const device = local.device;
-          if (!device || devices.some((item) => item.id === device.id)) return devices;
-          return [
-            {
-              ...device,
-              collectorVersion,
-              lastSeen: new Date().toISOString(),
-              eventCount: 0,
-              revokedAt: null,
-              needsReconnect: false,
-            },
-            ...devices,
-          ];
+          return yield* listDevices();
         }),
         GetAdminAccess: () =>
           Effect.succeed({ secretRequired: !options.trustBrowser, localDeviceId: local.device?.id ?? null }),

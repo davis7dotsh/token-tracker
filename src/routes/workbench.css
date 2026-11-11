@@ -15,6 +15,11 @@
     system-ui,
     sans-serif;
 }
+@keyframes wb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 :root[data-theme='dark'] .usage-app {
   --wb-bg: #101317;
   --wb-panel: #171c22;
@@ -60,9 +65,9 @@
     line-height: 1.16;
   }
   & h1 {
-    font-size: clamp(34px, 3.15vw, 47px);
+    font-size: clamp(26px, 2.2vw, 32px);
     font-weight: 620;
-    letter-spacing: -0.06em;
+    letter-spacing: -0.045em;
   }
   & h2 {
     font-size: clamp(19px, 1.55vw, 22px);
@@ -93,7 +98,7 @@
   .chart-end,
   .wb-pager,
   .wb-dialog-foot,
-  .wb-bottom,
+  .wb-heading-tools,
   .mobile-groups {
     display: flex;
     align-items: center;
@@ -158,21 +163,33 @@
   }
   .wb-heading,
   .wb-section-head,
-  .chart-end,
-  .wb-bottom {
+  .chart-end {
     justify-content: space-between;
     gap: 10px;
   }
   .wb-heading {
-    margin-bottom: 12px;
+    margin-bottom: 10px;
+  }
+  .wb-heading-tools {
+    gap: 20px;
+  }
+  .wb-heading-tools .refresh {
+    color: var(--wb-muted);
+    font: 12px var(--wb-mono) !important;
+    font-variant-numeric: tabular-nums;
+  }
+  .wb-heading-tools .refresh:disabled {
+    opacity: 1;
+  }
+  .refresh.spinning svg {
+    animation: wb-spin 0.9s linear infinite;
   }
   .wb-link {
     gap: 6px;
     font-size: 13px !important;
   }
-  .wb-link:hover,
+  .wb-link:hover:not(:disabled),
   .wb-mast a:hover,
-  .wb-bottom :is(button, a):hover,
   .scope-chip:hover,
   .wb-pager button:hover:not(:disabled) {
     color: var(--wb-accent);
@@ -198,7 +215,6 @@
     margin-left: 3px;
   }
   .all-usage,
-  .wb-bottom,
   .chart-end {
     color: var(--wb-muted);
     font-size: 12px;
@@ -226,7 +242,7 @@
     display: grid;
     grid-template-columns: 1.16fr 1.08fr 0.86fr 0.9fr;
     gap: 16px;
-    margin: 23px 0 26px;
+    margin: 22px 0 24px;
     font-variant-numeric: tabular-nums;
   }
   .wb-kpis div {
@@ -239,7 +255,7 @@
   .wb-kpis strong {
     display: block;
     margin: 5px 0 4px;
-    font-size: clamp(29px, 2.85vw, 42px);
+    font-size: clamp(28px, 2.4vw, 38px);
     font-weight: 560;
     letter-spacing: -0.062em;
     line-height: 1.1;
@@ -274,6 +290,14 @@
   .wb-controls .wb-tabs {
     padding-left: 12px;
     border-left: 1px solid var(--wb-line);
+  }
+  .chart-kind button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+  }
+  .chart-kind [aria-pressed='true'] {
+    color: var(--wb-accent);
   }
   .wb-tabs {
     gap: 3px;
@@ -317,12 +341,46 @@
     margin: 12px 0;
     color: var(--wb-muted);
   }
+  .wb-activity {
+    padding-bottom: 18px;
+  }
   .stack-chart {
     display: grid;
     grid-template-columns: 40px minmax(0, 1fr);
-    grid-template-rows: 200px auto;
+    grid-template-rows: 240px auto;
     gap: 0 9px;
     padding: 12px 0;
+  }
+  .line-plot {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .plot-grid .dot {
+    position: absolute;
+    z-index: 1;
+    width: 8px;
+    height: 8px;
+    transform: translate(-50%, -50%);
+    border: 2px solid var(--wb-bg);
+    border-radius: 50%;
+    background: var(--sw);
+    pointer-events: none;
+  }
+  .plot-grid .dot.bright {
+    width: 12px;
+    height: 12px;
+  }
+  .columns.lines button.marked {
+    background: linear-gradient(
+      to right,
+      transparent calc(50% - 0.5px),
+      color-mix(in srgb, var(--wb-ink) 30%, transparent) calc(50% - 0.5px) calc(50% + 0.5px),
+      transparent calc(50% + 0.5px)
+    );
   }
   .plot-grid,
   .columns {
@@ -376,6 +434,9 @@
     max-width: 58px;
     background: var(--sw);
   }
+  .columns button > span:last-child {
+    border-radius: 2px 2px 0 0;
+  }
   .columns button > span.bright {
     outline: 1px solid var(--wb-ink);
     z-index: 1;
@@ -388,6 +449,12 @@
   }
   .bar-axis {
     grid-column: 2;
+    position: relative;
+    height: 24px;
+  }
+  .bar-axis span {
+    position: absolute;
+    transform: translateX(-50%);
   }
   .legend {
     display: grid;
@@ -646,26 +713,38 @@
   .pop-list button:focus-visible {
     background: var(--wb-soft);
   }
-  .wb-sessions {
-    margin-top: 14px;
-  }
   .wb-pager {
-    gap: 5px;
+    gap: 4px;
+  }
+  .wb-pager small {
+    margin-right: 6px;
   }
   .wb-pager button {
-    font-size: 20px;
-    width: 29px;
-    min-height: 32px;
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 4px;
+  }
+  .wb-pager button:hover:not(:disabled) {
+    background: var(--wb-soft);
+  }
+  .wb-pager button:first-of-type svg {
+    transform: rotate(90deg);
+  }
+  .wb-pager button:last-of-type svg {
+    transform: rotate(-90deg);
   }
   .wb-sessions table {
     width: 100%;
     min-width: 0;
     table-layout: fixed;
     border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
   }
   .wb-sessions :is(td, th) {
     height: 38px;
-    padding: 0 9px 0 0;
+    padding: 0 12px 0 0;
     text-align: left;
     color: var(--wb-muted);
     font-size: 13px;
@@ -674,13 +753,50 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .wb-sessions tr.filler td {
+    border-color: transparent;
+  }
+  .wb-sessions tbody tr:not(.filler):hover td {
+    background: color-mix(in srgb, var(--wb-ink) 3%, transparent);
+  }
   .wb-sessions th {
+    height: 32px;
+  }
+  .wb-sessions th button {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 100%;
     font-size: 11px;
     font-weight: 520;
-    height: 30px;
+    color: var(--wb-muted);
+  }
+  .wb-sessions th button:hover,
+  .wb-sessions th button.sorted {
+    color: var(--wb-ink);
+  }
+  .sort-mark {
+    display: grid;
+    opacity: 0;
+    transition: transform 0.12s;
+  }
+  .sort-mark.asc {
+    transform: rotate(180deg);
+  }
+  th button:hover .sort-mark {
+    opacity: 0.45;
+  }
+  th button.sorted .sort-mark {
+    opacity: 1;
+    color: var(--wb-accent);
+  }
+  .wb-sessions :is(th, td):nth-child(n + 5) {
+    text-align: right;
+  }
+  .wb-sessions th:nth-child(n + 5) button {
+    flex-direction: row-reverse;
   }
   .wb-sessions :is(th, td):last-child {
-    text-align: right;
     padding: 0;
     color: var(--wb-ink);
   }
@@ -693,6 +809,9 @@
     flex-shrink: 0;
     color: var(--wb-muted);
   }
+  .wb-sessions td a:hover {
+    color: var(--wb-accent);
+  }
   .wb-sessions td button {
     display: inline-block;
     min-height: 37px;
@@ -704,28 +823,25 @@
   }
   .wb-sessions td button:hover {
     color: var(--wb-accent);
-    text-decoration: underline;
   }
-  .wb-sessions :is(th, td):first-child {
-    width: 28%;
+  .wb-sessions td:first-child {
     color: var(--wb-ink);
   }
+  .wb-sessions th:nth-child(1) {
+    width: 30%;
+  }
   .wb-sessions th:nth-child(2) {
-    width: 26%;
+    width: 20%;
   }
   .wb-sessions th:nth-child(3) {
-    width: 17%;
+    width: 14%;
   }
   .wb-sessions th:nth-child(4) {
-    width: 19%;
+    width: 16%;
   }
-  .wb-sessions th:last-child {
+  .wb-sessions th:nth-child(5),
+  .wb-sessions th:nth-child(6) {
     width: 10%;
-  }
-  .wb-bottom {
-    justify-content: flex-end;
-    margin-top: 16px;
-    font: 11px var(--wb-mono);
   }
   .wb-dialog {
     width: min(460px, calc(100% - 20px));
@@ -892,6 +1008,13 @@
       font-size: 12px !important;
       white-space: nowrap;
     }
+    .wb-heading-tools {
+      gap: 12px;
+    }
+    .wb-heading-tools .refresh span,
+    .bar-axis span:nth-child(even) {
+      display: none;
+    }
     .wb-scope {
       gap: 10px;
     }
@@ -935,7 +1058,7 @@
     }
     .stack-chart {
       grid-template-columns: 32px minmax(0, 1fr);
-      grid-template-rows: 155px auto;
+      grid-template-rows: 180px auto;
       gap: 0 5px;
     }
     .axis,
@@ -1021,18 +1144,18 @@
       font-size: 10px;
     }
     .wb-sessions :is(th, td):nth-child(3),
-    .wb-sessions :is(th, td):nth-child(4) {
+    .wb-sessions :is(th, td):nth-child(4),
+    .wb-sessions :is(th, td):nth-child(5) {
       display: none;
     }
-    .wb-sessions th:nth-child(1),
-    .wb-sessions td:nth-child(1) {
-      width: 43%;
+    .wb-sessions th:nth-child(1) {
+      width: 45%;
     }
     .wb-sessions th:nth-child(2) {
-      width: 38%;
+      width: 33%;
     }
     .wb-sessions th:last-child {
-      width: 19%;
+      width: 22%;
     }
     .wb-sessions td {
       font-size: 12px;

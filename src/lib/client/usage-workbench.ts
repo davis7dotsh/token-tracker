@@ -1,5 +1,5 @@
-import type { ChartSeries, DashboardResponse, UsageQuery } from '../shared/domain';
-import { dashboardRanges, decodeFilter, encodeFilter, type DashboardRange } from './dashboard-url';
+import type { ChartSeries, DashboardResponse } from '../shared/domain';
+import { dashboardRanges, type DashboardRange } from './dashboard-url';
 
 export const groups = ['devices', 'models', 'projects', 'providers', 'harnesses'] as const;
 export type Group = (typeof groups)[number];
@@ -12,20 +12,8 @@ export const groupNames = {
   harnesses: 'Harness',
 };
 export type Picked = { group: Group; name: string; bucket?: number };
-export const splitFrom = (v: string | null) => groups.find((g) => g === v) ?? 'models';
 export const rangeFrom = (v: string | null, fallback: DashboardRange) =>
   dashboardRanges.find((r) => r.value === v)?.value ?? fallback;
-export const filtersFrom = (p: URLSearchParams) =>
-  Object.fromEntries(
-    groups.flatMap((k) => {
-      const selected = decodeFilter(p.get(k) ?? '');
-      return selected ? [[k, selected]] : [];
-    }),
-  ) as Pick<UsageQuery, Group>;
-export function setSelection(p: URLSearchParams, group: Group, names: readonly string[] | undefined) {
-  if (names === undefined) p.delete(group);
-  else p.set(group, encodeFilter(names));
-}
 const short = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
 const usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 export const formatValue = (n: number, metric: Metric) => (metric === 'tokens' ? short.format(n) : usd.format(n));

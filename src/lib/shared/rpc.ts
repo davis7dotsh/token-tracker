@@ -11,6 +11,7 @@ import {
   SyncAck,
   SyncBatch,
   UsageQuery,
+  SessionSort,
 } from './domain';
 import { PricingFailure, PricingInfo, PricingPolicy, PricingRule } from './pricing';
 
@@ -69,7 +70,11 @@ export const UsageRpc = RpcGroup.make(
   Rpc.make('GetUsage', { payload: UsageQuery, success: DashboardResponse, error: UsageFailure }),
   Rpc.make('GetSessionExport', { payload: UsageQuery, success: SessionExport, error: UsageFailure }),
   Rpc.make('GetUsagePage', {
-    payload: { query: UsageQuery, page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)) },
+    payload: {
+      query: UsageQuery,
+      page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+      sort: Schema.optionalKey(SessionSort),
+    },
     success: DashboardPage,
     error: UsageFailure,
   }),
@@ -77,6 +82,7 @@ export const UsageRpc = RpcGroup.make(
     payload: {
       query: UsageQuery,
       page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+      sort: Schema.optionalKey(SessionSort),
       viewRevision: Schema.String.check(Schema.isMaxLength(64)),
       sessionOffset: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
     },

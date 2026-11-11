@@ -42,7 +42,7 @@ describe('dashboard URL state', () => {
       ].sort(),
     );
     expect(defaults).toMatchObject({
-      range: '30d',
+      range: '7d',
       metric: 'tokens',
       chart: 'bar',
       breakdown: 'models',
@@ -54,7 +54,7 @@ describe('dashboard URL state', () => {
     });
     expect([...filterKeys, 'excludedProjects'].every((key) => Reflect.get(defaults, key) === '')).toBe(true);
     expect(usageQueryFromParams(defaults, 'America/Los_Angeles')).toMatchObject({
-      range: '30d',
+      range: '7d',
       timezone: 'America/Los_Angeles',
     });
     expect(filterKeys.every((key) => usageQueryFromParams(defaults, 'UTC')[key] === undefined)).toBe(true);
@@ -107,7 +107,7 @@ describe('dashboard URL state', () => {
     expect(read({ range: '30d' })).toBe('30d');
     expect(read({ range: 'today' })).toBe('today');
     expect(read({ range: 'invalid' })).toBe(value);
-    expect(validate({}).range).toBe('30d');
+    expect(validate({}).range).toBe('7d');
   });
 
   test('legacy all, none, and comma links keep their distinct filtering behavior', () => {
@@ -178,7 +178,7 @@ describe('dashboard URL state', () => {
       search: 'valid search',
     });
     expect(state).toMatchObject({
-      range: '30d',
+      range: '7d',
       chart: 'bar',
       metric: 'tokens',
       breakdown: 'models',

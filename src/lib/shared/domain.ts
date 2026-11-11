@@ -1,3 +1,4 @@
+import { sessionSortKeys } from './session-sort';
 import { Schema, Struct } from 'effect';
 
 export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok', 'muse', 'cursor']);
@@ -77,6 +78,12 @@ export const UsageQuery = Schema.Struct({
   devices: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type UsageQuery = typeof UsageQuery.Type;
+// Sorting only reorders the session table; charts and totals are unaffected.
+export const SessionSort = Schema.Struct({
+  by: Schema.Literals(sessionSortKeys),
+  order: Schema.Literals(['asc', 'desc']),
+});
+export type SessionSort = typeof SessionSort.Type;
 
 const totalFields = {
   tokens: Schema.Number,

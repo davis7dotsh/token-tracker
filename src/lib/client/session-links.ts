@@ -1,4 +1,5 @@
 import type { Session } from '../shared/domain';
+import { projectLabel, projectParts } from '../shared/project-label';
 
 export const safeWebUrl = (value: string | undefined) => {
   if (!value) return undefined;
@@ -44,15 +45,7 @@ export const repositoryWebUrl = (repository: string | null) => {
   return url.pathname !== '/' && !url.search && !url.hash ? value : undefined;
 };
 
-const projectParts = (value: string) =>
-  value
-    .replace(/^local:/, '')
-    .replace(/^https?:\/\//, '')
-    .replace(/\.git$/, '')
-    .split(/[\\/]/)
-    .filter(Boolean);
-
-export const projectLabel = (value: string) => projectParts(value).slice(-2).join('/') || value;
+export { projectLabel };
 
 export const projectLabels = (values: readonly string[]) => {
   const entries = [...new Set(values)].map((key) => ({
