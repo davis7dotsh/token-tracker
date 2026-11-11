@@ -23,6 +23,9 @@ const validate = (input: object) => {
       '',
     ),
     split: literal(field('split'), groups, 'models'),
+    // Links from the previous dashboard named the split `chartBy` or `breakdown`.
+    chartBy: literal(field('chartBy'), groups, ''),
+    breakdown: literal(field('breakdown'), groups, ''),
     metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
     chart: literal(field('chart'), ['bar', 'line'], 'bar'),
     scale: literal(field('scale'), ['shared', 'series'], 'shared'),
@@ -49,6 +52,12 @@ export const workbenchUrlSchema: StandardSchemaV1<unknown, WorkbenchParams> = {
         : { value: validate(input) },
   },
 };
+
+// An explicit `split` wins; otherwise honour a legacy key. Writing a split
+// clears the legacy keys, so choosing the default later is not overridden.
+export const splitOf = (params: Pick<WorkbenchParams, 'split' | 'chartBy' | 'breakdown'>) =>
+  params.split !== 'models' ? params.split : params.chartBy || params.breakdown || params.split;
+export const splitTo = (split: Group) => ({ split, chartBy: '', breakdown: '' }) as const;
 
 export const filtersOf = (params: Pick<WorkbenchParams, Group>) =>
   Object.fromEntries(

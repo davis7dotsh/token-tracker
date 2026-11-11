@@ -14,7 +14,14 @@
     encodeFilter,
     type DashboardRange,
   } from '#lib/client/dashboard-url';
-  import { filtersOf, nextSplit, workbenchUrlSchema, type WorkbenchParams } from '#lib/client/workbench-url';
+  import {
+    filtersOf,
+    nextSplit,
+    splitOf,
+    splitTo,
+    workbenchUrlSchema,
+    type WorkbenchParams,
+  } from '#lib/client/workbench-url';
   import { assignChartColors } from '#lib/client/workbench-colors';
   import { categoryNames, modelLabel } from '#lib/client/visuals';
   import {
@@ -54,7 +61,7 @@
     params.update(values, { pushHistory: push });
   }
   const compare = $derived(params.view === 'compare');
-  const group = $derived(params.split);
+  const group = $derived(splitOf(params));
   const metric: Metric = $derived(params.metric === 'cost' ? 'costUSD' : 'tokens');
   const chart = $derived(params.chart);
   const sort: SessionSort = $derived({ by: params.sort, order: params.order });
@@ -68,7 +75,9 @@
     range,
     timezone,
     ...filters,
-    excludedProjects: params.excludedProjects
+    // A present-but-empty param is an explicit "hide nothing" link; only an
+    // absent one falls back to this browser's saved hidden projects.
+    excludedProjects: currentUrl.searchParams.has('excludedProjects')
       ? decodeFilter(params.excludedProjects)
       : hidden.length
         ? hidden
@@ -295,7 +304,7 @@
   function apply(next: Pick<UsageQuery, Group>, drill?: Group) {
     if (overlay) close();
     set(
-      { ...Object.fromEntries(groups.map((g) => [g, encodeFilter(next[g])])), ...(drill && { split: drill }), page: 1 },
+      { ...Object.fromEntries(groups.map((g) => [g, encodeFilter(next[g])])), ...(drill && splitTo(drill)), page: 1 },
       true,
     );
   }
@@ -467,7 +476,7 @@
                 narrowed={!!narrowed}
                 {label}
                 select={(name) => drill(group, name)}
-                setGroup={(v) => set({ split: v, page: 1 }, true)}
+                setGroup={(v) => set({ ...splitTo(v), page: 1 }, true)}
                 setMetric={(v) => set({ metric: v === 'tokens' ? 'tokens' : 'cost' })}
                 setChart={(v) => set({ chart: v })}
                 setScale={(v) => set({ scale: v ? 'series' : 'shared' })}
