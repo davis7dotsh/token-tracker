@@ -11,8 +11,11 @@ import {
   type CollectionError,
   type UsageEvent,
   type UsageResult,
+  type Session,
+  type SessionSort,
 } from '../../shared/domain';
 import { sessionPageSize } from '../../shared/dashboard-page';
+import { isDefaultSessionSort, sortSessions } from '../../shared/session-sort';
 import { tokenTotal } from '../usage/parsers';
 import {
   describePricingGaps,
@@ -624,15 +627,45 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         ),
       );
       const warmer = yield* makeViewWarmer(options.viewHints, getUsage, store.getRevision);
-      const getPage = Effect.fn('rpc.GetUsagePage')(function* ({ query, page }: { query: UsageQuery; page: number }) {
+      // One sorted copy per dashboard snapshot and order; paging reuses it.
+      const sorted = new WeakMap<readonly Session[], Map<string, readonly Session[]>>();
+      const sortedSessions = Effect.fnUntraced(function* (
+        sessions: readonly Session[],
+        machine: string,
+        sort: SessionSort | undefined,
+      ) {
+        if (!sort || isDefaultSessionSort(sort)) return sessions;
+        const key = `${sort.by}:${sort.order}`;
+        let bySort = sorted.get(sessions);
+        if (!bySort) sorted.set(sessions, (bySort = new Map()));
+        const cached = bySort.get(key);
+        if (cached) return cached;
+        const names =
+          sort.by === 'device'
+            ? new Map((yield* store.getDevices().pipe(Effect.orElseSucceed(() => []))).map((d) => [d.id, d.name]))
+            : new Map<string, string>();
+        const result = sortSessions(sessions, sort, (id) => names.get(id) ?? (id === 'local' ? machine : id));
+        bySort.set(key, result);
+        return result;
+      });
+      const getPage = Effect.fn('rpc.GetUsagePage')(function* ({
+        query,
+        page,
+        sort,
+      }: {
+        query: UsageQuery;
+        page: number;
+        sort?: SessionSort;
+      }) {
         const { projectInsights: _insights, ...dashboard } = yield* getUsage(query);
         yield* warmer.visited(query);
-        const sessionCount = dashboard.sessions.length;
+        const sessions = yield* sortedSessions(dashboard.sessions, dashboard.machine, sort);
+        const sessionCount = sessions.length;
         const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
         const sessionOffset = (Math.min(page, lastPage) - 1) * sessionPageSize;
         return {
           ...dashboard,
-          sessions: dashboard.sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
+          sessions: sessions.slice(sessionOffset, sessionOffset + sessionPageSize),
           sessionCount,
           sessionOffset,
         };

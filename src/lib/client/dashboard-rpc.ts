@@ -1,6 +1,6 @@
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import type { UsageRpc } from '../shared/rpc';
-import type { DashboardPage, UsageQuery } from '../shared/domain';
+import type { DashboardPage, SessionSort, UsageQuery } from '../shared/domain';
 import { sessionPageSize } from '../shared/dashboard-page';
 import type { PricingRule } from '../shared/pricing';
 import {
@@ -143,17 +143,26 @@ export const makeDashboardClient = (
         if (error instanceof ProcedureUnavailable) return call('GetUsage', query, signal, usageTimeout);
         throw error;
       }),
-    getUsagePage: async (query: UsageQuery, page: number, signal?: AbortSignal, base?: DashboardPage) => {
-      if (!base?.viewRevision) return call('GetUsagePage', { query, page }, signal, usageTimeout);
+    // `base` must be a page of the same query and sort: an unchanged offset reuses its rows.
+    getUsagePage: async (
+      query: UsageQuery,
+      page: number,
+      signal?: AbortSignal,
+      base?: DashboardPage,
+      sort?: SessionSort,
+    ) => {
+      const sorted = sort ? { sort } : {};
+      if (!base?.viewRevision) return call('GetUsagePage', { query, page, ...sorted }, signal, usageTimeout);
       const result = await call(
         'GetUsagePageUpdate',
-        { query, page, viewRevision: base.viewRevision, sessionOffset: base.sessionOffset },
+        { query, page, ...sorted, viewRevision: base.viewRevision, sessionOffset: base.sessionOffset },
         signal,
         usageTimeout,
       ).catch((error: unknown) => {
         // A tab may outlive a server rollback. Only an explicit missing method
         // retries on the original RPC; auth, timeout and transport errors stand.
-        if (error instanceof ProcedureUnavailable) return call('GetUsagePage', { query, page }, signal, usageTimeout);
+        if (error instanceof ProcedureUnavailable)
+          return call('GetUsagePage', { query, page, ...sorted }, signal, usageTimeout);
         throw error;
       });
       if (!('_tag' in result)) return result;

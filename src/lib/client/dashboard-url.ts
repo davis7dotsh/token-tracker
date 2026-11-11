@@ -7,6 +7,7 @@ export const chartGroups = ['harnesses', 'providers', 'models', 'projects'] as c
 export type ChartGrouping = (typeof chartGroups)[number];
 const rangeValues = ['6m', '30d', '7d', 'today'] as const;
 export type DashboardRange = (typeof rangeValues)[number];
+export const defaultDashboardRange: DashboardRange = '7d';
 export const dashboardRanges = [
   { value: '6m', label: '6 months' },
   { value: '30d', label: '1 month' },
@@ -62,7 +63,7 @@ const decodeHidden = (value: string) => {
   return values?.length ? values : undefined;
 };
 
-const validateDashboardParams = (input: unknown, range: DashboardRange = '30d') => {
+const validateDashboardParams = (input: unknown, range: DashboardRange = defaultDashboardRange) => {
   const value = typeof input === 'object' && input !== null ? input : {};
   const field = (key: string) => (key in value ? Reflect.get(value, key) : undefined);
   const page = field('page');
@@ -102,16 +103,16 @@ export const dashboardUrlSchemaFor = (range: DashboardRange): StandardSchemaV1<u
         : { value: validateDashboardParams(input, range) },
   },
 });
-export const dashboardUrlSchema = dashboardUrlSchemaFor('30d');
+export const dashboardUrlSchema = dashboardUrlSchemaFor(defaultDashboardRange);
 
 const defaultRangeKey = 'token-tracker-default-range';
 export const readDefaultRange = (): DashboardRange => {
-  if (typeof window === 'undefined') return '30d';
+  if (typeof window === 'undefined') return defaultDashboardRange;
   try {
     const stored = localStorage.getItem(defaultRangeKey);
-    return rangeValues.find((range) => range === stored) ?? '30d';
+    return rangeValues.find((range) => range === stored) ?? defaultDashboardRange;
   } catch {
-    return '30d';
+    return defaultDashboardRange;
   }
 };
 export const saveDefaultRange = (range: DashboardRange) => {

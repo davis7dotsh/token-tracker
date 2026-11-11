@@ -3,6 +3,7 @@
   import { page } from '$app/state';
   import {
     dashboardRanges,
+    defaultDashboardRange,
     readDefaultRange,
     readHiddenProjects,
     saveDefaultRange,
@@ -11,7 +12,7 @@
   } from '#lib/client/dashboard-url.ts';
   import ThemeToggle from '#lib/components/ThemeToggle.svelte';
 
-  let range = $state<DashboardRange>('30d');
+  let range = $state<DashboardRange>(defaultDashboardRange);
 
   let hidden = $state.raw<readonly string[]>([]);
 

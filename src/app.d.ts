@@ -6,9 +6,6 @@ declare global {
       passcodeEnabled: boolean;
       dashboardAuthenticated: boolean;
     }
-    interface PageState {
-      usageDrill?: boolean;
-    }
     interface Platform {
       env: {
         readonly HUB: { fetch(request: Request): Promise<Response> };
