@@ -398,7 +398,7 @@
     overflow: auto;
     align-content: start;
     padding-top: 4px;
-    scrollbar-width: thin;
+    scrollbar-width: none;
   }
   .legend button {
     display: flex;
