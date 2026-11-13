@@ -37,10 +37,10 @@ export const categoryNames: Record<string, string> = {
 // Display labels only; keep the reported model ID for grouping, filters and exports.
 export function modelLabel(id: string) {
   if (id === 'cursor/unknown') return 'Unreported model';
-  const claude = /^claude-(opus|sonnet|haiku|fable)-(\d+)-(\d+)(?:-(low|medium|high|max))?$/.exec(id);
+  const claude = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d+))?(?:-(low|medium|high|max))?$/.exec(id);
   if (claude) {
     const [, family, major, minor, effort] = claude;
-    return `Claude ${family[0].toUpperCase()}${family.slice(1)} ${major}.${minor}${effort ? ` (${effort})` : ''}`;
+    return `Claude ${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? `.${minor}` : ''}${effort ? ` (${effort})` : ''}`;
   }
   return id.replace(/^cursor-grok-(?=\d)/, 'Grok ');
 }

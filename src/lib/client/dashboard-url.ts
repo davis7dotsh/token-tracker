@@ -5,14 +5,15 @@ export const filterKeys = ['harnesses', 'providers', 'models', 'devices', 'proje
 export const breakdownGroups = ['harnesses', 'models', 'providers', 'devices', 'projects'] as const;
 export const chartGroups = ['harnesses', 'providers', 'models', 'projects'] as const;
 export type ChartGrouping = (typeof chartGroups)[number];
-const rangeValues = ['6m', '30d', '7d', 'today'] as const;
+const rangeValues = ['today', '7d', '30d', '90d', '6m'] as const;
 export type DashboardRange = (typeof rangeValues)[number];
 export const defaultDashboardRange: DashboardRange = '7d';
 export const dashboardRanges = [
+  { value: 'today', label: 'Today' },
+  { value: '7d', label: '7 days' },
+  { value: '30d', label: '30 days' },
+  { value: '90d', label: '90 days' },
   { value: '6m', label: '6 months' },
-  { value: '30d', label: '1 month' },
-  { value: '7d', label: '1 week' },
-  { value: 'today', label: '1 day' },
 ] as const satisfies readonly { value: DashboardRange; label: string }[];
 
 const literal = <const Value extends string>(value: unknown, values: readonly Value[], fallback: Value) =>
@@ -76,7 +77,6 @@ const validateDashboardParams = (input: unknown, range: DashboardRange = default
     projects: text(field('projects')),
     excludedProjects: text(field('excludedProjects')),
     metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
-    chart: literal(field('chart'), ['bar', 'line'], 'bar'),
     breakdown: literal(field('breakdown'), breakdownGroups, 'models'),
     chartBy: literal(field('chartBy'), chartGroups, 'models'),
     expanded: field('expanded') === true,
@@ -164,7 +164,6 @@ export const normalizedDashboardParams = (params: DashboardUrlState) => ({
   // let a reload fall back to the stored hidden list.
   excludedProjects: params.excludedProjects === 'none' ? 'none' : encodeHidden(decodeHidden(params.excludedProjects)),
   metric: params.metric,
-  chart: params.chart,
   breakdown: params.breakdown,
   chartBy: params.chartBy,
   expanded: params.expanded,

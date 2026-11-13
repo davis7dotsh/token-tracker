@@ -20,9 +20,9 @@ bun run build
 HOST=127.0.0.1 PORT=8787 bun run start
 ```
 
-The dashboard at `/` stacks usage by model. Open **Compare** (`/?view=compare`) for trends on a shared or per-series scale. Both views can split by model, device, project, provider, or harness. Hover a time bucket to see every series, click one to inspect it, then choose **Include** or **Only** to filter. Touch and keyboard users can open the same list without hovering.
+The dashboard at `/` is one view: headline totals against the previous period, a trend chart coloured by model, device, project, provider, or harness, a breakdown of all five, and sessions. Hover a time bucket to see every series; click one to select it and re-scope the breakdown to that bucket while the chart stays put. Click a breakdown row to filter by it, or open the filter palette with Ctrl/⌘ K. Sessions always cover the whole range.
 
-The URL keeps the selected view, range, split, filters, metric, and session page. Bookmarked `/usage` links redirect to the same view at `/`. Switch between six months, 30 days, seven days, and today; today shows hourly buckets in the browser’s timezone. Export the filtered sessions as CSV or visit **Settings → Data** for source diagnostics.
+The URL keeps the range, colour, filters, metric, selected bucket, and session page. Bookmarked `/usage` links redirect to the same view at `/`. Switch between today, seven, 30, and 90 days, and six months; today shows hourly buckets in the browser’s timezone, and 90 days and six months show Monday-aligned weeks. Export the filtered sessions as CSV or visit **Settings → Data** for source diagnostics.
 
 The theme defaults to System, with persistent Light and Dark overrides. Initial loading, refreshes, empty results, and connection failures have separate states; existing results remain visible during refreshes.
 
@@ -312,7 +312,7 @@ bun run bench https://tracker.example.ts.net:10007 30d 9 page # workbench: first
 bun run bench https://tracker.example.ts.net:10007 30d 9 full # legacy clients and full CSV data
 ```
 
-Overview and Compare reuse results for the same scope. Session pages are live: an upload between reads can shift rows; CSV export uses one full result. Within the workbench, recently viewed pages are reused for up to a minute (eight pages, 8 MiB estimated response budget); **Refresh** bypasses that cache. SQLite reuses decoded UTC days across overlapping reads, and an upload invalidates both the old and new days of a moved record. Dense hours reuse session rollups; hours crossing a filter’s time boundary use the underlying events.
+Changing the metric, colour, or selected bucket reuses results for the same scope. Session pages are live: an upload between reads can shift rows; CSV export uses one full result. Within the workbench, recently viewed pages are reused for up to a minute (eight pages, 8 MiB estimated response budget); **Refresh** bypasses that cache. SQLite reuses decoded UTC days across overlapping reads, and an upload invalidates both the old and new days of a moved record. Dense hours reuse session rollups; hours crossing a filter’s time boundary use the underlying events.
 
 On a self-hosted hub, `dashboard-view.json` in the data directory stores only the last short range (today, 7 or 30 days) and timezone. The next hub startup can prepare that view in the background. Upload bursts also precompute a recently viewed short range after the writes settle. Neither path makes a reader wait for speculative work to start; a cold query still calculates the current result. Removing the hint is safe.
 
