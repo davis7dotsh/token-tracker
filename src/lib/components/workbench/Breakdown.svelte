@@ -397,6 +397,7 @@
     color: var(--wb-muted);
   }
   .share {
+    transition: width 0.45s cubic-bezier(0.33, 1, 0.68, 1);
     position: absolute;
     bottom: -3px;
     left: 0;
@@ -454,6 +455,7 @@
     border-radius: 2px;
   }
   .slice {
+    transition: width 0.45s cubic-bezier(0.33, 1, 0.68, 1);
     height: 100%;
     position: relative;
   }

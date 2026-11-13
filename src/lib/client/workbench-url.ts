@@ -29,6 +29,7 @@ const validate = (input: object) => {
     chartBy: literal(field('chartBy'), groups, ''),
     breakdown: literal(field('breakdown'), groups, ''),
     metric: literal(field('metric'), ['tokens', 'cost'], 'tokens'),
+    chart: literal(field('chart'), ['bar', 'line'], 'bar'),
     sort: literal(field('sort'), sessionSortKeys, 'active'),
     order: literal(field('order'), ['asc', 'desc'], 'desc'),
     page: Number.isSafeInteger(page) && page >= 1 ? page : 1,

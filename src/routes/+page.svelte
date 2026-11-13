@@ -419,6 +419,8 @@
               selected={day}
               onselect={selectDay}
               setGroup={(g) => set(splitTo(g), true)}
+              chart={params.chart}
+              setChart={(chart) => set({ chart })}
             />
           </div>
         {:else if !error}<div class="wb-loading" role="status">Reading tracker usage…</div>{/if}
