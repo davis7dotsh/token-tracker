@@ -32,7 +32,6 @@ describe('dashboard URL state', () => {
         'excludedProjects',
         'range',
         'metric',
-        'chart',
         'breakdown',
         'chartBy',
         'expanded',
@@ -44,7 +43,6 @@ describe('dashboard URL state', () => {
     expect(defaults).toMatchObject({
       range: '7d',
       metric: 'tokens',
-      chart: 'bar',
       breakdown: 'models',
       chartBy: 'models',
       expanded: false,
@@ -106,6 +104,7 @@ describe('dashboard URL state', () => {
     expect(read({})).toBe(value);
     expect(read({ range: '30d' })).toBe('30d');
     expect(read({ range: 'today' })).toBe('today');
+    expect(read({ range: '90d' })).toBe('90d');
     expect(read({ range: 'invalid' })).toBe(value);
     expect(validate({}).range).toBe('7d');
   });
@@ -166,7 +165,6 @@ describe('dashboard URL state', () => {
   test('invalid controls default individually and retain valid filters and search', () => {
     const state = validate({
       range: 'year',
-      chart: 'pie',
       metric: 'money',
       breakdown: 'unknown',
       chartBy: 'devices',
@@ -179,7 +177,6 @@ describe('dashboard URL state', () => {
     });
     expect(state).toMatchObject({
       range: '7d',
-      chart: 'bar',
       metric: 'tokens',
       breakdown: 'models',
       chartBy: 'models',
@@ -209,7 +206,6 @@ describe('dashboard URL state', () => {
         page: 3,
         expanded: true,
         metric: 'cost',
-        chart: 'line',
         chartBy: 'models',
         breakdown: 'projects',
         sort: 'tokens',
@@ -218,7 +214,6 @@ describe('dashboard URL state', () => {
       page: 3,
       expanded: true,
       metric: 'cost',
-      chart: 'line',
       chartBy: 'models',
       breakdown: 'projects',
       sort: 'tokens',
@@ -241,7 +236,6 @@ describe('dashboard URL state', () => {
     const next = validate({
       ...state,
       metric: 'cost',
-      chart: 'line',
       breakdown: 'projects',
       chartBy: 'models',
       expanded: true,
@@ -266,7 +260,6 @@ describe('dashboard URL state', () => {
       search: '{"x": 1}',
       page: 3,
       expanded: true,
-      chart: 'line',
     });
     const normalized = normalizedDashboardParams(original);
     expect(usageQueryFromParams(normalized, 'UTC')).toEqual(usageQueryFromParams(original, 'UTC'));
@@ -278,7 +271,6 @@ describe('dashboard URL state', () => {
       search: '{"x": 1}',
       page: 3,
       expanded: true,
-      chart: 'line',
     });
   });
 });
