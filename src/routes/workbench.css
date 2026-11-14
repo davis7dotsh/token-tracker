@@ -543,21 +543,16 @@
     width: 100%;
     margin-block: 3px 6px;
   }
-  .wb-results,
-  .target-options {
+  .wb-results {
     overflow: auto;
     overscroll-behavior: contain;
-    max-height: min(350px, 42dvh);
-    scrollbar-width: thin;
-  }
-  .wb-results {
     height: min(350px, 42dvh);
+    scrollbar-width: thin;
   }
   .more-options {
     min-height: 32px;
   }
-  .group-label,
-  .field-label {
+  .group-label {
     font-size: 12px;
     color: var(--wb-muted);
   }
@@ -596,58 +591,12 @@
     max-height: 74px;
     overflow: auto;
   }
-  .draft-chips button,
-  .wb-note {
+  .draft-chips button {
     font-size: 12px;
     color: var(--wb-accent);
   }
   .draft-chips button {
     min-height: 28px;
-  }
-  .inspect-value {
-    display: grid;
-    gap: 4px;
-    margin: 6px 0 13px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--wb-line);
-  }
-  .inspect-value strong {
-    font-size: 30px;
-    letter-spacing: -0.045em;
-    font-weight: 560;
-  }
-  .inspect-value span {
-    color: var(--wb-muted);
-    font-size: 12px;
-  }
-  .wb-dialog .target-button {
-    display: flex;
-    text-align: left;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-    min-height: 39px;
-    border-bottom: 1px solid var(--wb-line);
-    gap: 8px;
-    overflow-wrap: anywhere;
-  }
-  .target-options button {
-    text-align: left;
-    display: block;
-    width: 100%;
-    min-height: 32px;
-    overflow-wrap: anywhere;
-  }
-  .target-options button span {
-    font-size: 11px;
-    color: var(--wb-muted);
-  }
-  .target-options button:hover,
-  .target-options [aria-pressed='true'] {
-    color: var(--wb-accent);
-  }
-  .wb-note {
-    padding-top: 8px;
   }
 
   @container pane (max-width: 640px) {
@@ -745,14 +694,6 @@
     }
     .mast-tools {
       gap: 0;
-    }
-    .wb-dialog.inspector {
-      position: fixed;
-      inset: auto 0 0;
-      margin: 0 auto;
-      width: min(460px, 100%);
-      border-radius: 8px 8px 0 0;
-      padding-bottom: max(18px, env(safe-area-inset-bottom));
     }
     .filter-tabs {
       overflow: auto;
