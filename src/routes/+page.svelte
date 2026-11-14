@@ -282,7 +282,7 @@
     if (overlay) close();
     set({ ...Object.fromEntries(groups.map((g) => [g, encodeFilter(next[g])])), page: 1 }, true);
   }
-  // A session cell narrows to its value; clicking the sole filter again clears it.
+  // A session cell or breakdown row narrows to its value; clicking the sole filter again clears it.
   function only(g: Group, v: string) {
     const sole = filters[g]?.length === 1 && filters[g][0] === v;
     apply({ ...filters, [g]: sole ? undefined : [v] });
@@ -429,7 +429,7 @@
             colors={chartColors}
             {label}
             {filters}
-            {toggle}
+            toggle={only}
             openAll={(g) => palette(g)}
             onselect={selectDay}
           />
