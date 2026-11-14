@@ -37,11 +37,10 @@
     timeBuckets,
     type Group,
     type Metric,
-    type Picked,
   } from '#lib/client/usage-workbench';
   import { sessionPageSize as perPage } from '#lib/shared/dashboard-page';
   import type { DashboardPage, UsageQuery, Device, SessionSort } from '#lib/shared/domain';
-  import { defaultSessionSort, initialOrder, isDefaultSessionSort } from '#lib/shared/session-sort';
+  import { initialOrder, isDefaultSessionSort } from '#lib/shared/session-sort';
   import Icon from '#lib/components/Icon.svelte';
   import Trend from '#lib/components/workbench/Trend.svelte';
   import Breakdown from '#lib/components/workbench/Breakdown.svelte';
@@ -97,7 +96,7 @@
   let generation = 0;
   let prefetch: { key: string; stop: AbortController; result: Promise<DashboardPage> } | undefined;
   let request: AbortController | undefined;
-  let overlay = $state.raw<{ picked?: Picked; group?: Group }>();
+  let overlay = $state.raw<{ group?: Group }>();
   let returnTo: HTMLElement | undefined;
   const active = $derived(groups.flatMap((g) => (filters[g] ?? []).map((v) => ({ g, v }))));
   const projects = $derived(projectLabels(data?.filters.projects ?? []));
@@ -272,10 +271,6 @@
     returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     overlay = { group: g };
   }
-  function inspect(pick: Picked) {
-    returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    overlay = { picked: pick };
-  }
   function close() {
     overlay = undefined;
     void tick().then(() => {
@@ -283,13 +278,14 @@
       else document.querySelector<HTMLElement>('.scope-trigger')?.focus({ preventScroll: true });
     });
   }
-  // The inspector's "Only this" also recolours the chart by its suggested group.
-  function apply(next: Pick<UsageQuery, Group>, split?: Group) {
+  function apply(next: Pick<UsageQuery, Group>) {
     if (overlay) close();
-    set(
-      { ...Object.fromEntries(groups.map((g) => [g, encodeFilter(next[g])])), ...(split && splitTo(split)), page: 1 },
-      true,
-    );
+    set({ ...Object.fromEntries(groups.map((g) => [g, encodeFilter(next[g])])), page: 1 }, true);
+  }
+  // A session cell narrows to its value; clicking the sole filter again clears it.
+  function only(g: Group, v: string) {
+    const sole = filters[g]?.length === 1 && filters[g][0] === v;
+    apply({ ...filters, [g]: sole ? undefined : [v] });
   }
   function sortBy(by: SessionSort['by']) {
     const order = sort.by === by ? (sort.order === 'asc' ? 'desc' : 'asc') : initialOrder(by);
@@ -488,7 +484,7 @@
                 nativeThreadUrl(s) ?? safeWebUrl(s.t3ThreadUrl) ?? cursorAgentUrl(s)}<tr
                 ><td
                   ><div>
-                    <button title={project} onclick={() => inspect({ group: 'projects', name: project })}
+                    <button title={project} onclick={() => only('projects', project)}
                       >{label('projects', project)}</button
                     >{#if dest}<a aria-label={`Open ${sessionDisplayName(s)}`} href={dest} title={sessionDisplayName(s)}
                         ><Icon name="external" size={12} /></a
@@ -497,13 +493,10 @@
                 ><td
                   >{#if d.filters.models.includes(s.model)}<button
                       title={s.model}
-                      onclick={() => inspect({ group: 'models', name: s.model })}>{modelLabel(s.model)}</button
+                      onclick={() => only('models', s.model)}>{modelLabel(s.model)}</button
                     >{:else}<span title={s.model}>{s.model}</span>{/if}</td
-                ><td
-                  ><button onclick={() => inspect({ group: 'devices', name: s.deviceId })}
-                    >{label('devices', s.deviceId)}</button
-                  ></td
-                ><td title={`Started ${sessionDate.format(new Date(s.startedAt))}`}
+                ><td><button onclick={() => only('devices', s.deviceId)}>{label('devices', s.deviceId)}</button></td><td
+                  title={`Started ${sessionDate.format(new Date(s.startedAt))}`}
                   >{sessionDate.format(new Date(s.lastActiveAt))}</td
                 ><td>{valueOf(s, 'costUSD')}</td><td>{formatValue(s.tokens, 'tokens')}</td></tr
               >{:else}<tr><td colspan="6">No matching sessions.</td></tr
@@ -519,12 +512,9 @@
   {#if overlay && data && client}<ScopeDialog
       {data}
       {query}
-      {metric}
-      readContext={(q, signal) => readPage(q, 1, signal, defaultSessionSort)}
       {label}
       {apply}
       {close}
-      picked={overlay.picked}
       initialGroup={overlay.group}
     />{/if}
 </div>

@@ -11,7 +11,6 @@ export const groupNames = {
   providers: 'Provider',
   harnesses: 'Harness',
 };
-export type Picked = { group: Group; name: string; bucket?: number };
 export const rangeFrom = (v: string | null, fallback: DashboardRange) =>
   dashboardRanges.find((r) => r.value === v)?.value ?? fallback;
 const short = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 2 });
@@ -99,7 +98,7 @@ function buildBuckets(data: DashboardResponse, group: Group) {
   }
   return buckets;
 }
-// A response is immutable; metric, scale, view and inspector changes reuse the
+// A response is immutable; metric and chart changes reuse the
 // same series buckets. Evicting the response also releases its derived charts.
 const byResponse = new WeakMap<DashboardResponse, Map<Group, ReturnType<typeof buildBuckets>>>();
 export function timeBuckets(data: DashboardResponse, group: Group) {
