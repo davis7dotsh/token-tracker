@@ -237,6 +237,9 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
                 pricingUpdatedAt,
               });
               changed += ack.accepted + ack.updated + ack.deleted;
+              // bun:sqlite blocks the event loop: leave room for page loads
+              // between write transactions, which matters on a busy disk.
+              yield* Effect.sleep('100 millis');
             }
           return { rows: rows.length, stored: rows.length - withdrawn.length, changed };
         });
@@ -282,6 +285,9 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             rows.reduce((max, row) => (row.latest > max ? row.latest : max), fallback);
           const seen = before?.sessionsSeen || latest(yield* client.changedSessions('1970-01-01 00:00:00'), '');
           const recent = yield* pull();
+          // New usage first: warm the last view before the slower re-reads of
+          // older sessions, whose days that view usually does not include.
+          if (recent.changed) yield* refreshed;
           const touched = yield* client.changedSessions(seen);
           const stale = touched.filter((session) => known.get(session.session_key) !== sessionFields(session));
           const late = stale.length
@@ -301,7 +307,7 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
                 ? `; ${stale.length} of ${touched.length} sessions updated, ${late.rows} rows (${late.changed} changes)`
                 : ''),
           );
-          if (recent.changed || late?.changed) yield* refreshed;
+          if (late?.changed) yield* refreshed;
         });
         yield* cycle.pipe(
           Effect.catch((error) => Effect.logWarning(`Trace source: ${error.message}`)),
