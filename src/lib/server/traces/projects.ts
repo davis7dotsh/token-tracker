@@ -16,7 +16,13 @@ const mostCommon = (counts: Map<string, Map<string, number>>) =>
   new Map(
     [...counts].map(([key, values]) => [
       key,
-      [...values].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0],
+      // A remote outranks a local identity Git reported for the same folder.
+      [...values].sort(
+        (a, b) =>
+          Number(a[0].startsWith('local:')) - Number(b[0].startsWith('local:')) ||
+          b[1] - a[1] ||
+          a[0].localeCompare(b[0]),
+      )[0][0],
     ]),
   );
 const count = (counts: Map<string, Map<string, number>>, key: string, repository: string) => {
@@ -45,7 +51,8 @@ export const makeProjectResolver = (pairs: readonly ProjectPath[]) => {
   const machinePaths = mostCommon(byMachine);
   const paths = mostCommon(byPath);
   const t3 = mostCommon(byT3);
-  const roots = [...paths.keys()].sort((a, b) => b.length - a.length);
+  // Enclosing folders only on the same machine: Git walks up that machine's tree.
+  const roots = [...machinePaths.keys()].sort((a, b) => b.length - a.length);
   const memo = new Map<string, string | null>();
   return (machine: string, cwd: string, reported: string) => {
     const remote = reported.trim() ? canonicalRepository(reported) : null;
@@ -58,8 +65,8 @@ export const makeProjectResolver = (pairs: readonly ProjectPath[]) => {
     const project = t3Project(path);
     const enclosing = () => {
       if (isScratch(path)) return undefined;
-      const root = roots.find((candidate) => path.startsWith(`${candidate}/`));
-      return root === undefined ? undefined : paths.get(root);
+      const root = roots.find((candidate) => key.startsWith(`${candidate}/`));
+      return root === undefined ? undefined : machinePaths.get(root);
     };
     const repository =
       machinePaths.get(key) ?? paths.get(path) ?? (project ? t3.get(project) : undefined) ?? enclosing() ?? null;

@@ -70,6 +70,9 @@ test('only the six harnesses, successful calls with tokens, and calls since the 
   expect(traceEvent({ ...row, harness: 'gemini' }, resolve, bundledPolicy, since)).toBeUndefined();
   expect(traceEvent({ ...row, harness: 'tx9' }, resolve, bundledPolicy, since)).toBeUndefined();
   expect(traceEvent({ ...row, failed: true }, resolve, bundledPolicy, since)).toBeUndefined();
+  expect(
+    traceEvent({ ...row, harness: 'grok', machine: 'conflux/tx9-box' }, resolve, bundledPolicy, since),
+  ).toBeUndefined();
   const empty = {
     input_tokens: 0,
     output_tokens: 0,
@@ -93,7 +96,8 @@ test('sessions follow collector conventions for subagents', () => {
 test('projects resolve like a collector: reported remote, folder, T3 project, enclosing folder, else none', () => {
   expect(resolve('siva', '/x', 'git@github.com:pingdotgg/T3Code.git')).toBe('github.com/pingdotgg/t3code');
   expect(resolve('enceladus', '/home/davis/dev/app', '')).toBe('github.com/ben/app');
-  expect(resolve('helm', '/home/davis/dev/app/packages/web', '')).toBe('github.com/ben/app');
+  expect(resolve('enceladus', '/home/davis/dev/app/packages/web', '')).toBe('github.com/ben/app');
+  expect(resolve('helm', '/home/davis/dev/app/packages/web', '')).toBeNull();
   expect(resolve('servitor', '/Users/davis/.t3/worktrees/my-token-tracker/t3-2', '')).toBe(
     'github.com/davis7dotsh/token-tracker',
   );

@@ -64,6 +64,7 @@ export type TraceEvent = { readonly machine: string; readonly platform: string; 
 // The tracker's six harnesses only: adding a category is a compatibility event
 // for every collector, so traces from other clients stay out (see README).
 // Failed and empty calls are not accounting records either, as with collectors.
+// Containers on the proxy host are bots, which collectors never counted.
 // `undefined` means the row must not be stored (and is withdrawn if it was).
 export const traceEvent = (
   row: TraceRow,
@@ -72,7 +73,10 @@ export const traceEvent = (
   since: string,
 ): TraceEvent | undefined => {
   const timestamp = traceTimestamp(row.requested_at);
-  if (!timestamp || timestamp < since || row.failed || !isHarness(row.harness)) return undefined;
+  // The index names containers on the proxy host '<host>/<container>': bots
+  // such as the tx9 agents, not fleet machines with collectors.
+  const container = row.machine.includes('/');
+  if (!timestamp || timestamp < since || row.failed || container || !isHarness(row.harness)) return undefined;
   const cwd = row.cwd.trim();
   const subagentOfClaude = row.harness === 'claude' && row.session_key.includes(':agent:');
   const base: UsageEvent = {
