@@ -68,6 +68,7 @@ const sessionFields = (row: { harness: string; machine: string; cwd: string; rep
 const ChangedSession = Schema.Struct({
   session_key: Schema.String,
   first: Schema.String,
+  last: Schema.String,
   latest: Schema.String,
   harness: Schema.String,
   machine: Schema.String,
@@ -140,7 +141,8 @@ export const makeTraceClient = (config: TraceSourceConfig) => {
   // a folder, repository or title they lacked when first pulled.
   const changedSessions = (seen: string) =>
     query(
-      `SELECT session_key, toString(min(first_seen)) AS first, toString(max(updated_at)) AS latest,
+      `SELECT session_key, toString(min(first_seen)) AS first, toString(max(last_seen)) AS last,
+         toString(max(updated_at)) AS latest,
          argMax(harness, updated_at) AS harness, argMax(machine, updated_at) AS machine, argMax(cwd, updated_at) AS cwd,
          argMax(repository, updated_at) AS repository, argMax(title, updated_at) AS title
        FROM traces.sessions WHERE updated_at > {seen:DateTime64(3, 'UTC')} GROUP BY session_key`,
@@ -239,15 +241,20 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
           return { rows: rows.length, stored: rows.length - withdrawn.length, changed };
         });
 
-        const pull = Effect.fn('traces.pull')(function* (sessions?: { keys: readonly string[]; first: string }) {
+        const pull = Effect.fn('traces.pull')(function* (sessions?: {
+          keys: readonly string[];
+          first: string;
+          last: string;
+        }) {
           const now = yield* Clock.currentTimeMillis;
           const state = sessions === undefined ? yield* readState(config.stateFile) : undefined;
           const from = sessions
             ? Math.max(Date.parse(config.since), Date.parse(`${sessions.first.replace(' ', 'T')}Z`) - 3_600_000)
             : Math.max(Date.parse(config.since), state ? Date.parse(state.watermark) - overlapMs : -Infinity);
           const totals = { rows: 0, stored: 0, changed: 0 };
-          for (let start = from; start < now; start += windowMs) {
-            const until = Math.min(start + windowMs, now + 3_600_000);
+          const end = sessions ? Math.min(now, Date.parse(`${sessions.last.replace(' ', 'T')}Z`) + 3_600_000) : now;
+          for (let start = from; start < end; start += windowMs) {
+            const until = Math.min(start + windowMs, end + 3_600_000);
             const rows = yield* client.events(
               { since: new Date(start).toISOString(), until: new Date(until).toISOString() },
               sessions?.keys,
@@ -268,6 +275,7 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
         });
 
         const cycle = Effect.gen(function* () {
+          const started = yield* Clock.currentTimeMillis;
           const before = yield* readState(config.stateFile);
           // A fresh hub's first pull already sees today's session metadata.
           const latest = (rows: readonly { latest: string }[], fallback: string) =>
@@ -280,13 +288,15 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             ? yield* pull({
                 keys: stale.map((session) => session.session_key),
                 first: stale.reduce((min, session) => (session.first < min ? session.first : min), stale[0].first),
+                last: stale.reduce((max, session) => (session.last > max ? session.last : max), stale[0].last),
               })
             : undefined;
           for (const session of stale) known.set(session.session_key, sessionFields(session));
           const after = yield* readState(config.stateFile);
           if (after) yield* writeState(config.stateFile, { ...after, sessionsSeen: latest(touched, seen) });
+          const seconds = ((yield* Clock.currentTimeMillis) - started) / 1000;
           yield* Effect.logInfo(
-            `Trace source: ${recent.rows} rows (${recent.changed} changes)` +
+            `Trace source (${seconds.toFixed(1)} s): ${recent.rows} rows (${recent.changed} changes)` +
               (late
                 ? `; ${stale.length} of ${touched.length} sessions updated, ${late.rows} rows (${late.changed} changes)`
                 : ''),
