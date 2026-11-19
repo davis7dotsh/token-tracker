@@ -109,6 +109,24 @@ const preserveRepository = (incoming: UsageEvent, previous?: UsageEvent) =>
   (!incoming.repository || incoming.repository.startsWith('local:'))
     ? previous.repository
     : incoming.repository;
+const storedPayload = (
+  event: UsageEvent,
+  previous: UsageEvent | undefined,
+  deviceId: string,
+  pricingSnapshot: string,
+) => {
+  const normalized = {
+    ...preserveSessionMetadata(event, previous),
+    ...event,
+    // A missing optional T3 binding is not evidence that an attached
+    // remote was removed. Explicit bindings and cwd remotes still win.
+    repository: preserveRepository(event, previous),
+    deviceId,
+    costUsd: event.costKnown ? event.costUsd : 0,
+  };
+  const payload = JSON.stringify(normalized);
+  return { normalized, payload, payloadHash: digest(JSON.stringify([pricingSnapshot, payload])) };
+};
 const UsageDimension = Schema.Struct({
   deviceId: Schema.String,
   harness: Harness,
@@ -494,17 +512,12 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             // A source backup can be older than corrections already synced
             // by collectors. Imports only fill missing record IDs.
             if (previous && 'pairingSecret' in authorization) continue;
-            const normalized = {
-              ...preserveSessionMetadata(event, previous?.event),
-              ...event,
-              // A missing optional T3 binding is not evidence that an attached
-              // remote was removed. Explicit bindings and cwd remotes still win.
-              repository: preserveRepository(event, previous?.event),
+            const { normalized, payload, payloadHash } = storedPayload(
+              event,
+              previous?.event,
               deviceId,
-              costUsd: event.costKnown ? event.costUsd : 0,
-            };
-            const payload = JSON.stringify(normalized);
-            const payloadHash = digest(JSON.stringify([pricingSnapshot, payload]));
+              pricingSnapshot,
+            );
             if (previous?.hash === payloadHash) continue;
             const timestamp = new Date(event.timestamp).toISOString();
             changedDays.add(utcDay(timestamp));
@@ -752,6 +765,32 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       };
     });
 
+    // A trace pull re-reads hours of rows it already stored. Compare their
+    // stored hashes with one read, outside any write transaction, so dashboard
+    // reads are never queued behind rewrites that would not change anything.
+    const ingestTraces = Effect.fn('UsageStore.ingestTraces')(function* (batch: SyncBatch) {
+      const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
+      const stored = batch.events.length
+        ? yield* sql
+            .unsafe<{ device_id: string; id: string; payload_hash: string }>(
+              'SELECT device_id, id, payload_hash FROM usage_events WHERE id IN (SELECT value FROM json_each(?))',
+              [JSON.stringify(batch.events.map((event) => event.id))],
+            )
+            .pipe(Effect.mapError(storageFailure))
+        : [];
+      const hashes = new Map(stored.map((row) => [row.id, row]));
+      const events = batch.events.filter((event) => {
+        const row = hashes.get(event.id);
+        return (
+          row?.device_id !== batch.device.id ||
+          row.payload_hash !== storedPayload(event, undefined, batch.device.id, pricingSnapshot).payloadHash
+        );
+      });
+      if (!events.length && !batch.deletedIds?.length)
+        return { accepted: 0, updated: 0, deleted: 0, receivedAt: new Date().toISOString() };
+      return yield* writeUsageBatch(batch.device.id, { ...batch, events }, { traces: true });
+    });
+
     // Trace records that no longer qualify (another harness, failed) leave
     // whichever device holds them. Unknown IDs are a no-op and keep caches.
     const withdrawTraces = Effect.fn('UsageStore.withdrawTraces')(function* (ids: readonly string[]) {
@@ -870,7 +909,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       syncUsage: (deviceId: string, token: string, batch: SyncBatch) => writeUsageBatch(deviceId, batch, { token }),
       importUsage: (pairingSecret: string, batch: SyncBatch) =>
         writeUsageBatch(batch.device.id, batch, { pairingSecret }),
-      ingestTraces: (batch: SyncBatch) => writeUsageBatch(batch.device.id, batch, { traces: true }),
+      ingestTraces,
       withdrawTraces,
       getProjectPaths,
       getUsage,

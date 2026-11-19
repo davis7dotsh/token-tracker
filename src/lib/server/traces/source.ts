@@ -51,20 +51,35 @@ export const traceSourceConfig = (dataDirectory: string, env: NodeJS.ProcessEnv 
 const overlapMs = 2 * 3_600_000;
 // ClickHouse caps reader queries at 60 s; a day of heavy use reads in about one.
 const windowMs = 86_400_000;
-const eventsPerBatch = 5_000;
+// Short write transactions let dashboard reads interleave with a large pull.
+const eventsPerBatch = 1_000;
 
 const columns = `id, toString(toDateTime64(requested_at, 3)) AS requested_at, session_key, harness, machine, machine_os,
   cwd, repository, title, is_subagent, toString(session_updated_at) AS session_updated_at, model, service_tier, failed,
   input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, reasoning_tokens`;
-const eventsQuery = (sessionFilter: boolean) => `SELECT ${columns}
+const literal = (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+const eventsQuery = (sessions?: readonly string[]) => `SELECT ${columns}
   FROM traces.v_usage_events(since = {since:DateTime64(3, 'UTC')}, until = {until:DateTime64(3, 'UTC')})
-  ${sessionFilter ? `WHERE session_key IN (SELECT session_key FROM traces.sessions WHERE updated_at > {seen:DateTime64(3, 'UTC')} AND updated_at <= {latest:DateTime64(3, 'UTC')})` : ''}`;
-const SessionProbe = Schema.Struct({ changed: Schema.Number, first: Schema.String, latest: Schema.String });
+  ${sessions ? `WHERE session_key IN (${sessions.map(literal).join(', ') || "''"})` : ''}`;
+// What a session contributes to its rows. The index rewrites active sessions
+// every minute; only a change here makes their stored rows stale.
+const sessionFields = (row: { harness: string; machine: string; cwd: string; repository: string; title: string }) =>
+  [row.harness, row.machine, row.cwd, row.repository, row.title].join('\0');
+const ChangedSession = Schema.Struct({
+  session_key: Schema.String,
+  first: Schema.String,
+  latest: Schema.String,
+  harness: Schema.String,
+  machine: Schema.String,
+  cwd: Schema.String,
+  repository: Schema.String,
+  title: Schema.String,
+});
 const State = Schema.Struct({ watermark: Schema.String, sessionsSeen: Schema.String });
 type State = typeof State.Type;
 const decodeState = Schema.decodeUnknownSync(Schema.fromJsonString(State));
 const decodeRow = Schema.decodeUnknownEffect(TraceRow);
-const decodeProbe = Schema.decodeUnknownEffect(SessionProbe);
+const decodeSessions = Schema.decodeUnknownEffect(Schema.Array(ChangedSession));
 const decodePaths = Schema.decodeUnknownSync(
   Schema.fromJsonString(
     Schema.Array(
@@ -114,12 +129,8 @@ export const makeTraceClient = (config: TraceSourceConfig) => {
       catch: failure('The trace store returned invalid JSON.'),
     });
   });
-  const events = (window: { since: string; until: string }, sessions?: { seen: string; latest: string }) =>
-    query(eventsQuery(sessions !== undefined), {
-      since: clickhouseTime(window.since),
-      until: clickhouseTime(window.until),
-      ...(sessions ? { seen: sessions.seen, latest: sessions.latest } : {}),
-    }).pipe(
+  const events = (window: { since: string; until: string }, sessions?: readonly string[]) =>
+    query(eventsQuery(sessions), { since: clickhouseTime(window.since), until: clickhouseTime(window.until) }).pipe(
       Effect.flatMap((rows) => Effect.forEach(rows, (row) => decodeRow(row))),
       Effect.mapError((error) =>
         error instanceof TraceSourceError ? error : new TraceSourceError({ message: 'Unexpected trace row shape.' }),
@@ -129,11 +140,13 @@ export const makeTraceClient = (config: TraceSourceConfig) => {
   // a folder, repository or title they lacked when first pulled.
   const changedSessions = (seen: string) =>
     query(
-      `SELECT count() AS changed, toString(min(first_seen)) AS first, toString(max(updated_at)) AS latest
-       FROM traces.sessions WHERE updated_at > {seen:DateTime64(3, 'UTC')}`,
+      `SELECT session_key, toString(min(first_seen)) AS first, toString(max(updated_at)) AS latest,
+         argMax(harness, updated_at) AS harness, argMax(machine, updated_at) AS machine, argMax(cwd, updated_at) AS cwd,
+         argMax(repository, updated_at) AS repository, argMax(title, updated_at) AS title
+       FROM traces.sessions WHERE updated_at > {seen:DateTime64(3, 'UTC')} GROUP BY session_key`,
       { seen },
     ).pipe(
-      Effect.flatMap((rows) => decodeProbe(rows[0])),
+      Effect.flatMap((rows) => decodeSessions(rows)),
       Effect.mapError((error) =>
         error instanceof TraceSourceError ? error : new TraceSourceError({ message: 'Unexpected session probe.' }),
       ),
@@ -191,6 +204,9 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             )
           : [];
         const repository = makeProjectResolver([...learned, ...exported]);
+        // Session fields as last stored, so a session rewrite with nothing new
+        // does not re-read its rows. Empty after a restart: re-read once.
+        const known = new Map<string, string>();
 
         const save = Effect.fn('traces.save')(function* (rows: readonly TraceRow[]) {
           const { policy } = yield* pricing.load;
@@ -199,6 +215,7 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
           const byDevice = new Map<string, { device: DeviceRegistration; events: UsageEvent[] }>();
           const withdrawn: string[] = [];
           for (const row of rows) {
+            if (row.session_updated_at > '1970-01-02') known.set(row.session_key, sessionFields(row));
             const mapped = traceEvent(row, repository, policy, config.since);
             if (!mapped) {
               withdrawn.push(row.id);
@@ -222,7 +239,7 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
           return { rows: rows.length, stored: rows.length - withdrawn.length, changed };
         });
 
-        const pull = Effect.fn('traces.pull')(function* (sessions?: { seen: string; latest: string; first: string }) {
+        const pull = Effect.fn('traces.pull')(function* (sessions?: { keys: readonly string[]; first: string }) {
           const now = yield* Clock.currentTimeMillis;
           const state = sessions === undefined ? yield* readState(config.stateFile) : undefined;
           const from = sessions
@@ -233,7 +250,7 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             const until = Math.min(start + windowMs, now + 3_600_000);
             const rows = yield* client.events(
               { since: new Date(start).toISOString(), until: new Date(until).toISOString() },
-              sessions,
+              sessions?.keys,
             );
             const result = yield* save(rows);
             totals.rows += result.rows;
@@ -253,16 +270,26 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
         const cycle = Effect.gen(function* () {
           const before = yield* readState(config.stateFile);
           // A fresh hub's first pull already sees today's session metadata.
-          const seen = before?.sessionsSeen || (yield* client.changedSessions('1970-01-01 00:00:00')).latest;
+          const latest = (rows: readonly { latest: string }[], fallback: string) =>
+            rows.reduce((max, row) => (row.latest > max ? row.latest : max), fallback);
+          const seen = before?.sessionsSeen || latest(yield* client.changedSessions('1970-01-01 00:00:00'), '');
           const recent = yield* pull();
-          const probe = yield* client.changedSessions(seen);
-          const late = probe.changed ? yield* pull({ seen, latest: probe.latest, first: probe.first }) : undefined;
+          const touched = yield* client.changedSessions(seen);
+          const stale = touched.filter((session) => known.get(session.session_key) !== sessionFields(session));
+          const late = stale.length
+            ? yield* pull({
+                keys: stale.map((session) => session.session_key),
+                first: stale.reduce((min, session) => (session.first < min ? session.first : min), stale[0].first),
+              })
+            : undefined;
+          for (const session of stale) known.set(session.session_key, sessionFields(session));
           const after = yield* readState(config.stateFile);
-          if (after)
-            yield* writeState(config.stateFile, { ...after, sessionsSeen: probe.changed ? probe.latest : seen });
+          if (after) yield* writeState(config.stateFile, { ...after, sessionsSeen: latest(touched, seen) });
           yield* Effect.logInfo(
             `Trace source: ${recent.rows} rows (${recent.changed} changes)` +
-              (late ? `; ${probe.changed} sessions updated, ${late.rows} rows (${late.changed} changes)` : ''),
+              (late
+                ? `; ${stale.length} of ${touched.length} sessions updated, ${late.rows} rows (${late.changed} changes)`
+                : ''),
           );
           if (recent.changed || late?.changed) yield* refreshed;
         });
