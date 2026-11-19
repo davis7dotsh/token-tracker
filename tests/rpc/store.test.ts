@@ -249,6 +249,19 @@ test('trace records replay without changes, move between machines, withdraw, and
       deleted: 0,
     });
     expect(await run((store) => Effect.sync(store.getRevision))).toBe(revision);
+    // A trace write stales only windows containing its days; collector writes stale all.
+    const week = ['2026-10-03T00:00:00.000Z', '2026-10-10T00:00:00.000Z'] as const;
+    const windowRevision = () => run((store) => Effect.sync(() => store.getRevision(...week)));
+    const before = await windowRevision();
+    await run((store) =>
+      store.ingestTraces({
+        device: siva,
+        events: [{ ...trace, id: 'trace:old', timestamp: '2026-09-01T00:00:00.000Z' }],
+      }),
+    );
+    expect(await windowRevision()).toBe(before);
+    expect(await run((store) => Effect.sync(() => store.getRevision()))).toBeGreaterThan(revision);
+    expect(await run((store) => store.withdrawTraces(['trace:old']))).toBe(1);
     // Late metadata without a title keeps the stored one.
     const { sessionTitle: _title, ...untitled } = trace;
     expect(
@@ -283,6 +296,9 @@ test('trace records replay without changes, move between machines, withdraw, and
       }),
     );
     expect((await run((store) => store.getUsage())).events.map((item) => item.id)).toEqual(['request-1']);
+    expect(await run((store) => Effect.sync(() => store.getRevision(...week)))).toBe(
+      await run((store) => Effect.sync(() => store.getSharedRevision())),
+    );
   } finally {
     await runtime.dispose();
   }

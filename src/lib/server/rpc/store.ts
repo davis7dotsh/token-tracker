@@ -316,6 +316,26 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           )
         : Effect.succeed(undefined);
     let revision = 0;
+    // Trace records have globally unique IDs, so no copy elsewhere in history
+    // can change which record a read keeps: their writes only stale the UTC
+    // days they touch. Every other write still stales every window (`floor`).
+    let floor = 0;
+    const dayRevisions = new Map<string, number>();
+    const publish = (days: ReadonlySet<string>, traces: boolean) => {
+      revision++;
+      if (!traces) floor = revision;
+      for (const day of days) dayRevisions.set(day, revision);
+      pages.invalidate(days);
+    };
+    // The newest revision that can change a read of [start, end).
+    const windowRevision = (start?: string, end?: string) => {
+      if (!start && !end) return revision;
+      let latest = floor;
+      const first = start?.slice(0, 10) ?? '';
+      const last = end?.slice(0, 10) ?? '\uffff';
+      for (const [day, changed] of dayRevisions) if (changed > latest && day >= first && day <= last) latest = changed;
+      return latest;
+    };
     let metadataRevision = 0;
     const packs = configuration.openDayPacks ? yield* configuration.openDayPacks : undefined;
     const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure, packs);
@@ -579,10 +599,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           return { accepted, updated, deleted, receivedAt, metadataChanged, changedDays };
         }),
         (result) => {
-          if (result.changedDays.size) {
-            revision++;
-            pages.invalidate(result.changedDays);
-          }
+          if (result.changedDays.size) publish(result.changedDays, 'traces' in authorization);
           if (result.metadataChanged) metadataRevision++;
         },
       ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
@@ -669,7 +686,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       },
       { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
     );
-    let windowRevision = revision;
+    let windowFloor = floor;
     const metadataCache = yield* Cache.makeWith(
       (key: string) =>
         Effect.gen(function* () {
@@ -734,18 +751,18 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const { candidateIds: _candidateIds, ...windowOptions } = options;
       // Retire large decoded arrays after a committed event change. Metadata
       // updates reuse them, and the revision in each key isolates in-flight reads.
-      if (windowRevision !== revision) {
+      if (windowFloor !== floor) {
         yield* Cache.invalidateAll(windows);
-        windowRevision = revision;
+        windowFloor = floor;
       }
-      const generation = revision;
+      const generation = windowRevision(options.start, options.end);
       const excluded = excludeDeviceId ?? '';
       const cached = yield* Cache.get(
         windows,
         JSON.stringify({ excluded, revision: generation, options: windowOptions }),
       );
       let data = yield* includeLocalOwners(cached, excluded, options);
-      if (generation !== revision) {
+      if (generation !== windowRevision(options.start, options.end)) {
         // A move, correction or deletion may land between date pages or owner
         // lookups. Retry once under one database transaction; do not await a
         // shared cache entry here (its producer could need the same connection).
@@ -808,10 +825,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           return days;
         }),
         (days) => {
-          if (days.size) {
-            revision++;
-            pages.invalidate(days);
-          }
+          if (days.size) publish(days, true);
         },
       ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
       return changedDays.size;
@@ -916,7 +930,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       getSources,
       getDimensions,
       getPricingCandidates,
-      getRevision: () => revision,
+      getRevision: (start?: string, end?: string) => windowRevision(start, end),
+      // Advances on every write that can change any window (all but traces).
+      getSharedRevision: () => floor,
       getMetadataRevision: () => metadataRevision,
       authorizeAdmin,
       authorizeDevice,

@@ -494,8 +494,9 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       const syncEpoch = Effect.fnUntraced(function* () {
         const { current, generation } = yield* localSnapshot;
         const state = yield* pricing.load;
-        const revision = store.getRevision();
-        const epoch = `${revision}:${generation}`;
+        // Trace writes only stale windows containing their days, so the keys
+        // below carry this window's revision; other writes retire everything.
+        const epoch = `${store.getSharedRevision()}:${generation}`;
         if (epoch !== snapshotEpoch) {
           snapshotEpoch = epoch;
           cachedDimensions = undefined;
@@ -549,16 +550,18 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         const timeframe = usageTimeframe(query, now);
         const effective = effectiveQuery(query, state.policy);
         const normalized = normalizedQuery(effective);
-        const readKey = {
-          query: normalized.devices ? { devices: normalized.devices } : {},
-          revision,
-          localGeneration: generation,
-          ...(timeframe.range !== 'all'
+        const window =
+          timeframe.range !== 'all'
             ? {
                 start: timeframe.previousStart.startOfDay().toInstant().toString({ fractionalSecondDigits: 3 }),
                 end: timeframe.end.toInstant().toString({ fractionalSecondDigits: 3 }),
               }
-            : {}),
+            : {};
+        const readKey = {
+          query: normalized.devices ? { devices: normalized.devices } : {},
+          revision: store.getRevision(window.start, window.end),
+          localGeneration: generation,
+          ...window,
           pricingRevision: state.policy.revision,
         };
         return {
