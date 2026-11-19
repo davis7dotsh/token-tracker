@@ -285,6 +285,17 @@ To update the initial bundled fallback for a distribution, rebuild after running
 bun run update:pricing
 ```
 
+### Trace source (self-hosted)
+
+If every model call already goes through a proxy that records usage in ClickHouse, a self-hosted hub can read that instead of collectors. Set these when deploying (`alchemy.local.ts` passes them to the service):
+
+- `TOKEN_TRACKER_TRACES_URL`: the ClickHouse HTTP endpoint, e.g. `http://127.0.0.1:8123`. The database must provide the `traces.v_usage_events(since, until)` view: one row per usage record, with tokens already in this tracker's classes and session machine, harness, folder, repository, and title.
+- `TOKEN_TRACKER_TRACES_USER` (default `agent_reader`) and `TOKEN_TRACKER_TRACES_PASSWORD_FILE`: a read-only user.
+- `TOKEN_TRACKER_TRACES_SINCE`: the cutover instant. Traces are imported from it on; collector uploads keep succeeding, but their records from that instant on are not stored. Earlier history stays as it is.
+- `TOKEN_TRACKER_TRACES_INTERVAL_MINUTES` (default 5) and, for a hub without collector history, `TOKEN_TRACKER_TRACES_PROJECTS`: a JSON list of `{ machine, path, repository }` pairs.
+
+The hub then stops collecting its own machine's logs and shows its stored rows instead. It pulls on a timer, re-reads the last two hours, and re-reads sessions whose metadata arrived later, so replays update records (`trace:<usage id>`) instead of adding them. Machines continue under the device of the same name; new machines get a device. Projects come from the session folder: a reported remote, the folder-to-repository pairs collectors stored, the same T3 Code project, or an enclosing folder on that machine. Only the six harnesses count; failed calls and containers on the proxy host do not. A pull that changes nothing keeps every cache; one that does re-warms the last viewed dashboard. Traces carry no T3 thread binding, so their sessions have titles but no thread links.
+
 ## Tailscale access
 
 On the host machine, Bun listens on `127.0.0.1:8787` and Tailscale Serve terminates HTTPS on port `10007`. This keeps the dashboard private to the tailnet and leaves the host's other HTTPS services untouched. The public origin lets browser pricing edits pass the same-origin check:
