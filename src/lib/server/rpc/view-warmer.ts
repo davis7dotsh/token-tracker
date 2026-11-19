@@ -14,6 +14,8 @@ export const makeViewWarmer = Effect.fn('rpc.viewWarmer')(function* (
 ) {
   const scope = yield* Effect.scope;
   let recent: { query: UsageQuery; until: number } | undefined;
+  // The last short view anyone opened, with no expiry, for a scheduled feed.
+  let last: UsageQuery | undefined;
   let scheduled = false;
   const ignoreFailure = (run: () => Promise<unknown>) => Effect.tryPromise(run).pipe(Effect.ignore);
   if (hints) {
@@ -32,6 +34,7 @@ export const makeViewWarmer = Effect.fn('rpc.viewWarmer')(function* (
       recent = undefined;
       return;
     }
+    last = query;
     recent = { query, until: (yield* Clock.currentTimeMillis) + 5 * 60_000 };
     yield* ignoreFailure(() => hints.remember(range, query.timezone ?? 'UTC')).pipe(Effect.forkIn(scope));
   });
@@ -63,5 +66,13 @@ export const makeViewWarmer = Effect.fn('rpc.viewWarmer')(function* (
       Effect.forkIn(scope),
     );
   });
-  return { visited, changed };
+  // A feed on a timer (the trace source) is one bounded writer, unlike bursts
+  // of collector uploads: after each pull that changed usage, prepare the last
+  // viewed dashboard (or the remembered landing view) so it opens warm.
+  const refreshed = Effect.fnUntraced(function* () {
+    if (!hints) return;
+    const query = last ?? (yield* Effect.tryPromise(hints.read).pipe(Effect.orElseSucceed(() => undefined)));
+    if (query) yield* prepare(query).pipe(Effect.ignore);
+  });
+  return { visited, changed, refreshed };
 });

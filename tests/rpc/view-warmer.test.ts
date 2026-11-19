@@ -32,3 +32,25 @@ test('a recent page warms once after a burst of writes, but never on heartbeats 
     }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 });
+
+test('a feed refresh prepares the last viewed dashboard however long ago, else the remembered one', async () => {
+  const prepared: UsageQuery[] = [];
+  const query = { range: '7d', timezone: 'UTC' } as const;
+  const hinted = { range: 'today', timezone: 'Europe/Berlin' } as const;
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const warmer = yield* makeViewWarmer(
+        { read: () => Promise.resolve(hinted), remember: () => Promise.resolve() },
+        (next) => Effect.sync(() => prepared.push(next)),
+        () => 1,
+      );
+      yield* TestClock.adjust('1 second');
+      yield* warmer.refreshed();
+      yield* warmer.visited(query);
+      yield* TestClock.adjust('1 hour');
+      yield* warmer.refreshed();
+      // The startup hint, the first refresh, then the visited view an hour later.
+      expect(prepared).toEqual([hinted, hinted, query]);
+    }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+});

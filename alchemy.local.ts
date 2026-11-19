@@ -35,6 +35,14 @@ export default Alchemy.Stack(
       'TOKEN_TRACKER_DASHBOARD_PASSCODE',
       'TOKEN_TRACKER_T3_DATA_DIR',
       'TOKEN_TRACKER_T3_URL',
+      // Self-hosted trace source (src/lib/server/traces): the hub reads usage
+      // from ClickHouse instead of this machine's logs.
+      'TOKEN_TRACKER_TRACES_URL',
+      'TOKEN_TRACKER_TRACES_USER',
+      'TOKEN_TRACKER_TRACES_PASSWORD_FILE',
+      'TOKEN_TRACKER_TRACES_SINCE',
+      'TOKEN_TRACKER_TRACES_INTERVAL_MINUTES',
+      'TOKEN_TRACKER_TRACES_PROJECTS',
     ].flatMap((key) => {
       const value = process.env[key];
       return value ? [[key, value] as const] : [];

@@ -1,4 +1,4 @@
-import { Cache, Clock, Context, Effect, Exit, Layer, Schedule, Schema } from 'effect';
+import { Cache, Clock, Context, Effect, Exit, Layer, Option, Schedule, Schema, type Scope } from 'effect';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Headers as EffectHeaders } from 'effect/http/Headers';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
@@ -125,6 +125,15 @@ export const makeLocalUsageSnapshot = (
     );
     return Cache.get(checks, undefined);
   });
+
+// A self-hosted hub can also pull usage on a timer (the trace source). It
+// writes through the store like uploads do; `refreshed` re-warms the last view.
+export class UsageFeed extends Context.Service<
+  UsageFeed,
+  {
+    readonly run: (refreshed: Effect.Effect<void>) => Effect.Effect<void, never, UsageStore | HubPricing | Scope.Scope>;
+  }
+>()('token-tracker/UsageFeed') {}
 
 class SnapshotInput extends Context.Service<SnapshotInput, { current: UsageResult; state: PricingState }>()(
   'token-tracker/SnapshotInput',
@@ -706,6 +715,8 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         ),
       );
       const warmer = yield* makeViewWarmer(options.viewHints, getAggregate, store.getRevision);
+      const feed = yield* Effect.serviceOption(UsageFeed);
+      if (Option.isSome(feed)) yield* feed.value.run(warmer.refreshed()).pipe(Effect.forkScoped);
       // The dashboard's device list: registered devices plus this hub's own
       // machine, which collects directly and may never have registered.
       const listDevices = Effect.fn('rpc.listDevices')(function* () {
