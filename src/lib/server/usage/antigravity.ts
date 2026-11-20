@@ -133,11 +133,19 @@ const responseAliases = (usage: AntigravityModelUsage) => {
 
 const responseIdentity = (usage: AntigravityModelUsage) => responseAliases(usage)[0] ?? '';
 
-// Prefer the matched step's durable native identity when present: Antigravity
+// Prefer the matched step's durable native identity when unambiguous: Antigravity
 // only prunes gen_metadata, so step metadata stays identical across both
-// metadata arrival and generator pruning.
-const canonicalResponseIdentity = (primary: AntigravityModelUsage, compatibleStep?: AntigravityModelUsage | null) =>
-  (compatibleStep ? responseIdentity(compatibleStep) : '') || responseIdentity(primary);
+// metadata arrival and generator pruning. When multiple distinct responseIds share
+// a messageId, keep each generator's distinct responseId separate.
+const canonicalResponseIdentity = (
+  primary: AntigravityModelUsage,
+  compatibleStep?: AntigravityModelUsage | null,
+  ambiguousAliases?: ReadonlySet<string>,
+) => {
+  const stepId = compatibleStep ? responseIdentity(compatibleStep) : '';
+  if (stepId && !(primary.responseId && ambiguousAliases?.has(stepId))) return stepId;
+  return responseIdentity(primary);
+};
 
 const compatibleUsage = (left: AntigravityModelUsage, right: AntigravityModelUsage) => {
   if (left.responseId && right.responseId) return left.responseId === right.responseId;
@@ -558,6 +566,25 @@ export const parseAntigravityDatabase = (
       }
 
       // 4. Reconcile gen_metadata and steps.metadata by canonical native call identity.
+      const responseIdsByAlias = new Map<string, Set<string>>();
+      for (const { gen } of generators) {
+        const usage = gen.usage;
+        if (!usage?.responseId) continue;
+        for (const alias of responseAliases(usage)) {
+          if (alias === usage.responseId) continue;
+          let set = responseIdsByAlias.get(alias);
+          if (!set) {
+            set = new Set();
+            responseIdsByAlias.set(alias, set);
+          }
+          set.add(usage.responseId);
+        }
+      }
+      const ambiguousAliases = new Set<string>();
+      for (const [alias, ids] of responseIdsByAlias) {
+        if (ids.size > 1) ambiguousAliases.add(alias);
+      }
+
       const coveredUsagesByAlias = new Map<string, AntigravityModelUsage[]>();
       const coveredSteps = new Set<number>();
       const recordCoveredUsage = (usage: AntigravityModelUsage, extra?: AntigravityModelUsage | null) => {
@@ -588,6 +615,7 @@ export const parseAntigravityDatabase = (
         let matchedStepIdx: number | undefined;
         let matchedStep: AntigravityStepMetadata | undefined;
         for (const alias of aliases) {
+          if (usage.responseId && ambiguousAliases.has(alias)) continue;
           const candidates = stepsByAlias.get(alias);
           if (!candidates) continue;
           const hit = candidates.find(
@@ -619,7 +647,7 @@ export const parseAntigravityDatabase = (
         }
         const compatibleStepUsage =
           matchedStep?.modelUsage && compatibleUsage(usage, matchedStep.modelUsage) ? matchedStep.modelUsage : null;
-        const effectiveResponseKey = canonicalResponseIdentity(usage, compatibleStepUsage);
+        const effectiveResponseKey = canonicalResponseIdentity(usage, compatibleStepUsage, ambiguousAliases);
         let stamp = stepTimestamp(matchedStep, '');
         if (!stamp) {
           for (const candidateIdx of gen.stepIndices) {

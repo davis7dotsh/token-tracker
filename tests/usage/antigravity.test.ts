@@ -947,5 +947,44 @@ describe('Antigravity accounting', () => {
       'antigravity:trans-conv:response:msg-1',
       'antigravity:trans-conv:response:resp-2',
     ]);
+
+    // Separate calls sharing a messageId with different responseIds must stay distinct
+    // even when a step carries only that shared messageId (no tokens lost in deduplicate).
+    const multiFile = join(root, 'conversations', 'multi-resp.db');
+    const multiDb = initConversationDb(multiFile, 'multi-resp');
+    multiDb.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      1,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T03:00:00.000Z',
+        modelUsage: { inputTokens: 80, outputTokens: 20, messageId: 'msg-shared' },
+      }),
+      null,
+    );
+    multiDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      0,
+      encodeGenMetadata({
+        responseModel: 'gemini-4-neon',
+        stepIndices: [1],
+        usage: { inputTokens: 80, outputTokens: 20, messageId: 'msg-shared', responseId: 'resp-first' },
+      }),
+    );
+    multiDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      1,
+      encodeGenMetadata({
+        responseModel: 'gemini-4-neon',
+        stepIndices: [1],
+        usage: { inputTokens: 160, outputTokens: 40, messageId: 'msg-shared', responseId: 'resp-second' },
+      }),
+    );
+    multiDb.close();
+
+    const multi = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+    const multiEvents = multi.events.filter((e) => e.sessionId === 'multi-resp');
+    expect(multiEvents.map((e) => e.id).sort()).toEqual([
+      'antigravity:multi-resp:response:resp-first',
+      'antigravity:multi-resp:response:resp-second',
+    ]);
+    expect(multiEvents.reduce((sum, e) => sum + tokenTotal(e), 0)).toBe(300);
+    expect(multi.retractedIds).toContain('antigravity:multi-resp:response:msg-shared');
   });
 });
