@@ -333,9 +333,15 @@ describe('Muse collection', () => {
       completed('child-1', '2026-10-11T06:40:04.000Z', usage, 'child-record'),
     ]);
     const collected = await Effect.runPromise(
-      collectUsage({ home, claudeDirs: [], codexDirs: [], piDirs: [], grokDirs: [], deviceId: 'muse-machine' }).pipe(
-        Effect.provide(BunServices.layer),
-      ),
+      collectUsage({
+        home,
+        claudeDirs: [],
+        codexDirs: [],
+        piDirs: [],
+        grokDirs: [],
+        antigravityDirs: [],
+        deviceId: 'muse-machine',
+      }).pipe(Effect.provide(BunServices.layer)),
     );
     expect(collected.sources.find((source) => source.harness === 'muse')).toMatchObject({
       path: join(home, '.local/share/muse/sessions'),
@@ -380,6 +386,7 @@ describe('Muse collection', () => {
           codexDirs: [],
           piDirs: [],
           grokDirs: [],
+          antigravityDirs: [],
           deviceId: 'muse-machine',
         }).pipe(Effect.provide(BunServices.layer)),
       );

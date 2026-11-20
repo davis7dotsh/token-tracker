@@ -42,6 +42,7 @@ const optionsFor = (home: string): CollectionOptions => ({
   piDirs: [],
   grokDirs: [],
   museDirs: [],
+  antigravityDirs: [],
 });
 const revision = (options: CollectionOptions, previous?: UsageResult) =>
   Effect.runPromise(usageRevision(options)(previous).pipe(Effect.provide(BunServices.layer)));

@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { BigIntStats } from 'node:fs';
 import { lstat, readdir, realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Effect, Path, Result } from 'effect';
-import { CollectionError, type UsageResult } from '../../shared/domain';
+import { CollectionError, type SourceStatus, type UsageResult } from '../../shared/domain';
 import type { CollectionOptions } from './index';
 import { makeRepositoryPathResolver, skippedRepositoryPath, type RepositoryOptions } from './repository';
 import { usageRepositoryDependencies, usageSnapshotIncomplete } from './revision-dependencies';
@@ -15,6 +15,10 @@ const missing = (error: unknown) =>
 const fingerprint = (info: BigIntStats) => `${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
 let retryRevision = 0;
 const grokMetadata = new Set(['.cwd', 'summary.json', 'usage.json', 'meta.json']);
+const antigravityDatabaseFile = (name: string) => {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.db') || lower.endsWith('.db-wal') || lower.endsWith('.db-journal');
+};
 const fileInfo = async (file: string, follow = false) => {
   try {
     return await (follow ? stat(file, { bigint: true }) : lstat(file, { bigint: true }));
@@ -23,7 +27,9 @@ const fileInfo = async (file: string, follow = false) => {
     throw error;
   }
 };
-const inventory = async (root: string, grok: boolean, onUnavailable: () => void) => {
+const inventory = async (root: string, harness: SourceStatus['harness'], onUnavailable: () => void) => {
+  const grok = harness === 'grok';
+  const antigravity = harness === 'antigravity';
   const records: string[] = [];
   const unavailable = (file: string, error: unknown) => {
     const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'unknown';
@@ -50,10 +56,13 @@ const inventory = async (root: string, grok: boolean, onUnavailable: () => void)
       if (!info?.isDirectory()) return;
       for (const entry of await readdir(directory, { withFileTypes: true })) {
         const file = join(directory, entry.name);
-        if (entry.isDirectory()) pending.push(file);
-        else if (
+        if (entry.isDirectory()) {
+          if (!antigravity) pending.push(file);
+        } else if (
           entry.isFile() &&
-          (entry.name.toLowerCase().endsWith('.jsonl') || (grok && grokMetadata.has(entry.name)))
+          (antigravity
+            ? antigravityDatabaseFile(entry.name)
+            : entry.name.toLowerCase().endsWith('.jsonl') || (grok && grokMetadata.has(entry.name)))
         )
           files.push(file);
       }
@@ -64,6 +73,15 @@ const inventory = async (root: string, grok: boolean, onUnavailable: () => void)
   // Bound I/O fan-out for both deep session trees and large flat directories.
   // The final fingerprint sorts records and is independent of traversal order.
   while (pending.length) await Promise.all(pending.splice(-16).map(scanDirectory));
+  if (antigravity) {
+    const parent = dirname(physical);
+    for (const name of [
+      'conversation_summaries.db',
+      'conversation_summaries.db-wal',
+      'conversation_summaries.db-journal',
+    ])
+      files.push(join(parent, name));
+  }
   const observeFile = async (file: string) => {
     try {
       const info = await fileInfo(file);
@@ -89,7 +107,7 @@ export const usageRevision = (options: CollectionOptions = {}, repositoryOptions
         const inventoryRecords: string[] = [];
         for (const source of sources) {
           inventoryRecords.push(`source:${source.harness}:${source.path}`);
-          const entries = await inventory(source.path, source.harness === 'grok', () => {
+          const entries = await inventory(source.path, source.harness, () => {
             observationUnavailable = true;
           });
           for (const entry of entries) inventoryRecords.push(entry);

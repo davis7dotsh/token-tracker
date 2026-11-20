@@ -40,7 +40,14 @@ const absoluteSourcePath = (value: string, platform: NodeJS.Platform) => {
   return path.resolve(home ? path.join(homedir(), value.slice(2)) : value);
 };
 export const launchdDomains = () => [`gui/${process.getuid?.() ?? 0}`, `user/${process.getuid?.() ?? 0}`];
-const sourceOverrides = ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'PI_CODING_AGENT_DIR', 'GROK_HOME', 'MUSE_HOME'];
+const sourceOverrides = [
+  'CLAUDE_CONFIG_DIR',
+  'CODEX_HOME',
+  'PI_CODING_AGENT_DIR',
+  'GROK_HOME',
+  'MUSE_HOME',
+  'ANTIGRAVITY_HOME',
+];
 export const scheduledEnvironment = (
   directory: string,
   platform: NodeJS.Platform = process.platform,
@@ -53,6 +60,7 @@ export const scheduledEnvironment = (
     'XDG_CONFIG_HOME',
     'XDG_DATA_HOME',
     'TOKEN_TRACKER_DATA_DIR',
+    'TOKEN_TRACKER_T3_DATA_DIR',
     ...sourceOverrides,
   ].flatMap((name) => {
     const value = env[name];

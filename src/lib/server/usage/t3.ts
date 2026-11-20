@@ -33,7 +33,7 @@ export const readT3Metadata = Effect.fn('usage.readT3Metadata')(
       const filename = path.join(directory, name);
       const info = yield* Effect.result(fs.stat(filename));
       if (Result.isFailure(info) && info.failure.reason._tag !== 'NotFound') options.onFailure?.();
-      if (Result.isFailure(info) || info.success.type !== 'File' || info.success.size > 2_147_483_648n) continue;
+      if (Result.isFailure(info) || info.success.type !== 'File' || info.success.size > 68_719_476_736n) continue;
       filenames.push(filename);
     }
     if (filenames.length === 0) return new Map<string, T3Metadata>();

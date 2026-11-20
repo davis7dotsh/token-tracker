@@ -19,10 +19,15 @@ const strings = (value: unknown) => array(value, string);
 const fields = (value: Record<string, unknown>, keys: readonly string[], check: (item: unknown) => boolean) =>
   keys.every((key) => check(value[key]));
 const optional = (value: unknown, check: (item: unknown) => boolean) => value === undefined || check(value);
-const harnesses = { claude: true, codex: true, pi: true, grok: true, muse: true, cursor: true } satisfies Record<
-  DashboardResponse['sessions'][number]['harness'],
-  boolean
->;
+const harnesses = {
+  claude: true,
+  codex: true,
+  pi: true,
+  grok: true,
+  muse: true,
+  cursor: true,
+  antigravity: true,
+} satisfies Record<DashboardResponse['sessions'][number]['harness'], boolean>;
 const ranges = { today: true, '7d': true, '30d': true, '6m': true, '90d': true, all: true } satisfies Record<
   DashboardResponse['range'],
   boolean

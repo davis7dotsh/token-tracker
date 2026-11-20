@@ -16,6 +16,7 @@ const harnessName = (value: string) =>
     grok: 'Grok Build',
     muse: 'Muse',
     cursor: 'Cursor',
+    antigravity: 'Antigravity',
   })[value] ?? value;
 
 export const formatReport = (report: DashboardResponse) => {

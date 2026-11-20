@@ -1,6 +1,6 @@
 # Token tracker
 
-A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), Muse, and Cursor. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
+A TypeScript usage tracker for Claude Code, Codex, Pi, [Grok Build](https://github.com/xai-org/grok-build), Muse, Cursor, and Google Antigravity. Effect 4 powers the CLI, collection engine, HTTP/RPC transport, and SQLite persistence. The SvelteKit 3 dashboard and CLI share typed Effect RPC contracts. [Alchemy](https://alchemy.run) deploys the dashboard either as a self-hosted Bun service or to Cloudflare. Vite+ manages the development toolchain, linting, and formatting. Bun runs the server, tests, and standalone macOS/Linux/Windows CLI builds.
 
 The dashboard can run as a self-hosted service, e.g. at [https://tracker.example.ts.net:10007](https://tracker.example.ts.net:10007) on a Tailscale network.
 
@@ -194,14 +194,15 @@ The dashboard runs as a separate Bun server. Native `serve` launches the package
 
 ## Sources and calculations
 
-| Harness     | Default log locations                                                         | Override                   |
-| ----------- | ----------------------------------------------------------------------------- | -------------------------- |
-| Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present        | `CLAUDE_CONFIG_DIR`        |
-| Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`       | `CODEX_HOME`               |
-| Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                             | `PI_CODING_AGENT_DIR`      |
-| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback             | `GROK_HOME`                |
-| Muse        | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`) | `MUSE_HOME`                |
-| Cursor      | Local personal billing CSV import or Cloud Agents API snapshot (opt-in)       | `TOKEN_TRACKER_CONFIG_DIR` |
+| Harness     | Default log locations                                                                                                | Override                   |
+| ----------- | -------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| Claude Code | `~/.claude/projects/**/*.jsonl`; also XDG Claude projects when present                                               | `CLAUDE_CONFIG_DIR`        |
+| Codex       | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl`                                              | `CODEX_HOME`               |
+| Pi          | `~/.pi/agent/sessions/**/*.jsonl`                                                                                    | `PI_CODING_AGENT_DIR`      |
+| Grok Build  | `~/.grok/sessions/**/usage.json`; legacy `updates.jsonl` fallback                                                    | `GROK_HOME`                |
+| Muse        | Session JSONL logs under `~/.local/share/muse/sessions` (or `$XDG_DATA_HOME`)                                        | `MUSE_HOME`                |
+| Antigravity | `~/.gemini/antigravity/conversations/*.db`, `~/.gemini/antigravity-cli/conversations/*.db`, T3 ACP profile databases | `ANTIGRAVITY_HOME`         |
+| Cursor      | Local personal billing CSV import or Cloud Agents API snapshot (opt-in)                                              | `TOKEN_TRACKER_CONFIG_DIR` |
 
 File-source directory overrides accept comma-separated roots. Malformed records are skipped with diagnostics; incomplete JSONL records are reread on later checks. Collection does not follow arbitrary nested directory symlinks.
 
@@ -263,6 +264,8 @@ Grok Build's input counters include cached tokens, so the collector separates ca
 Inherited Grok fork turns retain their original session ownership and are counted once. Parent turns already include subagent usage, so child sessions are excluded; missing readable parent accounting produces a partial-source warning. Subagent totals can lag until the parent writes its next durable turn.
 
 Muse writes one `session.jsonl` event log per session under its XDG data directory (`$XDG_DATA_HOME/muse/sessions`, defaulting to `~/.local/share/muse/sessions` on Linux and macOS). On Windows, `%LOCALAPPDATA%\muse` and `%APPDATA%\muse` are also read when present; `MUSE_HOME` can point to the Muse data directory or directly to its `sessions` directory. The collector counts each session stream's `model_completed` records once. The paired `goal_usage_attribution` provider rows repeat the same counters without a model or cache split, so they are not added again. Muse input counters include cached tokens, so cache reads/writes are separated from uncached input before totaling, and reasoning is already included in output. Nested subagent and reminder sessions keep their own session IDs and inherit the enclosing session's project when they do not record a workspace. Approval-review judge streams are excluded because they record a synthetic sequence clock instead of wall time, so their usage cannot be dated. Model IDs are preserved exactly as logged; catalog pricing applies when an ID is available in the pricing catalog, while other IDs remain unpriced until a pricing rule is saved.
+
+Google Antigravity writes one SQLite database per conversation (`conversations/<uuid>.db`) across Antigravity Desktop (`~/.gemini/antigravity`), the `agy` CLI (`~/.gemini/antigravity-cli`), and T3 Code's Antigravity ACP provider profiles (`~/.t3/userdata/providers/antigravity/*/antigravity-acp`). `ANTIGRAVITY_HOME` accepts comma-separated app-data or `conversations` roots. The collector opens each database read-only and extracts only per-call `ModelUsageStats`, canonical response model IDs, step timestamps, and workspace/subagent metadata from `gen_metadata`, `steps.metadata`, `trajectory_metadata_blob`, and `conversation_summaries.db` (never prompt payloads or preview text). Antigravity reports uncached input separately from cache reads/writes, and `output_tokens` already includes `thinking_output_tokens`. Native subagent conversations are stored in separate databases and counted as their own sessions, inheriting the parent project when needed. T3 Code threads bind automatically by conversation UUID.
 
 Costs are **API-equivalent costs**, using native Grok accounting as described above and estimates from a cached LiteLLM catalog and saved model rules for other harnesses. The bundled snapshot in `src/lib/server/usage/pricing.json` is the initial catalog fallback. These costs are not subscription charges or invoices. Supported cache TTL, service-tier, and context-length rates are accounted for. Unknown models or unavailable costs retain their tokens with cost reported as unpriced.
 

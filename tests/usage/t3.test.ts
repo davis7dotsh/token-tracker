@@ -112,6 +112,7 @@ describe('T3 session metadata', () => {
     bind(database, { nativeId: 'test-session', driver: 'codex', threadId: 'thread:codex' });
     bind(database, { nativeId: 'grok-session', driver: 'grok', threadId: 'thread:grok' });
     bind(database, { nativeId: 'pi-session', driver: 'pi', threadId: 'thread:pi' });
+    bind(database, { nativeId: 'ag-session', driver: 'antigravity', threadId: 'thread:ag' });
     database.close();
     const before = await stat(join(dataDirectory, 'statev2.sqlite'));
     const metadata = await read(home, { url: 'https://app.t3.codes' });
@@ -125,6 +126,7 @@ describe('T3 session metadata', () => {
     expect(metadata.get('codex:test-session')?.t3ThreadId).toBe('thread:codex');
     expect(metadata.get('grok:grok-session')?.t3ThreadId).toBe('thread:grok');
     expect(metadata.get('pi:pi-session')?.t3ThreadId).toBe('thread:pi');
+    expect(metadata.get('antigravity:ag-session')?.t3ThreadId).toBe('thread:ag');
     expect(metadata.has('claude:pending:run:thread:original')).toBe(false);
     expect(JSON.stringify([...metadata.values()])).not.toMatch(/private-prompt|private-reply|token-secret/);
     expect((await stat(join(dataDirectory, 'statev2.sqlite'))).mtimeMs).toBe(before.mtimeMs);

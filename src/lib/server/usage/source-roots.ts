@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { Effect, FileSystem, Path, Result } from 'effect';
 import { CollectionError, type SourceStatus } from '../../shared/domain';
+import { readUsageDirectory } from './files';
 
 export type SourceRootOptions = {
   home?: string;
@@ -9,6 +10,8 @@ export type SourceRootOptions = {
   piDirs?: readonly string[];
   grokDirs?: readonly string[];
   museDirs?: readonly string[];
+  antigravityDirs?: readonly string[];
+  t3DataDirectory?: string;
 };
 type MutableSource = { -readonly [K in keyof SourceStatus]: SourceStatus[K] };
 
@@ -53,6 +56,40 @@ export const usageSourceRoots = Effect.fn('usage.sourceRoots')(function* (option
       if (Result.isSuccess(info) && info.success.type === 'Directory') museDirs = [...museDirs, root];
     }
   }
+  let antigravityDirs = options.antigravityDirs ?? environmentDirs('ANTIGRAVITY_HOME');
+  const unreadableAntigravityRoots: string[] = [];
+  if (antigravityDirs === undefined && !process.env.ANTIGRAVITY_HOME?.trim()) {
+    const geminiRoot = path.join(home, '.gemini');
+    const candidates: string[] = [path.join(geminiRoot, 'antigravity'), path.join(geminiRoot, 'antigravity-cli')];
+    const configuredT3 = options.t3DataDirectory ?? process.env.TOKEN_TRACKER_T3_DATA_DIR;
+    const t3Root = configuredT3?.trim() || path.join(home, '.t3', 'userdata');
+    const t3ProvidersRoot = path.join(expandPath(t3Root), 'providers', 'antigravity');
+    const t3ProvidersInfo = yield* Effect.result(fs.stat(t3ProvidersRoot));
+    if (Result.isSuccess(t3ProvidersInfo) && t3ProvidersInfo.success.type === 'Directory') {
+      const t3Profiles = yield* Effect.result(readUsageDirectory(t3ProvidersRoot));
+      if (Result.isSuccess(t3Profiles)) {
+        const profiles = t3Profiles.success
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => entry.name)
+          .sort();
+        for (const profile of profiles) candidates.push(path.join(t3ProvidersRoot, profile, 'antigravity-acp'));
+      } else {
+        unreadableAntigravityRoots.push(t3ProvidersRoot);
+      }
+    } else if (Result.isFailure(t3ProvidersInfo) && t3ProvidersInfo.failure.reason._tag !== 'NotFound') {
+      // Surface unreadable T3 Antigravity provider roots instead of silently treating them as missing.
+      unreadableAntigravityRoots.push(t3ProvidersRoot);
+    }
+    const discovered: string[] = [];
+    for (const candidate of candidates) {
+      const info = yield* Effect.result(fs.stat(candidate));
+      if (Result.isSuccess(info) && info.success.type === 'Directory') discovered.push(candidate);
+      else if (Result.isFailure(info) && info.failure.reason._tag !== 'NotFound')
+        unreadableAntigravityRoots.push(candidate);
+    }
+    antigravityDirs =
+      discovered.length || unreadableAntigravityRoots.length ? discovered : [path.join(geminiRoot, 'antigravity-cli')];
+  }
   const sources: MutableSource[] = [];
   const seen = new Set<string>();
   const addSource = (harness: SourceStatus['harness'], root: string) => {
@@ -77,5 +114,11 @@ export const usageSourceRoots = Effect.fn('usage.sourceRoots')(function* (option
     addSource('grok', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
   for (const root of museDirs)
     addSource('muse', path.basename(root.replace(/\/$/, '')) === 'sessions' ? root : path.join(root, 'sessions'));
+  for (const root of antigravityDirs ?? [])
+    addSource(
+      'antigravity',
+      path.basename(root.replace(/[\\/]$/, '')) === 'conversations' ? root : path.join(root, 'conversations'),
+    );
+  for (const root of unreadableAntigravityRoots) addSource('antigravity', root);
   return { home, sources };
 });

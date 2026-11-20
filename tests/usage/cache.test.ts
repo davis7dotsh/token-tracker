@@ -158,6 +158,7 @@ describe('streaming collection and durable metadata cache', () => {
           piDirs: [],
           grokDirs: [],
           museDirs: [],
+          antigravityDirs: [],
         }).pipe(Effect.provide(BunServices.layer)),
       );
       expect(result.sources[0]).toMatchObject({ files: 2, events: 2, status: 'ready' });
@@ -183,6 +184,7 @@ describe('streaming collection and durable metadata cache', () => {
             piDirs: [],
             grokDirs: [],
             museDirs: [],
+            antigravityDirs: [],
           }).pipe(Effect.provide(BunServices.layer)),
         );
         expect(result.events).toHaveLength(1);

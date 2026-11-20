@@ -1,7 +1,7 @@
 import { sessionSortKeys } from './session-sort';
 import { Schema, Struct } from 'effect';
 
-export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok', 'muse', 'cursor']);
+export const Harness = Schema.Literals(['claude', 'codex', 'pi', 'grok', 'muse', 'cursor', 'antigravity']);
 export const UsageRange = Schema.Literals(['today', '7d', '30d', '6m', '90d', 'all']);
 const TokenCount = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
 const ApiCost = Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0));
