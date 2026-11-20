@@ -32,7 +32,7 @@ type ConversationMeta = {
   repository: string | null;
 };
 
-const CACHE_PREFIX = 'antigravity-v3';
+const CACHE_PREFIX = 'antigravity-v4';
 const DEFAULT_ATTACHMENT_SEGMENT = /[\\/]\.t3[\\/]userdata[\\/]attachments(?:[\\/]|$)/i;
 const EFFORT_SUFFIX = /-(?:low|medium|high|xhigh)$/i;
 const MODEL_PATH_PREFIX = /^(?:publishers\/[^/]+\/)?models\//i;
@@ -133,14 +133,11 @@ const responseAliases = (usage: AntigravityModelUsage) => {
 
 const responseIdentity = (usage: AntigravityModelUsage) => responseAliases(usage)[0] ?? '';
 
-const canonicalResponseIdentity = (primary: AntigravityModelUsage, secondary?: AntigravityModelUsage | null) =>
-  primary.responseId ||
-  secondary?.responseId ||
-  primary.messageId ||
-  secondary?.messageId ||
-  primary.providerAssignedMessageId ||
-  secondary?.providerAssignedMessageId ||
-  '';
+// Prefer the matched step's durable native identity when present: Antigravity
+// only prunes gen_metadata, so step metadata stays identical across both
+// metadata arrival and generator pruning.
+const canonicalResponseIdentity = (primary: AntigravityModelUsage, compatibleStep?: AntigravityModelUsage | null) =>
+  (compatibleStep ? responseIdentity(compatibleStep) : '') || responseIdentity(primary);
 
 const compatibleUsage = (left: AntigravityModelUsage, right: AntigravityModelUsage) => {
   if (left.responseId && right.responseId) return left.responseId === right.responseId;
@@ -391,9 +388,11 @@ export const parseAntigravityDatabase = (
         sessionId: conversationId,
         parentId: trajectory?.parentConversationId || '',
         forkedAt: '',
+        retractedIds: [],
         ...(project ? { workspaceRoot: project } : {}),
         ...(repository ? { workspaceRepository: repository } : {}),
       };
+      const retractedIds = new Set<string>();
 
       // 1. Keyset-page steps metadata (allowlisted fields only via SQLite substr).
       const steps = new Map<number, AntigravityStepMetadata>();
@@ -671,6 +670,26 @@ export const parseAntigravityDatabase = (
         if (created.kind === 'empty') continue;
 
         parsed.events.push(created.entry);
+        // Withdraw superseded fallback IDs (alternate aliases and step/gen fallbacks)
+        // when reconciling a call under its canonical identity so prior syncs do not
+        // double-bill after metadata arrives or changes.
+        const mergedAliases = new Set([
+          ...aliases,
+          ...(compatibleStepUsage ? responseAliases(compatibleStepUsage) : []),
+        ]);
+        if (effectiveResponseKey) {
+          for (const alias of mergedAliases) {
+            if (alias !== effectiveResponseKey)
+              retractedIds.add(
+                `antigravity:${encodeURIComponent(conversationId)}:response:${encodeURIComponent(alias)}`,
+              );
+          }
+          if (matchedStepIdx !== undefined && compatibleStep !== undefined)
+            retractedIds.add(`antigravity:${encodeURIComponent(conversationId)}:step:${matchedStepIdx}`);
+          retractedIds.add(`antigravity:${encodeURIComponent(conversationId)}:gen:${genIdx}`);
+        } else if (stepIdFallback !== undefined && compatibleStep !== undefined) {
+          retractedIds.add(`antigravity:${encodeURIComponent(conversationId)}:gen:${genIdx}`);
+        }
         // Mark coverage ONLY after accepting a valid non-zero generator event.
         recordCoveredUsage(usage, compatibleStepUsage);
         if (aliases.length > 0 || compatibleStepUsage) {
@@ -728,10 +747,20 @@ export const parseAntigravityDatabase = (
         }
         if (created.kind === 'empty') continue;
         parsed.events.push(created.entry);
+        if (responseKey) {
+          for (const alias of aliases) {
+            if (alias !== responseKey)
+              retractedIds.add(
+                `antigravity:${encodeURIComponent(conversationId)}:response:${encodeURIComponent(alias)}`,
+              );
+          }
+          retractedIds.add(`antigravity:${encodeURIComponent(conversationId)}:step:${stepIndex}`);
+        }
         recordCoveredUsage(usage);
         coveredSteps.add(stepIndex);
       }
 
+      parsed.retractedIds = [...retractedIds];
       database.exec('COMMIT');
       return { parsed, incomplete, repository };
     } catch (error) {

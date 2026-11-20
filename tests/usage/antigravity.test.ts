@@ -861,4 +861,91 @@ describe('Antigravity accounting', () => {
       }
     },
   );
+
+  test('keeps canonical ID stable across generator arrival and pruning and retracts superseded fallback IDs across warm caches', async () => {
+    const home = await tempDir('token-tracker-ag-retract-');
+    const root = join(home, 'antigravity');
+    const cacheDirectory = join(home, 'cache');
+    await mkdir(join(root, 'conversations'), { recursive: true });
+    const dbFile = join(root, 'conversations', 'trans-conv.db');
+
+    const options = {
+      home,
+      cacheDirectory,
+      claudeDirs: [],
+      codexDirs: [],
+      piDirs: [],
+      grokDirs: [],
+      museDirs: [],
+      antigravityDirs: [root],
+    };
+
+    // Phase 1: step 1 has messageId only; step 2 has no native ID at all (emits step:2)
+    const db = initConversationDb(dbFile, 'trans-conv');
+    db.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      1,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T02:00:00.000Z',
+        modelUsage: { inputTokens: 100, outputTokens: 20, messageId: 'msg-1' },
+      }),
+      null,
+    );
+    db.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      2,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T02:01:00.000Z',
+        modelUsage: { inputTokens: 60, outputTokens: 15 },
+      }),
+      null,
+    );
+    db.close();
+
+    const phase1 = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+    expect(phase1.events.map((e) => e.id).sort()).toEqual([
+      'antigravity:trans-conv:response:msg-1',
+      'antigravity:trans-conv:step:2',
+    ]);
+
+    // Phase 2: generators arrive with resp-1 (matching msg-1) and resp-2 (matching ID-less step 2)
+    const db2 = new Database(dbFile);
+    db2.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      0,
+      encodeGenMetadata({
+        responseModel: 'gemini-4-neon',
+        stepIndices: [1],
+        usage: { inputTokens: 100, outputTokens: 20, messageId: 'msg-1', responseId: 'resp-1' },
+      }),
+    );
+    db2.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      1,
+      encodeGenMetadata({
+        responseModel: 'gemini-4-neon',
+        stepIndices: [2],
+        usage: { inputTokens: 60, outputTokens: 15, responseId: 'resp-2' },
+      }),
+    );
+    db2.close();
+
+    const phase2Cold = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+    const phase2Warm = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+    for (const snapshot of [phase2Cold, phase2Warm]) {
+      expect(snapshot.events.map((e) => e.id).sort()).toEqual([
+        'antigravity:trans-conv:response:msg-1',
+        'antigravity:trans-conv:response:resp-2',
+      ]);
+      expect(snapshot.retractedIds).toContain('antigravity:trans-conv:step:2');
+      expect(snapshot.retractedIds).toContain('antigravity:trans-conv:response:resp-1');
+    }
+
+    // Phase 3: generator 0 is pruned -> step 1 still emits the EXACT same durable msg-1 ID
+    const db3 = new Database(dbFile);
+    db3.query('DELETE FROM gen_metadata WHERE idx = 0').run();
+    db3.close();
+
+    const phase3 = await Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
+    expect(phase3.events.map((e) => e.id).sort()).toEqual([
+      'antigravity:trans-conv:response:msg-1',
+      'antigravity:trans-conv:response:resp-2',
+    ]);
+  });
 });
