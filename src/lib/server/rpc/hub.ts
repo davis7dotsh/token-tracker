@@ -333,9 +333,9 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         return choices;
       };
       const readRawSnapshot = Effect.fn('rpc.readRawSnapshot')(function* (key: string) {
-        const { query, start, end, revision, localGeneration } = decodeReadKey(key);
+        const { query, start, end, localGeneration } = decodeReadKey(key);
         const { current } = yield* SnapshotInput;
-        const epoch = `${revision}:${localGeneration}`;
+        const dimEpoch = `${store.getRevision()}:${localGeneration}`;
         const previousMillis = start ? Date.parse(start) : -Infinity;
         const endMillis = end ? Date.parse(end) : Infinity;
         const localCandidates: string[] = [];
@@ -353,11 +353,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               devices: query.devices,
               candidateIds: localCandidates,
             }),
-            cachedDimensions?.epoch === epoch
+            cachedDimensions?.epoch === dimEpoch
               ? Effect.succeed(cachedDimensions.rows)
               : Effect.map(store.getDimensions(localDeviceId), (rows) => {
                   const collected = collectDimensions(rows, current.events);
-                  cachedDimensions = { epoch, rows: collected };
+                  cachedDimensions = { epoch: dimEpoch, rows: collected };
                   return collected;
                 }),
           ],
@@ -490,6 +490,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       >();
       const filterCatalogs = new Map<string, { filters: UsageFilters; projectLabels: ReadonlyMap<string, string> }>();
       let snapshotEpoch = '';
+      let dimensionsEpoch = '';
       let snapshotPricing = '';
       const syncEpoch = Effect.fnUntraced(function* () {
         const { current, generation } = yield* localSnapshot;
@@ -497,10 +498,14 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         // Trace writes only stale windows containing their days, so the keys
         // below carry this window's revision; other writes retire everything.
         const epoch = `${store.getSharedRevision()}:${generation}`;
-        if (epoch !== snapshotEpoch) {
-          snapshotEpoch = epoch;
+        const allEpoch = `${store.getRevision()}:${generation}`;
+        if (allEpoch !== dimensionsEpoch) {
+          dimensionsEpoch = allEpoch;
           cachedDimensions = undefined;
           filterCatalogs.clear();
+        }
+        if (epoch !== snapshotEpoch) {
+          snapshotEpoch = epoch;
           yield* Cache.invalidateAll(rawSnapshots);
           yield* Cache.invalidateAll(snapshots);
           dashboards.clear();
@@ -512,7 +517,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           pricingResults.clear();
         }
         snapshotPricing = state.policy.revision;
-        return { current, generation, state, revision, epoch };
+        return { current, generation, state, epoch: allEpoch };
       });
       const readFilterCatalog = Effect.fn('rpc.readFilterCatalog')(function* (devices?: readonly string[]) {
         const { current, state, epoch } = yield* syncEpoch();
@@ -545,7 +550,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         return catalog;
       });
       const readQuery = Effect.fn('rpc.readQuery')(function* (query: UsageQuery) {
-        const { current, generation, state, revision } = yield* syncEpoch();
+        const { current, generation, state } = yield* syncEpoch();
         const now = new Date(yield* Clock.currentTimeMillis);
         const timeframe = usageTimeframe(query, now);
         const effective = effectiveQuery(query, state.policy);
