@@ -90,6 +90,7 @@ const State = Schema.Struct({
   sessionsSeen: Schema.String,
   since: Schema.optionalKey(Schema.String),
   devices: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  revokedSince: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
 });
 type State = typeof State.Type;
 const decodeState = Schema.decodeUnknownSync(Schema.fromJsonString(State));
@@ -239,7 +240,16 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
         // renaming a device in Settings never splits its trace history.
         const initialState = yield* readState(config.stateFile);
         const bindings = new Map<string, string>(Object.entries(initialState?.devices ?? {}));
-        const persistedDevices = () => Object.fromEntries(bindings);
+        // Earliest skipped trace timestamp per revoked device, so restoring a
+        // device replays any window skipped while it was revoked.
+        const revokedSince = new Map<string, string>(Object.entries(initialState?.revokedSince ?? {}));
+        const persistedState = (watermark: string, sessionsSeen: string): State => ({
+          watermark,
+          sessionsSeen,
+          since: config.since,
+          devices: Object.fromEntries(bindings),
+          ...(revokedSince.size ? { revokedSince: Object.fromEntries(revokedSince) } : {}),
+        });
 
         const save = Effect.fn('traces.save')(function* (rows: readonly TraceRow[]) {
           const { policy } = yield* pricing.load;
@@ -257,7 +267,11 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             const machineKey = (mapped.machine || 'unknown').toLowerCase();
             const device = traceDevice(devices, mapped.machine, mapped.platform, bindings.get(machineKey));
             bindings.set(machineKey, device.id);
-            if (revokedIds.has(device.id)) continue;
+            if (revokedIds.has(device.id)) {
+              const earliest = revokedSince.get(device.id);
+              if (!earliest || mapped.event.timestamp < earliest) revokedSince.set(device.id, mapped.event.timestamp);
+              continue;
+            }
             let group = byDevice.get(device.id);
             if (!group) byDevice.set(device.id, (group = { device, events: [] }));
             group.events.push(mapped.event);
@@ -278,20 +292,26 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
           return { rows: rows.length, stored: rows.length - withdrawn.length, changed };
         });
 
-        const pull = Effect.fn('traces.pull')(function* (sessions?: {
-          keys: readonly string[];
-          first: string;
-          last: string;
-        }) {
+        const pull = Effect.fn('traces.pull')(function* (
+          sessions?: {
+            keys: readonly string[];
+            first: string;
+            last: string;
+          },
+          rewindTo?: number,
+        ) {
           const now = yield* Clock.currentTimeMillis;
           const state = sessions === undefined ? yield* readState(config.stateFile) : undefined;
           const cutoverMovedEarlier =
             state !== undefined && state.since !== undefined && Date.parse(config.since) < Date.parse(state.since);
+          const baseFrom = cutoverMovedEarlier
+            ? Date.parse(config.since)
+            : Math.max(Date.parse(config.since), state ? Date.parse(state.watermark) - overlapMs : -Infinity);
           const from = sessions
             ? Math.max(Date.parse(config.since), Date.parse(`${sessions.first.replace(' ', 'T')}Z`) - 3_600_000)
-            : cutoverMovedEarlier
-              ? Date.parse(config.since)
-              : Math.max(Date.parse(config.since), state ? Date.parse(state.watermark) - overlapMs : -Infinity);
+            : rewindTo !== undefined
+              ? Math.max(Date.parse(config.since), Math.min(baseFrom, rewindTo))
+              : baseFrom;
           const totals = { rows: 0, stored: 0, changed: 0 };
           const end = sessions ? Math.min(now, Date.parse(`${sessions.last.replace(' ', 'T')}Z`) + 3_600_000) : now;
           for (let start = from; start < end; start += windowMs) {
@@ -306,12 +326,10 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             totals.changed += result.changed;
             if (!sessions) {
               const current = yield* readState(config.stateFile);
-              yield* writeState(config.stateFile, {
-                watermark: new Date(Math.min(until, now)).toISOString(),
-                sessionsSeen: current?.sessionsSeen ?? '',
-                since: config.since,
-                devices: persistedDevices(),
-              });
+              yield* writeState(
+                config.stateFile,
+                persistedState(new Date(Math.min(until, now)).toISOString(), current?.sessionsSeen ?? ''),
+              );
             }
           }
           return totals;
@@ -320,6 +338,22 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
         const cycle = Effect.gen(function* () {
           const started = yield* Clock.currentTimeMillis;
           const before = yield* readState(config.stateFile);
+          // If a previously revoked device was restored, rewind the pull to the
+          // earliest skipped call so its missing history is recovered.
+          const restoredIds: string[] = [];
+          let restoredFrom: number | undefined;
+          if (revokedSince.size) {
+            const devices = yield* store.getDevices();
+            const stillRevoked = new Set(
+              devices.filter((device) => device.revokedAt !== null).map((device) => device.id),
+            );
+            for (const [id, earliest] of revokedSince) {
+              if (stillRevoked.has(id)) continue;
+              restoredIds.push(id);
+              const ms = Date.parse(earliest);
+              if (Number.isFinite(ms)) restoredFrom = restoredFrom === undefined ? ms : Math.min(restoredFrom, ms);
+            }
+          }
           // A fresh hub's first pull already sees today's session metadata.
           const latest = (rows: readonly { latest: string }[], fallback: string) =>
             rows.reduce((max, row) => (row.latest > max ? row.latest : max), fallback);
@@ -327,7 +361,11 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             ? undefined
             : yield* client.changedSessions('1970-01-01 00:00:00');
           const seen = before?.sessionsSeen || latest(initialSessions ?? [], '');
-          const recent = yield* pull();
+          const recent = yield* pull(undefined, restoredFrom);
+          if (restoredIds.length) {
+            for (const id of restoredIds) revokedSince.delete(id);
+            known.clear();
+          }
           if (initialSessions) {
             for (const session of initialSessions) known.set(session.session_key, sessionFields(session));
           }
@@ -345,13 +383,7 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             : undefined;
           for (const session of stale) known.set(session.session_key, sessionFields(session));
           const after = yield* readState(config.stateFile);
-          if (after)
-            yield* writeState(config.stateFile, {
-              ...after,
-              sessionsSeen: latest(touched, seen),
-              since: config.since,
-              devices: persistedDevices(),
-            });
+          if (after) yield* writeState(config.stateFile, persistedState(after.watermark, latest(touched, seen)));
           const seconds = ((yield* Clock.currentTimeMillis) - started) / 1000;
           yield* Effect.logInfo(
             `Trace source (${seconds.toFixed(1)} s): ${recent.rows} rows (${recent.changed} changes)` +
