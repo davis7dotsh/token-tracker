@@ -795,9 +795,10 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         let byBucket = projectedBuckets.get(response);
         if (!byBucket) projectedBuckets.set(response, (byBucket = new Map()));
         const cacheKey = `${viewRevision}:${bucketKey}`;
-        if (byBucket.has(cacheKey)) return byBucket.get(cacheKey) ?? null;
+        const existing = byBucket.get(cacheKey);
+        if (existing) return existing;
         const result = projectBucketBreakdown(base.groupedBuckets, bucketKey, viewRevision, resolvedLabels);
-        byBucket.set(cacheKey, result);
+        if (result) byBucket.set(cacheKey, result);
         return result;
       };
       const getView = Effect.fn('rpc.GetUsageView')(

@@ -275,6 +275,8 @@ export type ViewSeriesRow = typeof ViewSeriesRow.Type;
 export const ViewDimension = Schema.Struct({
   totalCount: TokenCount,
   rows: Schema.Array(ViewSeriesRow),
+  otherT: Schema.optionalKey(Schema.Array(Schema.Number)),
+  otherC: Schema.optionalKey(Schema.Array(Schema.Number)),
 });
 export type ViewDimension = typeof ViewDimension.Type;
 

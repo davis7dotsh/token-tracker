@@ -121,6 +121,11 @@
         ? (() => {
             const sumCost = rows.reduce((sum, r) => sum + r.costUSD, 0);
             const sumUnpriced = rows.reduce((sum, r) => sum + r.unpricedTokens, 0);
+            const exactOtherValues = exactBucket
+              ? metric === 'tokens'
+                ? exactBucket.otherT
+                : exactBucket.otherC
+              : undefined;
             return {
               tokens: Math.max(0, total.tokens - sumTokens),
               costUSD: Math.max(0, total.costUSD - sumCost),
@@ -128,9 +133,9 @@
               text: 'Other',
               suffix: undefined,
               color: neutral,
-              values: buckets.map((b, i) =>
-                Math.max(0, b[metric] - rows.reduce((sum, r) => sum + (r.values[i] ?? 0), 0)),
-              ),
+              values:
+                exactOtherValues ??
+                buckets.map((b, i) => Math.max(0, b[metric] - rows.reduce((sum, r) => sum + (r.values[i] ?? 0), 0))),
             };
           })()
         : undefined;

@@ -1057,12 +1057,16 @@ test('minimal dashboard views, view deltas, bucket breakdowns, and lazy filters 
     expect(page2.sessions).toHaveLength(12);
     expect(page2.buckets).toBe(view.buckets);
 
-    // Bucket breakdown returns exact day-scoped rows + full-range sparklines
+    // Bucket breakdown returns exact day-scoped rows + full-range sparklines (including exact Other tail history)
     const activeDay = view.buckets.find((b) => b.tokens > 0)!.key;
     const bucket = await browser.getUsageBucket(query, activeDay);
     expect(bucket).not.toBeNull();
     expect(bucket!.key).toBe(activeDay);
     expect(bucket!.breakdown.projects.rows[0]?.t).toHaveLength(view.buckets.length);
+    if (bucket!.breakdown.projects.totalCount > 10) {
+      expect(bucket!.breakdown.projects.otherT).toHaveLength(view.buckets.length);
+      expect(bucket!.breakdown.projects.otherC).toHaveLength(view.buckets.length);
+    }
     expect(bucket!.breakdown.providers.rows[0]?.t).toBeUndefined();
     expect(await browser.getUsageBucket(query, '1999-01-01')).toBeNull();
 

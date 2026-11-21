@@ -2,7 +2,8 @@ import type { Rpc, RpcGroup } from 'effect/rpc';
 import type { UsageRpc } from '../shared/rpc';
 import type { DashboardPage, DashboardView, SessionSort, UsageQuery } from '../shared/domain';
 import { sessionPageSize } from '../shared/dashboard-page';
-import { projectDashboardViewFromPage } from '../shared/dashboard-view';
+import { groupDashboardBuckets, projectBucketBreakdown, projectDashboardViewFromPage } from '../shared/dashboard-view';
+import { projectLabels } from '../shared/project-label';
 import type { PricingRule } from '../shared/pricing';
 import {
   isDashboardBucketBreakdown,
@@ -153,6 +154,25 @@ export const makeDashboardClient = (
     return pending;
   };
 
+  const legacyPages = new Map<string, DashboardPage>();
+  const legacyQueryKey = (query: UsageQuery) => JSON.stringify(query);
+  const rememberLegacyPage = (query: UsageQuery, legacy: DashboardPage) => {
+    const key = legacyQueryKey(query);
+    legacyPages.delete(key);
+    legacyPages.set(key, legacy);
+    if (legacyPages.size > 4) {
+      const oldest = legacyPages.keys().next();
+      if (!oldest.done) legacyPages.delete(oldest.value);
+    }
+  };
+  const projectLegacyBucket = (legacy: DashboardPage, bucket: string) =>
+    projectBucketBreakdown(
+      groupDashboardBuckets(legacy),
+      bucket,
+      legacy.viewRevision ?? '',
+      projectLabels(legacy.filters.projects),
+    );
+
   return {
     getUsage: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetUsage', query, signal, usageTimeout),
     getSessionExport: (query: UsageQuery, signal?: AbortSignal) =>
@@ -221,6 +241,7 @@ export const makeDashboardClient = (
       const scopedBucket = bucket ? { bucket } : {};
       const fallback = async () => {
         const legacy = await call('GetUsagePage', { query, page, ...sorted }, signal, usageTimeout);
+        rememberLegacyPage(query, legacy);
         const projected = projectDashboardViewFromPage(legacy, query, bucket);
         pageSizes.set(projected, usagePageSize(legacy));
         commonSizes.set(projected.buckets, usagePageSize(legacy));
@@ -280,8 +301,14 @@ export const makeDashboardClient = (
       return next;
     },
     getUsageBucket: (query: UsageQuery, bucket: string, signal?: AbortSignal) =>
-      call('GetUsageBucket', { query, bucket }, signal, usageTimeout).catch((error: unknown) => {
-        if (error instanceof ProcedureUnavailable) return null;
+      call('GetUsageBucket', { query, bucket }, signal, usageTimeout).catch(async (error: unknown) => {
+        if (error instanceof ProcedureUnavailable) {
+          const cached = legacyPages.get(legacyQueryKey(query));
+          if (cached) return projectLegacyBucket(cached, bucket);
+          const legacy = await call('GetUsagePage', { query, page: 1 }, signal, usageTimeout);
+          rememberLegacyPage(query, legacy);
+          return projectLegacyBucket(legacy, bucket);
+        }
         throw error;
       }),
     getUsageFilters: (devices?: readonly string[], signal?: AbortSignal) =>

@@ -189,7 +189,12 @@ const viewSeriesRow = (value: unknown) =>
   optional(value.t, numbers) &&
   optional(value.c, numbers) &&
   optional(value.u, numbers);
-const viewDimension = (value: unknown) => record(value) && count(value.totalCount) && array(value.rows, viewSeriesRow);
+const viewDimension = (value: unknown) =>
+  record(value) &&
+  count(value.totalCount) &&
+  array(value.rows, viewSeriesRow) &&
+  optional(value.otherT, numbers) &&
+  optional(value.otherC, numbers);
 const viewDimensions = (value: unknown) =>
   record(value) && fields(value, ['devices', 'models', 'projects', 'providers', 'harnesses'], viewDimension);
 const viewProjectLabel = (value: unknown) => record(value) && fields(value, ['key', 'label'], string);

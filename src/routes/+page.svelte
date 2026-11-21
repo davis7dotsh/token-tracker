@@ -280,7 +280,7 @@
     if (force) {
       generation++;
       cache.clear();
-      bucketCache.clear();
+      // Bucket entries are bounded and keyed by view revision; unchanged deltas still need them.
     }
     loading = true;
     error = '';
@@ -405,7 +405,10 @@
           if (!c.signal.aborted && result) {
             rememberBucket(result);
             extendColors(result.breakdown);
-            if (day === targetDay && chartData?.viewRevision === view.viewRevision) selectedBucket = result;
+            if (day === targetDay) {
+              if (chartData?.viewRevision === result.viewRevision) selectedBucket = result;
+              else if (chartData?.viewRevision === view.viewRevision) void refresh(true);
+            }
           }
         })
         .catch(() => {})

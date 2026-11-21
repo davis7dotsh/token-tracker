@@ -265,9 +265,28 @@ export const projectBucketBreakdown = (
     const items = [...target.rows[group].entries()].map(([name, values]) => ({ name, ...values }));
     const selected = selectRankedItems(group, items);
     const includeSparkline = group !== 'providers' && group !== 'harnesses';
+    const hasOtherHistory = includeSparkline && items.length > viewRankedLimit;
+    let otherT: number[] | undefined;
+    let otherC: number[] | undefined;
+    if (hasOtherHistory) {
+      const tokenTail = [...items]
+        .sort((left, right) => right.tokens - left.tokens || left.name.localeCompare(right.name))
+        .slice(viewRankedLimit);
+      const costTail = [...items]
+        .sort((left, right) => right.costUSD - left.costUSD || left.name.localeCompare(right.name))
+        .slice(viewRankedLimit);
+      otherT = groupedBuckets.map((bucket) =>
+        tokenTail.reduce((sum, item) => sum + (bucket.rows[group].get(item.name)?.tokens ?? 0), 0),
+      );
+      otherC = groupedBuckets.map((bucket) =>
+        roundCost(costTail.reduce((sum, item) => sum + (bucket.rows[group].get(item.name)?.costUSD ?? 0), 0)),
+      );
+    }
     return {
       totalCount: items.length,
       rows: selected.map((item) => toSeriesRow(item, groupedBuckets, group, includeSparkline)),
+      ...(otherT ? { otherT } : {}),
+      ...(otherC ? { otherC } : {}),
     };
   };
   const breakdown: ViewDimensions = {

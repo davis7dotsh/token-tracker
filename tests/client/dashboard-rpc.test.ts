@@ -295,7 +295,9 @@ test('minimal view and filter clients fall back cleanly when an older hub lacks 
     const view = await client.getUsageView({ range: 'today', timezone: 'UTC' }, 1);
     expect(view.totals.tokens).toBe(dashboard.totals.tokens);
     expect(view.sessions).toHaveLength(1);
-    expect(await client.getUsageBucket({ range: 'today', timezone: 'UTC' }, '2026-10-15T10:00:00.000Z')).toBeNull();
+    const bucket = await client.getUsageBucket({ range: 'today', timezone: 'UTC' }, '2026-10-15T10:00:00.000Z');
+    expect(bucket?.key).toBe('2026-10-15T10:00:00.000Z');
+    expect(bucket?.breakdown.models.rows[0]?.name).toBe('gpt-6.1-sol');
     const filters = await client.getUsageFilters();
     expect(filters.models).toEqual(dashboard.filters.models);
     expect(attempts).toEqual(['GetUsageView', 'GetUsagePage', 'GetUsageBucket', 'GetUsageFilters', 'GetUsage']);
