@@ -702,6 +702,9 @@ describe('Antigravity accounting', () => {
       await mkdir(join(root, 'conversations'), { recursive: true });
       const dbFile = join(root, 'conversations', 'wal-only.db');
       const db = initConversationDb(dbFile, 'wal-only', true);
+      // Checkpoint the empty schema into the main DB so the subsequent usage
+      // inserts remain exclusively inside the WAL file.
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
       db.exec('PRAGMA wal_autocheckpoint = 0');
       db.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
         1,
@@ -716,13 +719,23 @@ describe('Antigravity accounting', () => {
           usage: { inputTokens: 100, outputTokens: 20, responseId: 'wal-call' },
         }),
       );
-      // Close with -wal preserved by simulating orphaned WAL (copy before close, or remove -shm after copying)
+      // Snapshot both the pre-checkpoint main DB and WAL before closing so
+      // db.close()'s checkpoint cannot copy the usage into the main DB file.
       const walFile = `${dbFile}-wal`;
       const shmFile = `${dbFile}-shm`;
+      const savedMain = await Bun.file(dbFile).bytes();
       const savedWal = await Bun.file(walFile).bytes();
       db.close();
-      await Bun.write(walFile, savedWal);
+      await Bun.write(dbFile, savedMain);
+      await rm(walFile, { force: true });
       await rm(shmFile, { force: true });
+
+      // Control check: main DB alone contains zero usage (proving usage lives only in the WAL).
+      const mainOnly = parseAntigravityDatabase(dbFile, 'wal-only');
+      expect(mainOnly.incomplete).toBe(false);
+      expect(mainOnly.parsed.events).toHaveLength(0);
+
+      await Bun.write(walFile, savedWal);
 
       const options = {
         home,
@@ -968,14 +981,15 @@ describe('Antigravity accounting', () => {
     ]);
 
     // Separate calls sharing a messageId with different responseIds must stay distinct
-    // even when a step carries only that shared messageId (no tokens lost in deduplicate).
+    // and retain the matching step's timestamp even when stepIndices is empty and the
+    // conversation has no creation timestamp.
     const multiFile = join(root, 'conversations', 'multi-resp.db');
     const multiDb = initConversationDb(multiFile, 'multi-resp');
     multiDb.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
       1,
       encodeStepMetadata({
         completedAt: '2026-11-20T03:00:00.000Z',
-        modelUsage: { inputTokens: 80, outputTokens: 20, messageId: 'msg-shared' },
+        modelUsage: { inputTokens: 80, outputTokens: 20, messageId: 'msg-shared', serviceTier: 'priority' },
       }),
       null,
     );
@@ -983,15 +997,21 @@ describe('Antigravity accounting', () => {
       0,
       encodeGenMetadata({
         responseModel: 'gemini-4-neon',
-        stepIndices: [1],
-        usage: { inputTokens: 80, outputTokens: 20, messageId: 'msg-shared', responseId: 'resp-first' },
+        stepIndices: [],
+        usage: {
+          inputTokens: 80,
+          outputTokens: 20,
+          messageId: 'msg-shared',
+          responseId: 'resp-first',
+          serviceTier: 'priority',
+        },
       }),
     );
     multiDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
       1,
       encodeGenMetadata({
         responseModel: 'gemini-4-neon',
-        stepIndices: [1],
+        stepIndices: [],
         usage: { inputTokens: 160, outputTokens: 40, messageId: 'msg-shared', responseId: 'resp-second' },
       }),
     );
@@ -1003,7 +1023,15 @@ describe('Antigravity accounting', () => {
       'antigravity:multi-resp:response:resp-first',
       'antigravity:multi-resp:response:resp-second',
     ]);
+    expect(multiEvents.map((e) => e.timestamp)).toEqual(['2026-11-20T03:00:00.000Z', '2026-11-20T03:00:00.000Z']);
     expect(multiEvents.reduce((sum, e) => sum + tokenTotal(e), 0)).toBe(300);
     expect(multi.retractedIds).toContain('antigravity:multi-resp:response:msg-shared');
+    const multiDirect = parseAntigravityDatabase(multiFile, 'multi-resp');
+    expect(
+      multiDirect.parsed.events.find((e) => e.event.id === 'antigravity:multi-resp:response:resp-first')?.tier,
+    ).toBe('priority');
+    expect(
+      multiDirect.parsed.events.find((e) => e.event.id === 'antigravity:multi-resp:response:resp-second')?.tier,
+    ).toBe('');
   });
 });

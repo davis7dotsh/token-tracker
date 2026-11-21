@@ -640,7 +640,6 @@ export const parseAntigravityDatabase = (
         }
         if (matchedStep === undefined) {
           for (const alias of aliases) {
-            if (usage.responseId && ambiguousAliases.has(alias)) continue;
             const candidates = stepsByAlias.get(alias);
             if (!candidates) continue;
             const compatible = candidates.filter(
@@ -676,6 +675,12 @@ export const parseAntigravityDatabase = (
         }
         const compatibleStepUsage =
           matchedStep?.modelUsage && compatibleUsage(usage, matchedStep.modelUsage) ? matchedStep.modelUsage : null;
+        const stepSharedAcrossResponses = Boolean(
+          usage.responseId &&
+          compatibleStepUsage &&
+          !compatibleStepUsage.responseId &&
+          responseAliases(compatibleStepUsage).some((alias) => ambiguousAliases.has(alias)),
+        );
         const effectiveResponseKey = canonicalResponseIdentity(
           usage,
           compatibleStepUsage,
@@ -696,9 +701,11 @@ export const parseAntigravityDatabase = (
         }
         const compatibleStep =
           matchedStep && (!matchedStep.modelUsage || compatibleStepUsage !== null) ? matchedStep : undefined;
+        const pricingStep = stepSharedAcrossResponses ? undefined : compatibleStep;
+        const pricingStepUsage = stepSharedAcrossResponses ? null : compatibleStepUsage;
         const modelEnum =
-          gen.modelEnum || usage.modelEnum || compatibleStepUsage?.modelEnum || compatibleStep?.generatorModelEnum || 0;
-        const executionId = gen.executionId || compatibleStep?.executionId || '';
+          gen.modelEnum || usage.modelEnum || pricingStepUsage?.modelEnum || pricingStep?.generatorModelEnum || 0;
+        const executionId = gen.executionId || pricingStep?.executionId || '';
         const model =
           normalizeResponseModel(gen.responseModel) ||
           normalizeResponseModel(gen.responseModelFull) ||
@@ -706,7 +713,7 @@ export const parseAntigravityDatabase = (
           modelByEnum.get(modelEnum) ||
           (executionId ? executorByExecutionId.get(executionId) : undefined) ||
           '';
-        const serviceTier = usage.serviceTier || compatibleStepUsage?.serviceTier || '';
+        const serviceTier = usage.serviceTier || pricingStepUsage?.serviceTier || '';
         const stepIdFallback = matchedStepIdx ?? fallbackStepIdx;
         const eventId = effectiveResponseKey
           ? `antigravity:${encodeURIComponent(conversationId)}:response:${encodeURIComponent(effectiveResponseKey)}`
