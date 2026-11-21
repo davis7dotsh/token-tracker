@@ -665,6 +665,17 @@ export const parseAntigravityDatabase = (
         return false;
       };
 
+      const responseIdsByStep = new Map<number, Set<string>>();
+      const matchedGenerators: {
+        genIdx: number;
+        gen: AntigravityGeneratorMetadata;
+        usage: AntigravityModelUsage;
+        aliases: string[];
+        matchedStepIdx: number | undefined;
+        matchedStep: AntigravityStepMetadata | undefined;
+        fallbackStepIdx: number | undefined;
+        compatibleStepUsage: AntigravityModelUsage | null;
+      }[] = [];
       for (const { idx: genIdx, gen } of generators) {
         const usage = gen.usage;
         if (!usage) continue;
@@ -724,12 +735,41 @@ export const parseAntigravityDatabase = (
         }
         const compatibleStepUsage =
           matchedStep?.modelUsage && compatibleUsage(usage, matchedStep.modelUsage) ? matchedStep.modelUsage : null;
-        const stepSharedAcrossResponses = Boolean(
-          usage.responseId &&
-          compatibleStepUsage &&
-          !compatibleStepUsage.responseId &&
-          responseAliases(compatibleStepUsage).some((alias) => ambiguousAliases.has(alias)),
-        );
+        if (matchedStepIdx !== undefined && compatibleStepUsage) {
+          const stepResponseId = usage.responseId || compatibleStepUsage.responseId;
+          if (stepResponseId) {
+            let set = responseIdsByStep.get(matchedStepIdx);
+            if (!set) {
+              set = new Set();
+              responseIdsByStep.set(matchedStepIdx, set);
+            }
+            set.add(stepResponseId);
+          }
+        }
+        matchedGenerators.push({
+          genIdx,
+          gen,
+          usage,
+          aliases,
+          matchedStepIdx,
+          matchedStep,
+          fallbackStepIdx,
+          compatibleStepUsage,
+        });
+      }
+
+      for (const {
+        genIdx,
+        gen,
+        usage,
+        aliases,
+        matchedStepIdx,
+        matchedStep,
+        fallbackStepIdx,
+        compatibleStepUsage,
+      } of matchedGenerators) {
+        const stepSharedAcrossResponses =
+          matchedStepIdx !== undefined && (responseIdsByStep.get(matchedStepIdx)?.size ?? 0) > 1;
         const effectiveResponseKey = canonicalResponseIdentity(
           usage,
           compatibleStepUsage,

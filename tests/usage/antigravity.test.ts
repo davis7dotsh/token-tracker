@@ -1079,5 +1079,84 @@ describe('Antigravity accounting', () => {
     expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:response:msg-split');
     expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:step:1');
     expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:step:2');
+
+    // Distinct referenced steps sharing a messageId must retain their own step model and tier.
+    const distinctStepsFile = join(root, 'conversations', 'distinct-ref-steps.db');
+    const distinctDb = initConversationDb(distinctStepsFile, 'distinct-ref-steps');
+    distinctDb.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      1,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T05:00:00.000Z',
+        modelUsage: {
+          modelEnum: 1467,
+          inputTokens: 50,
+          outputTokens: 10,
+          messageId: 'msg-distinct',
+          serviceTier: 'priority',
+        },
+      }),
+      null,
+    );
+    distinctDb.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      2,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T05:00:05.000Z',
+        modelUsage: {
+          modelEnum: 1468,
+          inputTokens: 70,
+          outputTokens: 15,
+          messageId: 'msg-distinct',
+        },
+      }),
+      null,
+    );
+    distinctDb
+      .query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)')
+      .run(3, encodeStepMetadata({ completedAt: '2026-11-20T05:00:10.000Z' }), null);
+    distinctDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      0,
+      encodeGenMetadata({
+        stepIndices: [1],
+        usage: { inputTokens: 50, outputTokens: 10, messageId: 'msg-distinct', responseId: 'resp-step1' },
+      }),
+    );
+    distinctDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      1,
+      encodeGenMetadata({
+        stepIndices: [2],
+        usage: { inputTokens: 70, outputTokens: 15, messageId: 'msg-distinct', responseId: 'resp-step2' },
+      }),
+    );
+    distinctDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      2,
+      encodeGenMetadata({
+        modelEnum: 1467,
+        responseModel: 'gemini-4-neon',
+        stepIndices: [3],
+        usage: { modelEnum: 1467, inputTokens: 1, outputTokens: 1, responseId: 'resp-donor-1' },
+      }),
+    );
+    distinctDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      3,
+      encodeGenMetadata({
+        modelEnum: 1468,
+        responseModel: 'gemini-3-flash',
+        stepIndices: [3],
+        usage: { modelEnum: 1468, inputTokens: 1, outputTokens: 1, responseId: 'resp-donor-2' },
+      }),
+    );
+    distinctDb.close();
+
+    const distinctParsed = parseAntigravityDatabase(distinctStepsFile, 'distinct-ref-steps').parsed;
+    const step1Ev = distinctParsed.events.find(
+      (e) => e.event.id === 'antigravity:distinct-ref-steps:response:resp-step1',
+    );
+    const step2Ev = distinctParsed.events.find(
+      (e) => e.event.id === 'antigravity:distinct-ref-steps:response:resp-step2',
+    );
+    expect(step1Ev?.event.model).toBe('gemini-4-neon');
+    expect(step1Ev?.tier).toBe('priority');
+    expect(step2Ev?.event.model).toBe('gemini-3-flash');
+    expect(step2Ev?.tier).toBe('');
   });
 });
