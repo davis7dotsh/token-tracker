@@ -69,14 +69,14 @@
         : [...data[g]];
       ranked.sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name));
       const list = g !== 'providers' && g !== 'harnesses';
-      const rows = (list ? ranked.slice(0, 7) : ranked).map((r) => ({
+      const rows = (list ? ranked.slice(0, 10) : ranked).map((r) => ({
         ...r,
         text: label(g, r.name),
         suffix: g === 'devices' ? suffixes.get(r.name) : undefined,
         color: colors.get(g)?.get(r.name) ?? neutral,
         values: list ? history.map((b) => b.rows.get(r.name)?.[metric] ?? 0) : [],
       }));
-      const tail = list ? ranked.slice(7) : [];
+      const tail = list ? ranked.slice(10) : [];
       const tailTotals = tail.reduce(
         (sum, r) => ({
           tokens: sum.tokens + r.tokens,
@@ -342,7 +342,7 @@
     letter-spacing: -0.025em;
   }
   .ranked {
-    height: calc(7 * var(--slot));
+    height: calc(10 * var(--slot));
   }
   .tail,
   .all,
@@ -549,7 +549,7 @@
     }
     .panel {
       display: none;
-      height: calc(9 * var(--slot) + 22px);
+      height: calc(12 * var(--slot) + 22px);
       padding: 6px 0 16px;
       border: 0;
     }
@@ -564,7 +564,7 @@
     }
     .split-key {
       display: block;
-      height: calc(8 * var(--slot));
+      height: calc(11 * var(--slot));
     }
     .split-key button {
       width: 100%;
