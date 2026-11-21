@@ -20,6 +20,7 @@ export type ParsedFile = {
   parentId: string;
   forkedAt: string;
   workspaceRoot?: string;
+  workspaceRepository?: string;
   compactionIds?: Set<string>;
   retractedIds?: string[];
   emptyClaudeRequests?: readonly { id: string; nativeMessageId: string; sessionId: string }[];

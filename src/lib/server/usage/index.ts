@@ -13,6 +13,7 @@ import {
 import { estimateCost, repriceEvent, resolveDisplayModel } from './pricing';
 import { loadPricing } from './pricing-runtime';
 import { makeRepositoryResolver } from './repository';
+import { collectAntigravityFiles } from './antigravity';
 import { collectGrokFiles } from './grok';
 import { readT3Metadata, t3MetadataKey } from './t3';
 import { readUsageDirectory } from './files';
@@ -29,7 +30,6 @@ export type CollectionOptions = SourceRootOptions & {
   deviceId?: string;
   cursorSnapshotFile?: string;
   pricingPolicy?: PricingPolicy;
-  t3DataDirectory?: string;
   t3Url?: string;
   // Only background collection writes this optional metadata cache. Manual
   // checks omit it and remain entirely read-only.
@@ -52,7 +52,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   const files: ParsedFile[] = [];
   const retainedCacheFiles = new Set<string>();
   for (const [sourceIndex, source] of sources.entries()) {
-    if (source.harness === 'grok') continue;
+    if (source.harness === 'grok' || source.harness === 'antigravity') continue;
     const realRoot = yield* Effect.result(fs.realPath(source.path));
     if (Result.isFailure(realRoot)) {
       if (realRoot.failure.reason._tag !== 'NotFound') {
@@ -153,6 +153,13 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
   files.push(...grok.files);
   warnings.push(...grok.warnings);
   if (grok.incomplete) markIncomplete();
+  const antigravity = yield* collectAntigravityFiles(
+    sources.flatMap((source, index) => (source.harness === 'antigravity' ? [{ source, index }] : [])),
+    { home, t3DataDirectory: options.t3DataDirectory, cacheDirectory, retainedCacheFiles },
+  );
+  files.push(...antigravity.files);
+  warnings.push(...antigravity.warnings);
+  if (antigravity.incomplete) markIncomplete();
   if (cacheDirectory) yield* pruneParsedCache(cacheDirectory, retainedCacheFiles);
   const candidateIds = new Set<string>();
   for (const file of files)
@@ -226,7 +233,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
       repository:
         repository && !repository.startsWith('local:')
           ? repository
-          : (sessionRepositories.get(key) ?? repository ?? null),
+          : (entry.event.repository ?? sessionRepositories.get(key) ?? repository ?? null),
       ...(options.deviceId ? { deviceId: options.deviceId } : {}),
     };
   });

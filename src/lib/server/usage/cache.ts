@@ -29,6 +29,7 @@ const CachedFile = Schema.Struct({
     parentId: Schema.String,
     forkedAt: Schema.String,
     workspaceRoot: Schema.optionalKey(Schema.String),
+    workspaceRepository: Schema.optionalKey(Schema.String),
     compactionIds: Schema.Array(Schema.String),
     retractedIds: Schema.Array(Schema.String),
     emptyClaudeRequests: Schema.optionalKey(
@@ -84,6 +85,7 @@ export const readParsedCache = Effect.fn('usage.readParsedCache')(function* (des
     parentId: cached.parentId,
     forkedAt: cached.forkedAt,
     ...(cached.workspaceRoot ? { workspaceRoot: cached.workspaceRoot } : {}),
+    ...(cached.workspaceRepository ? { workspaceRepository: cached.workspaceRepository } : {}),
     compactionIds: new Set(cached.compactionIds),
     retractedIds: [...cached.retractedIds],
     ...(cached.emptyClaudeRequests ? { emptyClaudeRequests: cached.emptyClaudeRequests } : {}),

@@ -23,6 +23,7 @@ test('offline Cursor import invalidates the local dashboard, preserves accountin
       piDirs: [],
       museDirs: [],
       grokDirs: [],
+      antigravityDirs: [],
     };
     const collect = () => Effect.runPromise(collectUsage(options).pipe(Effect.provide(BunServices.layer)));
     const revision = () => Effect.runPromise(usageRevision(options)().pipe(Effect.provide(BunServices.layer)));

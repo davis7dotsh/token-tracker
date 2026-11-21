@@ -698,6 +698,7 @@ test.skipIf(process.getuid?.() === 0 || process.platform === 'win32')(
       piDirs: [],
       grokDirs: [],
       museDirs: [],
+      antigravityDirs: [],
       deviceId: localDevice.id,
       t3DataDirectory: join(home, 'no-t3'),
       pricingPolicy: bundledPolicy,
