@@ -152,6 +152,31 @@
   const mid = (i: number) => `${(100 * (i + 0.5)) / buckets.length}%`;
   let hovered = $state<string>();
   const tip = $derived(buckets.findIndex((b) => b.key === hovered));
+  let plotEl = $state<HTMLDivElement>();
+  let tipEl = $state<HTMLDivElement>();
+  let tipPlacement = $state<'above' | 'below' | 'clamped'>('above');
+  let tipTop = $state(0);
+  $effect(() => {
+    if (tip < 0 || !plotEl || !tipEl) {
+      tipPlacement = 'above';
+      return;
+    }
+    // Re-run whenever the visible series count changes while hovering.
+    void orders[tip].length;
+    const plotRect = plotEl.getBoundingClientRect();
+    const tipHeight = tipEl.offsetHeight;
+    const gap = 6;
+    const margin = 8;
+    if (plotRect.top >= tipHeight + gap + margin) {
+      tipPlacement = 'above';
+    } else if (window.innerHeight - plotRect.bottom >= tipHeight + gap + margin) {
+      tipPlacement = 'below';
+    } else {
+      tipPlacement = 'clamped';
+      const maxTop = Math.max(margin, window.innerHeight - tipHeight - margin);
+      tipTop = Math.min(maxTop, Math.max(margin, plotRect.top)) - plotRect.top;
+    }
+  });
   let focused = $state<string>();
   const tabKey = $derived(buckets.find((b) => b.key === focused)?.key ?? active?.key ?? buckets[0]?.key);
   const bucketDescription = (b: (typeof buckets)[number]) =>
@@ -212,7 +237,7 @@
     <div class="ticks" aria-hidden="true">
       {#each [4, 3, 2, 1, 0] as n (n)}<span>{axisValue((peak * n) / 4, metric)}</span>{/each}
     </div>
-    <div class="plot">
+    <div class="plot" bind:this={plotEl}>
       <div class="rules" aria-hidden="true">
         {#each [4, 3, 2, 1, 0] as n (n)}<i></i>{/each}
       </div>
@@ -271,7 +296,15 @@
       {/if}
       {#if note}<div class="note">{note}</div>{/if}
       {#if tip >= 0}
-        <div role="tooltip" class="tip" style:--position={mid(tip)}>
+        <div
+          role="tooltip"
+          class="tip"
+          class:below={tipPlacement === 'below'}
+          class:clamped={tipPlacement === 'clamped'}
+          bind:this={tipEl}
+          style:--position={mid(tip)}
+          style:--tip-top={tipPlacement === 'clamped' ? `${tipTop}px` : undefined}
+        >
           <div class="tip-head">
             <span>{buckets[tip].label}{buckets[tip].partial ? ' · partial' : ''}</span><b
               >{valueOf(buckets[tip], metric)}{metric === 'tokens' ? ' tokens' : ''}</b
@@ -495,6 +528,14 @@
       12px/1.5 'Geist Variable',
       system-ui,
       sans-serif;
+  }
+  .tip.below {
+    top: calc(100% + 6px);
+    bottom: auto;
+  }
+  .tip.clamped {
+    top: var(--tip-top, 0px);
+    bottom: auto;
   }
   .tip-head,
   .tip-row {
