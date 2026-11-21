@@ -267,7 +267,9 @@ const retainedCost = (event: UsageEvent) => ({
   costKnown: event.costKnown,
 });
 const usesReportedGrokCost = (event: UsageEvent, policy: PricingPolicy) =>
-  event.harness === 'grok' && !resolverFor(policy).rules.has(event.rawModel ?? event.model);
+  event.harness === 'grok' &&
+  !event.id.startsWith('trace:') &&
+  !resolverFor(policy).rules.has(event.rawModel ?? event.model);
 const reportedGrokCost = (event: UsageEvent) => {
   const costUsd = event.reportedCostUsd;
   return costUsd !== undefined && Number.isFinite(costUsd) && costUsd > 0

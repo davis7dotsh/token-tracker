@@ -234,6 +234,21 @@ test('trace records replay without changes, move between machines, withdraw, and
   const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-traces-'));
   directories.push(directory);
   const cutoff = '2026-10-03T00:00:00.000Z';
+  // Pre-seed a collector row at/after the cutover before enabling trace mode:
+  // it stays on disk for rollback, but trace-mode reads must not double-count it.
+  const preRuntime = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }));
+  try {
+    const { token: preToken } = await preRuntime.runPromise(
+      UsageStore.use((store) => store.registerDevice(pairingSecret, device)),
+    );
+    await preRuntime.runPromise(
+      UsageStore.use((store) =>
+        store.syncUsage(device.id, preToken, { device, events: [{ ...event, id: 'pre-existing-after-cutoff' }] }),
+      ),
+    );
+  } finally {
+    await preRuntime.dispose();
+  }
   const runtime = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }, cutoff));
   const run = <A, E>(program: (store: UsageStore['Service']) => Effect.Effect<A, E>) =>
     runtime.runPromise(UsageStore.use(program));

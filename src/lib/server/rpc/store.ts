@@ -308,9 +308,21 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     // migrations within their CPU budget and retain the portable scan there.
     if (configuration.indexedPricing) yield* sql.unsafe(pricingShapeIndex).pipe(Effect.mapError(storageFailure));
     const pricingCandidates = makePricingCandidates(sql, decodeEvent);
+    const hiddenByCutoff = (id: string, timestamp: string) =>
+      configuration.collectorCutoff !== undefined &&
+      !id.startsWith('trace:') &&
+      new Date(timestamp).toISOString() >= configuration.collectorCutoff;
     const getPricingCandidates = (...args: Parameters<typeof pricingCandidates>) =>
       configuration.indexedPricing
         ? pricingCandidates(...args).pipe(
+            Effect.map((result) =>
+              result && configuration.collectorCutoff
+                ? {
+                    ...result,
+                    remote: result.remote.filter((event) => !hiddenByCutoff(event.id, event.timestamp)),
+                  }
+                : result,
+            ),
             Effect.catchDefect(() => Effect.fail(storageFailure())),
             Effect.mapError(storageFailure),
           )
@@ -338,7 +350,14 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     };
     let metadataRevision = 0;
     const packs = configuration.openDayPacks ? yield* configuration.openDayPacks : undefined;
-    const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure, packs);
+    const pages = makeWindowPages(
+      sql,
+      decodeEvent,
+      () => revision,
+      storageFailure,
+      packs,
+      configuration.collectorCutoff,
+    );
     let copiedRevision = -1;
     let copiedIds = new Set<string>();
     // Upload work remains cancellable, but a durable commit must publish its
@@ -424,7 +443,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const recordIds = [...batch.events.map((event) => event.id), ...(batch.deletedIds ?? [])];
       if ('traces' in authorization && !recordIds.every((id) => id.startsWith('trace:')))
         return yield* Effect.fail(new InvalidRequest({ message: 'The trace source only writes trace records.' }));
-      const cutoff = 'token' in authorization ? configuration.collectorCutoff : undefined;
+      const cutoff = !('traces' in authorization) ? configuration.collectorCutoff : undefined;
       for (const event of batch.events) {
         const amounts = [
           event.inputTokens,
@@ -639,7 +658,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     const decodeOutside = (rows: readonly StoredRow[]) =>
       Effect.try({
         try: () =>
-          rows.map((row) => ({ event: decodeEvent(row.payload), timestamp: row.timestamp, stamp: priceStamp(row) })),
+          rows
+            .filter((row) => !hiddenByCutoff(row.id, row.timestamp))
+            .map((row) => ({ event: decodeEvent(row.payload), timestamp: row.timestamp, stamp: priceStamp(row) })),
         catch: storageFailure,
       });
     const readWindow = Effect.fn('UsageStore.readWindow')(

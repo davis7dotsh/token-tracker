@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
+import { Result } from 'effect';
 import { bundledPolicy } from '../../src/lib/server/usage/pricing';
 import { traceEvent, traceSessionId, type TraceRow } from '../../src/lib/server/traces/events';
 import { makeProjectResolver } from '../../src/lib/server/traces/projects';
-import { traceDevice } from '../../src/lib/server/traces/source';
+import { traceDevice, traceSourceConfig } from '../../src/lib/server/traces/source';
 
 // Shaped like traces.v_usage_events (013_usage_events.sql): tracker classes.
 const row: TraceRow = {
@@ -128,10 +129,31 @@ test('a machine keeps its collector device; new and unknown machines get stable 
     },
   ];
   expect(traceDevice(devices, 'siva', 'linux')).toEqual({ id: 'new', name: 'siva', platform: 'linux' });
+  expect(traceDevice(devices, 'siva', 'linux', 'old')).toEqual({ id: 'old', name: 'Siva', platform: 'linux' });
+  expect(traceDevice([{ ...devices[1], id: 'trace:europa', name: 'Europa Server' }], 'europa', 'linux')).toEqual({
+    id: 'trace:europa',
+    name: 'Europa Server',
+    platform: 'linux',
+  });
   expect(traceDevice(devices, 'Europa', 'linux')).toEqual({ id: 'trace:europa', name: 'Europa', platform: 'linux' });
   expect(traceDevice(devices, '', 'unknown')).toEqual({
     id: 'trace:unknown',
     name: 'Unknown machine',
     platform: 'unknown',
   });
+  // Individual Grok trace calls use catalog rates instead of requiring collector reportedCostUsd.
+  const grok = traceEvent(
+    { ...row, harness: 'grok', model: 'grok-4.6', cache_write_tokens: 0, cache_write_1h_tokens: 0 },
+    resolve,
+    bundledPolicy,
+    since,
+  );
+  expect(grok?.event.costKnown).toBe(true);
+  expect(grok?.event.costUsd).toBeGreaterThan(0);
+  // Remote plaintext HTTP trace URLs are rejected; loopback HTTP and HTTPS are allowed.
+  expect(Result.isFailure(traceSourceConfig('/tmp', { TOKEN_TRACKER_TRACES_URL: 'http://10.0.0.5:8123' }))).toBe(true);
+  expect(Result.isSuccess(traceSourceConfig('/tmp', { TOKEN_TRACKER_TRACES_URL: 'http://127.0.0.1:8123' }))).toBe(true);
+  expect(Result.isSuccess(traceSourceConfig('/tmp', { TOKEN_TRACKER_TRACES_URL: 'https://ch.example.com' }))).toBe(
+    true,
+  );
 });

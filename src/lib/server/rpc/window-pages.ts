@@ -37,6 +37,7 @@ export const makeWindowPages = (
   revision: () => number,
   failure: () => StorageFailure,
   packs?: DayPacks,
+  collectorCutoff?: string,
 ) => {
   type Page = ReturnType<typeof emptyWindow> & { day: string; times: string[] };
   const lowerBound = (times: readonly string[], bound: string) => {
@@ -147,6 +148,9 @@ export const makeWindowPages = (
                     break;
                   }
                   const row = next.value;
+                  // In trace mode, collector rows at or after the cutover stay
+                  // on disk for rollback but do not contribute alongside traces.
+                  if (collectorCutoff && row.timestamp >= collectorCutoff && !row.id.startsWith('trace:')) continue;
                   const event = shareEvent(decode(row.payload));
                   if (row.pricing_snapshot !== snapshot) snapshot = row.pricing_snapshot;
                   decoded.events.push(event);

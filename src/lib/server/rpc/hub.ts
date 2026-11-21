@@ -591,8 +591,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         }
       >();
       // Dashboard views omit sources, so remote device heartbeats do not bust
-      // view delta revisions when accounting has not changed.
-      const viewVersions = new WeakMap<DashboardResponse, { selection: string | undefined; revision: string }>();
+      // view delta revisions when accounting and filter catalogs have not changed.
+      const viewVersions = new WeakMap<
+        DashboardResponse,
+        { selection: string | undefined; filterRevision: string; revision: string }
+      >();
       const projectedViews = new WeakMap<DashboardResponse, ProjectedViewBase>();
       const projectedBuckets = new WeakMap<DashboardResponse, Map<string, DashboardBucketBreakdown | null>>();
       const getAggregate = Effect.fn('rpc.getAggregate')(
@@ -788,10 +791,10 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           sessionOffset,
         };
       });
-      const getViewRevision = (response: DashboardResponse, selection: string | undefined) => {
+      const getViewRevision = (response: DashboardResponse, selection: string | undefined, filterRevision: string) => {
         let version = viewVersions.get(response);
-        if (!version || version.selection !== selection) {
-          version = { selection, revision: randomBytes(16).toString('hex') };
+        if (!version || version.selection !== selection || version.filterRevision !== filterRevision) {
+          version = { selection, filterRevision, revision: randomBytes(16).toString('hex') };
           viewVersions.set(response, version);
         }
         return version.revision;
@@ -837,7 +840,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           const catalog = yield* readFilterCatalog(input.normalized.devices);
           const response = cached.response;
           const base = getViewBase(response);
-          const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+          const viewRevision = getViewRevision(
+            response,
+            JSON.stringify(input.query.models),
+            catalog.filters.filterRevision,
+          );
           const sessions = yield* sortedSessions(response.sessions, response.machine, sort);
           const sessionCount = sessions.length;
           const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
@@ -901,8 +908,13 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           function* (request) {
             const { input, cached } = yield* getAggregate(request.query);
             yield* warmer.visited(request.query);
+            const catalog = yield* readFilterCatalog(input.normalized.devices);
             const response = cached.response;
-            const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+            const viewRevision = getViewRevision(
+              response,
+              JSON.stringify(input.query.models),
+              catalog.filters.filterRevision,
+            );
             if (request.viewRevision !== viewRevision || request.sort?.by === 'device') {
               return yield* getView(request);
             }
@@ -919,7 +931,6 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               };
             }
             const base = getViewBase(response);
-            const catalog = yield* readFilterCatalog(input.normalized.devices);
             const pageSessions = sessions
               .slice(sessionOffset, sessionOffset + sessionPageSize)
               .map((session) => projectViewSession(session, base.knownModels));
@@ -946,7 +957,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
             const catalog = yield* readFilterCatalog(input.normalized.devices);
             const response = cached.response;
             const base = getViewBase(response);
-            const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+            const viewRevision = getViewRevision(
+              response,
+              JSON.stringify(input.query.models),
+              catalog.filters.filterRevision,
+            );
             return getBucketForResponse(response, base, bucket, viewRevision, catalog.projectLabels);
           },
           Effect.mapError((error) =>

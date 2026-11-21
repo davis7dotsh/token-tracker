@@ -22,16 +22,25 @@ export type TraceSourceConfig = {
   readonly stateFile: string;
 };
 
+const isLoopbackHost = (hostname: string) => {
+  const bare = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return bare === 'localhost' || bare === '::1' || bare === '127.0.0.1' || /^127\.\d+\.\d+\.\d+$/.test(bare);
+};
+
 export const traceSourceConfig = (dataDirectory: string, env: NodeJS.ProcessEnv = process.env) => {
   const url = env.TOKEN_TRACKER_TRACES_URL?.trim();
   if (!url) return Result.succeed(undefined);
+  const parsedUrl = URL.canParse(url) ? new URL(url) : undefined;
+  const secureUrl =
+    parsedUrl !== undefined &&
+    (parsedUrl.protocol === 'https:' || (parsedUrl.protocol === 'http:' && isLoopbackHost(parsedUrl.hostname)));
   const since = new Date(env.TOKEN_TRACKER_TRACES_SINCE?.trim() || '1970-01-01T00:00:00Z');
   const minutes = Number(env.TOKEN_TRACKER_TRACES_INTERVAL_MINUTES ?? 5);
-  if (!URL.canParse(url) || !Number.isFinite(since.getTime()) || !(minutes >= 0.5 && minutes <= 1440))
+  if (!secureUrl || !Number.isFinite(since.getTime()) || !(minutes >= 0.5 && minutes <= 1440))
     return Result.fail(
       new TraceSourceError({
         message:
-          'Trace source: TOKEN_TRACKER_TRACES_URL must be a URL, TOKEN_TRACKER_TRACES_SINCE an ISO time, and TOKEN_TRACKER_TRACES_INTERVAL_MINUTES 0.5–1440.',
+          'Trace source: TOKEN_TRACKER_TRACES_URL must be an https:// URL (or loopback http://), TOKEN_TRACKER_TRACES_SINCE an ISO time, and TOKEN_TRACKER_TRACES_INTERVAL_MINUTES 0.5–1440.',
       }),
     );
   const projectsFile = env.TOKEN_TRACKER_TRACES_PROJECTS?.trim();
@@ -76,7 +85,12 @@ const ChangedSession = Schema.Struct({
   repository: Schema.String,
   title: Schema.String,
 });
-const State = Schema.Struct({ watermark: Schema.String, sessionsSeen: Schema.String });
+const State = Schema.Struct({
+  watermark: Schema.String,
+  sessionsSeen: Schema.String,
+  since: Schema.optionalKey(Schema.String),
+  devices: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+});
 type State = typeof State.Type;
 const decodeState = Schema.decodeUnknownSync(Schema.fromJsonString(State));
 const decodeRow = Schema.decodeUnknownEffect(TraceRow);
@@ -175,16 +189,28 @@ const writeState = (file: string, state: State) =>
     catch: failure('The trace source state could not be saved.'),
   });
 
-// Continue a machine's history under its collector device when one exists.
-// New machines get a stable `trace:` device; usage without a known machine
-// collects under one "Unknown machine" device rather than being dropped.
-export const traceDevice = (devices: readonly Device[], machine: string, platform: string): DeviceRegistration => {
+// Continue a machine's history under its bound or collector device when one
+// exists. New machines get a stable `trace:` device; usage without a known
+// machine collects under one "Unknown machine" device rather than being dropped.
+export const traceDevice = (
+  devices: readonly Device[],
+  machine: string,
+  platform: string,
+  boundDeviceId?: string,
+): DeviceRegistration => {
   const name = machine || 'Unknown machine';
+  const stableId = `trace:${(machine || 'unknown').toLowerCase()}`.slice(0, 200);
+  if (boundDeviceId) {
+    const bound = devices.find((device) => device.id === boundDeviceId);
+    if (bound) return { id: bound.id, name: bound.name, platform: bound.platform };
+  }
+  const stable = devices.find((device) => device.id === stableId);
+  if (stable) return { id: stable.id, name: stable.name, platform: stable.platform };
   const known = devices
     .filter((device) => device.name.toLowerCase() === name.toLowerCase() && !device.revokedAt)
     .sort((left, right) => (right.lastSeen ?? '').localeCompare(left.lastSeen ?? ''))[0];
   if (known) return { id: known.id, name: known.name, platform: known.platform };
-  return { id: `trace:${(machine || 'unknown').toLowerCase()}`.slice(0, 200), name, platform };
+  return { id: stableId, name, platform };
 };
 
 export const traceSourceLayer = (config: TraceSourceConfig) =>
@@ -206,24 +232,32 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             )
           : [];
         const repository = makeProjectResolver([...learned, ...exported]);
-        // Session fields as last stored, so a session rewrite with nothing new
-        // does not re-read its rows. Empty after a restart: re-read once.
+        // Session fields as last fully reconciled, so a session rewrite with
+        // nothing new does not re-read its rows. Empty after restart: re-read once.
         const known = new Map<string, string>();
+        // Stable machine-to-device bindings persisted in trace-source.json so
+        // renaming a device in Settings never splits its trace history.
+        const initialState = yield* readState(config.stateFile);
+        const bindings = new Map<string, string>(Object.entries(initialState?.devices ?? {}));
+        const persistedDevices = () => Object.fromEntries(bindings);
 
         const save = Effect.fn('traces.save')(function* (rows: readonly TraceRow[]) {
           const { policy } = yield* pricing.load;
           const pricingUpdatedAt = `${policy.catalog.updatedAt} (${policy.revision})`;
           const devices = yield* store.getDevices();
+          const revokedIds = new Set(devices.filter((device) => device.revokedAt !== null).map((device) => device.id));
           const byDevice = new Map<string, { device: DeviceRegistration; events: UsageEvent[] }>();
           const withdrawn: string[] = [];
           for (const row of rows) {
-            if (row.session_updated_at > '1970-01-02') known.set(row.session_key, sessionFields(row));
             const mapped = traceEvent(row, repository, policy, config.since);
             if (!mapped) {
               withdrawn.push(row.id);
               continue;
             }
-            const device = traceDevice(devices, mapped.machine, mapped.platform);
+            const machineKey = (mapped.machine || 'unknown').toLowerCase();
+            const device = traceDevice(devices, mapped.machine, mapped.platform, bindings.get(machineKey));
+            bindings.set(machineKey, device.id);
+            if (revokedIds.has(device.id)) continue;
             let group = byDevice.get(device.id);
             if (!group) byDevice.set(device.id, (group = { device, events: [] }));
             group.events.push(mapped.event);
@@ -251,9 +285,13 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
         }) {
           const now = yield* Clock.currentTimeMillis;
           const state = sessions === undefined ? yield* readState(config.stateFile) : undefined;
+          const cutoverMovedEarlier =
+            state !== undefined && state.since !== undefined && Date.parse(config.since) < Date.parse(state.since);
           const from = sessions
             ? Math.max(Date.parse(config.since), Date.parse(`${sessions.first.replace(' ', 'T')}Z`) - 3_600_000)
-            : Math.max(Date.parse(config.since), state ? Date.parse(state.watermark) - overlapMs : -Infinity);
+            : cutoverMovedEarlier
+              ? Date.parse(config.since)
+              : Math.max(Date.parse(config.since), state ? Date.parse(state.watermark) - overlapMs : -Infinity);
           const totals = { rows: 0, stored: 0, changed: 0 };
           const end = sessions ? Math.min(now, Date.parse(`${sessions.last.replace(' ', 'T')}Z`) + 3_600_000) : now;
           for (let start = from; start < end; start += windowMs) {
@@ -271,6 +309,8 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
               yield* writeState(config.stateFile, {
                 watermark: new Date(Math.min(until, now)).toISOString(),
                 sessionsSeen: current?.sessionsSeen ?? '',
+                since: config.since,
+                devices: persistedDevices(),
               });
             }
           }
@@ -283,8 +323,14 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
           // A fresh hub's first pull already sees today's session metadata.
           const latest = (rows: readonly { latest: string }[], fallback: string) =>
             rows.reduce((max, row) => (row.latest > max ? row.latest : max), fallback);
-          const seen = before?.sessionsSeen || latest(yield* client.changedSessions('1970-01-01 00:00:00'), '');
+          const initialSessions = before?.sessionsSeen
+            ? undefined
+            : yield* client.changedSessions('1970-01-01 00:00:00');
+          const seen = before?.sessionsSeen || latest(initialSessions ?? [], '');
           const recent = yield* pull();
+          if (initialSessions) {
+            for (const session of initialSessions) known.set(session.session_key, sessionFields(session));
+          }
           // New usage first: warm the last view before the slower re-reads of
           // older sessions, whose days that view usually does not include.
           if (recent.changed) yield* refreshed;
@@ -299,7 +345,13 @@ export const traceSourceLayer = (config: TraceSourceConfig) =>
             : undefined;
           for (const session of stale) known.set(session.session_key, sessionFields(session));
           const after = yield* readState(config.stateFile);
-          if (after) yield* writeState(config.stateFile, { ...after, sessionsSeen: latest(touched, seen) });
+          if (after)
+            yield* writeState(config.stateFile, {
+              ...after,
+              sessionsSeen: latest(touched, seen),
+              since: config.since,
+              devices: persistedDevices(),
+            });
           const seconds = ((yield* Clock.currentTimeMillis) - started) / 1000;
           yield* Effect.logInfo(
             `Trace source (${seconds.toFixed(1)} s): ${recent.rows} rows (${recent.changed} changes)` +
