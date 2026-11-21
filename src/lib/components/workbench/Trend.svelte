@@ -2,7 +2,8 @@
   import { untrack } from 'svelte';
   import { prefersReducedMotion, Tween } from 'svelte/motion';
   import { area, curveMonotoneX, easeCubicInOut, easeCubicOut, interpolateNumberArray, line } from 'd3';
-  import type { DashboardResponse } from '../../shared/domain';
+  import type { DashboardView, Device } from '../../shared/domain';
+  import { viewRankedLimit } from '../../shared/dashboard-view';
   import {
     axisValue,
     bucketSelection,
@@ -10,8 +11,8 @@
     groupNames,
     groups,
     nicePeak,
-    timeBuckets,
     valueOf,
+    viewBuckets,
     type Group,
     type Metric,
   } from '../../client/usage-workbench';
@@ -19,6 +20,7 @@
 
   let {
     data,
+    devices = [],
     group,
     metric,
     colors,
@@ -29,7 +31,8 @@
     chart,
     setChart,
   }: {
-    data: DashboardResponse;
+    data: DashboardView;
+    devices?: readonly Device[];
     group: Group;
     metric: Metric;
     colors: ReadonlyMap<string, string>;
@@ -46,25 +49,34 @@
   ] as const;
   const lines = $derived(chart === 'line');
 
-  const buckets = $derived(timeBuckets(data, group));
+  const buckets = $derived(viewBuckets(data));
   const active = $derived(bucketSelection(buckets, selected).bucket);
   const stackPeak = $derived(nicePeak(buckets.reduce((max, b) => Math.max(max, b[metric]), 0)));
-  const ranked = $derived([...data[group]].sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name)));
-  const suffixes = $derived(group === 'devices' ? deviceSuffixes(data.devices, label) : undefined);
+  const dimension = $derived(data.breakdown[group]);
+  const ranked = $derived([...dimension.rows].sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name)));
+  const suffixes = $derived(
+    group === 'devices'
+      ? deviceSuffixes(devices.length ? devices.map((d) => ({ name: d.id })) : data.breakdown.devices.rows, label)
+      : undefined,
+  );
   const neutral = 'var(--wb-muted)';
   const top = $derived(
-    ranked.slice(0, 10).map(({ name }) => ({
-      name,
-      text: label(group, name) + (suffixes?.has(name) ? ` · ${suffixes.get(name)}` : ''),
-      color: colors.get(name) ?? neutral,
+    ranked.slice(0, viewRankedLimit).map((row) => ({
+      name: row.name,
+      row,
+      text: label(group, row.name) + (suffixes?.has(row.name) ? ` · ${suffixes.get(row.name)}` : ''),
+      color: colors.get(row.name) ?? neutral,
     })),
   );
-  const other = { name: null, text: 'Other', color: neutral };
-  const series = $derived(ranked.length > top.length ? [...top, other] : top);
-  const zero = { tokens: 0, costUSD: 0, unpricedTokens: 0 };
+  const other = { name: null, row: undefined, text: 'Other', color: neutral };
+  const series = $derived(dimension.totalCount > top.length ? [...top, other] : top);
   const stacks = $derived(
-    buckets.map((b) => {
-      const parts = top.map((s) => b.rows.get(s.name) ?? zero);
+    buckets.map((b, i) => {
+      const parts = top.map((s) => ({
+        tokens: s.row.t?.[i] ?? 0,
+        costUSD: s.row.c?.[i] ?? 0,
+        unpricedTokens: s.row.u?.[i] ?? 0,
+      }));
       if (series.length > parts.length) {
         const tail = { tokens: b.tokens, costUSD: b.costUSD, unpricedTokens: b.unpricedTokens };
         for (const p of parts) {
@@ -72,7 +84,11 @@
           tail.costUSD -= p.costUSD;
           tail.unpricedTokens -= p.unpricedTokens;
         }
-        parts.push({ ...tail, costUSD: Math.max(0, tail.costUSD) });
+        parts.push({
+          tokens: Math.max(0, tail.tokens),
+          costUSD: Math.max(0, tail.costUSD),
+          unpricedTokens: Math.max(0, tail.unpricedTokens),
+        });
       }
       return parts;
     }),
@@ -139,9 +155,7 @@
       ? 'No usage in this scope.'
       : metric === 'costUSD' && data.totals.tokens === data.totals.unpricedTokens
         ? 'No priced usage in this scope.'
-        : buckets.some((b) => !b.hasHistory)
-          ? `No ${groupNames[group].toLowerCase()} history available.`
-          : '',
+        : '',
   );
   const ticks = (length: number, count: number) =>
     length <= count
@@ -310,11 +324,11 @@
               >{valueOf(buckets[tip], metric)}{metric === 'tokens' ? ' tokens' : ''}</b
             >
           </div>
-          {#if buckets[tip].hasHistory}{#each orders[tip] as j (series[j].name)}<div class="tip-row">
-                <i class="dot" style:--ink={series[j].color}></i><span>{series[j].text}</span><b
-                  >{valueOf(stacks[tip][j], metric)}</b
-                >
-              </div>{/each}{/if}
+          {#each orders[tip] as j (series[j].name)}<div class="tip-row">
+              <i class="dot" style:--ink={series[j].color}></i><span>{series[j].text}</span><b
+                >{valueOf(stacks[tip][j], metric)}</b
+              >
+            </div>{/each}
         </div>
       {/if}
     </div>

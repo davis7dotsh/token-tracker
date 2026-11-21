@@ -4,15 +4,15 @@ const base = process.argv[2] ?? 'http://127.0.0.1:5182';
 const ranges = ['today', '7d', '30d', '90d', '6m', 'all'] as const;
 const range = ranges.find((value) => value === (process.argv[3] ?? '30d'));
 const iterations = Number(process.argv[4] ?? 5);
-const shape = process.argv[5] ?? 'full';
+const shape = process.argv[5] ?? 'view';
 if (
-  (shape !== 'full' && shape !== 'page') ||
+  (shape !== 'full' && shape !== 'page' && shape !== 'view') ||
   !range ||
   !Number.isInteger(iterations) ||
   iterations < 1 ||
   iterations > 50
 ) {
-  console.error('Usage: bun run bench [base-url] [today|7d|30d|90d|6m|all] [repeat-count: 1–50] [full|page]');
+  console.error('Usage: bun run bench [base-url] [today|7d|30d|90d|6m|all] [repeat-count: 1–50] [view|page|full]');
   process.exit(1);
 }
 const client = makeDashboardClient(new URL('/rpc', base).href, { requestTimeoutMs: 180_000 });
@@ -28,7 +28,12 @@ const measure = async <A>(operation: string, run: () => Promise<A>) => {
 };
 
 try {
-  const read = () => (shape === 'page' ? client.getUsagePage(query, 1) : client.getUsage(query));
+  const read = async () =>
+    shape === 'view'
+      ? await client.getUsageView(query, 1)
+      : shape === 'page'
+        ? await client.getUsagePage(query, 1)
+        : await client.getUsage(query);
   console.log(JSON.stringify({ range, timezone: query.timezone, iterations, shape }));
   await measure('devices', () => client.getDevices());
   const first = await measure('usage-first', read);

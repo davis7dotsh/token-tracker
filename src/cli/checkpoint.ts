@@ -76,6 +76,34 @@ export const acknowledgeEvents = (
     : {}),
 });
 
-export function* batchesOf<A>(values: readonly A[], limit = 500) {
+export const defaultSyncBatchMaxItems = 500;
+// Half of @sveltejs/adapter-node's default 512 KiB BODY_SIZE_LIMIT so new
+// collectors never fail against un-upgraded self-hosted hubs or strict proxies.
+export const defaultSyncBatchMaxBytes = 256 * 1024;
+
+export function* batchesOf<A>(values: readonly A[], limit = defaultSyncBatchMaxItems) {
   for (let offset = 0; offset < values.length; offset += limit) yield values.slice(offset, offset + limit);
+}
+
+export function* byteBudgetedBatches<A>(
+  values: readonly A[],
+  measure: (value: A) => number,
+  options: { maxItems?: number; maxBytes?: number; overheadBytes?: number } = {},
+) {
+  const maxItems = Math.max(1, options.maxItems ?? defaultSyncBatchMaxItems);
+  const maxBytes = Math.max(1, options.maxBytes ?? defaultSyncBatchMaxBytes);
+  const overhead = Math.max(0, options.overheadBytes ?? 0);
+  let batch: A[] = [];
+  let bytes = overhead;
+  for (const value of values) {
+    const itemBytes = measure(value) + 1;
+    if (batch.length > 0 && (batch.length >= maxItems || bytes + itemBytes > maxBytes)) {
+      yield batch;
+      batch = [];
+      bytes = overhead;
+    }
+    batch.push(value);
+    bytes += itemBytes;
+  }
+  if (batch.length > 0) yield batch;
 }

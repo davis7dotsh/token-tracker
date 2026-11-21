@@ -269,3 +269,37 @@ test('CSV falls back only for an explicitly missing export RPC', async () => {
     await client.dispose();
   }
 });
+
+test('minimal view and filter clients fall back cleanly when an older hub lacks the new RPC tags', async () => {
+  const missing = (tag: string) => ({ _tag: 'Die', defect: `Unknown request tag: ${tag}` });
+  const failure = (id: string, ...cause: unknown[]) => ({
+    _tag: 'Exit',
+    requestId: id,
+    exit: { _tag: 'Failure', cause },
+  });
+  const legacyPage = { ...dashboard, viewRevision: 'rev-1', sessionCount: 1, sessionOffset: 0 };
+  const attempts: string[] = [];
+  const client = makeDashboardClient('/rpc', {
+    fetch: async (_, { body }) => {
+      if (typeof body !== 'string') throw new Error('expected wire message');
+      const { id, tag } = JSON.parse(body);
+      attempts.push(tag);
+      if (tag === 'GetUsageView' || tag === 'GetUsageBucket' || tag === 'GetUsageFilters')
+        return Response.json(failure(id, missing(tag)));
+      if (tag === 'GetUsagePage') return Response.json(success(id, legacyPage));
+      if (tag === 'GetUsage') return Response.json(success(id, dashboard));
+      throw new Error(`unexpected tag ${tag}`);
+    },
+  });
+  try {
+    const view = await client.getUsageView({ range: 'today', timezone: 'UTC' }, 1);
+    expect(view.totals.tokens).toBe(dashboard.totals.tokens);
+    expect(view.sessions).toHaveLength(1);
+    expect(await client.getUsageBucket({ range: 'today', timezone: 'UTC' }, '2026-10-15T10:00:00.000Z')).toBeNull();
+    const filters = await client.getUsageFilters();
+    expect(filters.models).toEqual(dashboard.filters.models);
+    expect(attempts).toEqual(['GetUsageView', 'GetUsagePage', 'GetUsageBucket', 'GetUsageFilters', 'GetUsage']);
+  } finally {
+    await client.dispose();
+  }
+});

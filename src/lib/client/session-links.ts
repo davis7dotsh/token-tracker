@@ -1,5 +1,5 @@
 import type { Session } from '../shared/domain';
-import { projectLabel, projectParts } from '../shared/project-label';
+import { projectLabel, projectLabels } from '../shared/project-label';
 
 export const safeWebUrl = (value: string | undefined) => {
   if (!value) return undefined;
@@ -45,38 +45,8 @@ export const repositoryWebUrl = (repository: string | null) => {
   return url.pathname !== '/' && !url.search && !url.hash ? value : undefined;
 };
 
-export { projectLabel };
+export { projectLabel, projectLabels };
 
-export const projectLabels = (values: readonly string[]) => {
-  const entries = [...new Set(values)].map((key) => ({
-    key,
-    parts: projectParts(key),
-    depth: 2,
-    label: projectLabel(key),
-  }));
-  let changed = true;
-  while (changed) {
-    changed = false;
-    const groups = new Map<string, typeof entries>();
-    for (const entry of entries) {
-      const group = groups.get(entry.label);
-      if (group) group.push(entry);
-      else groups.set(entry.label, [entry]);
-    }
-    for (const group of groups.values()) {
-      if (group.length < 2) continue;
-      const expandable = group.filter((entry) => entry.depth < entry.parts.length);
-      for (const entry of expandable.length ? expandable : group) {
-        if (expandable.length) entry.depth++;
-        const label = expandable.length ? entry.parts.slice(-entry.depth).join('/') : entry.key;
-        if (entry.label === label) continue;
-        entry.label = label;
-        changed = true;
-      }
-    }
-  }
-  return new Map(entries.map((entry) => [entry.key, entry.label]));
-};
-
-export const sessionDisplayName = (session: Pick<Session, 'sessionTitle' | 'projectName' | 'repository' | 'project'>) =>
-  session.sessionTitle?.trim() || session.projectName?.trim() || projectLabel(session.repository ?? session.project);
+export const sessionDisplayName = (
+  session: Pick<Session, 'sessionTitle' | 'projectName' | 'project'> & { repository?: string | null },
+) => session.sessionTitle?.trim() || session.projectName?.trim() || projectLabel(session.repository ?? session.project);

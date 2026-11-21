@@ -1,11 +1,15 @@
 import { sessionPageSize } from '../shared/dashboard-page';
 import type {
+  DashboardBucketBreakdown,
   DashboardPageDelta,
   DashboardPage,
   DashboardResponse,
+  DashboardView,
+  DashboardViewDelta,
   SessionExport,
   SourceStatus,
   Totals,
+  UsageFilters,
   UsageInfo,
 } from '../shared/domain';
 
@@ -169,3 +173,73 @@ export const isHubInfo = (value: unknown) =>
   record(value.pricing) &&
   fields(value.pricing, ['source', 'updatedAt'], string) &&
   fields(value.pricing, ['checkedAt', 'refreshError'], nullableString);
+
+const numbers = (value: unknown) => array(value, number);
+const viewBucket = (value: unknown) =>
+  record(value) &&
+  string(value.key) &&
+  optional(value.end, string) &&
+  fields(value, ['tokens', 'costUSD'], number) &&
+  optional(value.unpricedTokens, number);
+const viewSeriesRow = (value: unknown) =>
+  record(value) &&
+  string(value.name) &&
+  fields(value, ['tokens', 'costUSD'], number) &&
+  optional(value.unpricedTokens, number) &&
+  optional(value.t, numbers) &&
+  optional(value.c, numbers) &&
+  optional(value.u, numbers);
+const viewDimension = (value: unknown) => record(value) && count(value.totalCount) && array(value.rows, viewSeriesRow);
+const viewDimensions = (value: unknown) =>
+  record(value) && fields(value, ['devices', 'models', 'projects', 'providers', 'harnesses'], viewDimension);
+const viewProjectLabel = (value: unknown) => record(value) && fields(value, ['key', 'label'], string);
+const viewSession = (value: unknown) =>
+  record(value) &&
+  fields(value, ['id', 'model', 'project', 'deviceId', 'startedAt', 'lastActiveAt'], string) &&
+  member(value.harness, harnesses) &&
+  optional(value.multiModel, (v) => typeof v === 'boolean') &&
+  fields(value, ['tokens', 'costUSD'], number) &&
+  optional(value.unpricedTokens, number) &&
+  fields(value, ['sessionTitle', 'projectName', 't3ThreadId', 't3ThreadUrl'], (item) => optional(item, string));
+
+export const isDashboardBucketBreakdown = (value: unknown): value is DashboardBucketBreakdown =>
+  record(value) &&
+  fields(value, ['key', 'viewRevision'], string) &&
+  viewDimensions(value.breakdown) &&
+  array(value.projectLabels, viewProjectLabel);
+
+export const isUsageFilters = (value: unknown): value is UsageFilters =>
+  record(value) &&
+  string(value.filterRevision) &&
+  fields(value, ['harnesses', 'models', 'providers', 'projects', 'devices'], strings);
+
+export const isDashboardView = (value: unknown): value is DashboardView =>
+  record(value) &&
+  fields(value, ['machine', 'generatedAt', 'timezone', 'filterRevision', 'viewRevision'], string) &&
+  member(value.range, ranges) &&
+  period(value.period) &&
+  record(value.totals) &&
+  fields(value.totals, ['tokens', 'costUSD', 'unpricedTokens', 'sessions'], number) &&
+  (value.previous === null ||
+    (record(value.previous) && fields(value.previous, ['tokens', 'costUSD', 'sessions'], number))) &&
+  array(value.buckets, viewBucket) &&
+  viewDimensions(value.breakdown) &&
+  record(value.filterCounts) &&
+  fields(value.filterCounts, ['harnesses', 'models', 'providers', 'projects', 'devices'], count) &&
+  array(value.projectLabels, viewProjectLabel) &&
+  optional(value.selectedBucket, isDashboardBucketBreakdown) &&
+  count(value.sessionCount) &&
+  count(value.sessionOffset) &&
+  value.sessionOffset % sessionPageSize === 0 &&
+  value.sessionOffset < Math.max(1, value.sessionCount) &&
+  array(value.sessions, viewSession) &&
+  value.sessions.length === Math.min(sessionPageSize, value.sessionCount - value.sessionOffset);
+
+export const isViewDelta = (value: unknown): value is DashboardViewDelta =>
+  record(value) &&
+  value._tag === 'ViewDelta' &&
+  fields(value, ['viewRevision', 'generatedAt'], string) &&
+  count(value.sessionOffset) &&
+  value.sessionOffset % sessionPageSize === 0 &&
+  optional(value.sessions, (v) => array(v, viewSession)) &&
+  optional(value.projectLabels, (v) => array(v, viewProjectLabel));

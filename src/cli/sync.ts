@@ -5,7 +5,7 @@ import type { DeviceRegistration, SyncAck, UsageEvent } from '../lib/shared/doma
 import { collectorVersion } from '../lib/shared/version';
 import { collectUsage } from '../lib/server/usage';
 import { installPricingPolicy, loadPricing } from '../lib/server/usage/pricing-runtime';
-import { acknowledgeEvents, batchesOf, changedRecords } from './checkpoint';
+import { acknowledgeEvents, byteBudgetedBatches, changedRecords, defaultSyncBatchMaxBytes } from './checkpoint';
 import {
   CliFailure,
   type Checkpoint,
@@ -43,6 +43,7 @@ export const commitChangedBatches = <E, R, E2, R2, E3, R3>(
   upload: (events: readonly UsageEvent[]) => Effect.Effect<SyncAck, E, R>,
   persistDelta: (delta: Checkpoint) => Effect.Effect<void, E2, R2>,
   compact: (checkpoint: Checkpoint) => Effect.Effect<void, E3, R3>,
+  options: { maxItems?: number; maxBytes?: number; overheadBytes?: number } = {},
 ) =>
   Effect.gen(function* () {
     const digests = changed.length ? { ...checkpoint.eventDigests } : checkpoint.eventDigests;
@@ -50,7 +51,13 @@ export const commitChangedBatches = <E, R, E2, R2, E3, R3>(
     let current = checkpoint;
     let accepted = 0;
     let updated = 0;
-    const batches = changed.length ? batchesOf(changed) : [[]];
+    const batches = changed.length
+      ? byteBudgetedBatches(changed, (record) => Buffer.byteLength(JSON.stringify(record.event)), {
+          maxBytes: options.maxBytes ?? defaultSyncBatchMaxBytes,
+          maxItems: options.maxItems,
+          overheadBytes: options.overheadBytes ?? 4 * 1024,
+        })
+      : [[]];
     for (const records of batches) {
       const acknowledgement = yield* upload(records.map((record) => record.event));
       const delta: Checkpoint = {
@@ -81,6 +88,7 @@ export const commitRetractedBatches = <E, R, E2, R2, E3, R3>(
   upload: (ids: readonly string[]) => Effect.Effect<SyncAck, E, R>,
   persistDelta: (delta: Checkpoint) => Effect.Effect<void, E2, R2>,
   compact: (checkpoint: Checkpoint) => Effect.Effect<void, E3, R3>,
+  options: { maxItems?: number; maxBytes?: number; overheadBytes?: number } = {},
 ) =>
   Effect.gen(function* () {
     const withdrawn = new Set(checkpoint.deletedIds ?? []);
@@ -89,7 +97,11 @@ export const commitRetractedBatches = <E, R, E2, R2, E3, R3>(
     const digests = { ...checkpoint.eventDigests };
     let current = checkpoint;
     let deleted = 0;
-    for (const batch of batchesOf(ids)) {
+    for (const batch of byteBudgetedBatches(ids, (id) => Buffer.byteLength(JSON.stringify(id)), {
+      maxBytes: options.maxBytes ?? defaultSyncBatchMaxBytes,
+      maxItems: options.maxItems,
+      overheadBytes: options.overheadBytes ?? 2 * 1024,
+    })) {
       const acknowledgement = yield* upload(batch);
       yield* persistDelta({
         version: 1,
@@ -141,7 +153,20 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
     });
     const checkpoint = yield* readCheckpoint(connection);
     const changed = changedRecords(data.events, checkpoint);
+    const device = reportedDevice(connection.device);
+    const envelopeOverhead =
+      Buffer.byteLength(
+        JSON.stringify({
+          deviceId: connection.device.id,
+          token: connection.token,
+          device,
+          sources: data.sources,
+          pricingUpdatedAt: data.pricingUpdatedAt,
+        }),
+      ) + 1024;
     // Empty batches still update heartbeat/source diagnostics on the dashboard.
+    // Attach sources on the first batch only; subsequent batches keep them via COALESCE.
+    let batchIndex = 0;
     const result = yield* commitChangedBatches(
       checkpoint,
       changed,
@@ -151,15 +176,16 @@ const syncOnceProgram = Effect.fn('cli.syncOnce')(function* (quiet: boolean) {
             deviceId: connection.device.id,
             token: connection.token,
             batch: {
-              device: reportedDevice(connection.device),
+              device,
               events,
-              sources: data.sources,
+              ...(batchIndex++ === 0 ? { sources: data.sources } : {}),
               pricingUpdatedAt: data.pricingUpdatedAt,
             },
           })
           .pipe(Effect.timeout('30 seconds')),
       appendCheckpoint,
       compactCheckpoint,
+      { overheadBytes: envelopeOverhead },
     );
     const retractions = yield* commitRetractedBatches(
       result.checkpoint,

@@ -1,12 +1,13 @@
 <script lang="ts">
-  import type { ChartSeries, DashboardResponse, UsageQuery } from '../../shared/domain';
+  import type { DashboardBucketBreakdown, DashboardView, Device, UsageQuery } from '../../shared/domain';
+  import { viewRankedLimit } from '../../shared/dashboard-view';
   import {
     bucketSelection,
     deviceSuffixes,
     groupNames,
     periodOf,
-    timeBuckets,
     valueOf,
+    viewBuckets,
     type Group,
     type Metric,
   } from '../../client/usage-workbench';
@@ -14,6 +15,9 @@
 
   let {
     data,
+    devices = [],
+    selectedBucket,
+    bucketLoading = false,
     metric,
     selected,
     colors,
@@ -21,9 +25,13 @@
     filters,
     toggle,
     openAll,
+    onwarmfilters,
     onselect,
   }: {
-    data: DashboardResponse;
+    data: DashboardView;
+    devices?: readonly Device[];
+    selectedBucket?: DashboardBucketBreakdown;
+    bucketLoading?: boolean;
     metric: Metric;
     selected: string | undefined;
     colors: ReadonlyMap<Group, ReadonlyMap<string, string>>;
@@ -31,6 +39,7 @@
     filters: Pick<UsageQuery, Group>;
     toggle: (g: Group, name: string) => void;
     openAll: (g: Group) => void;
+    onwarmfilters?: () => void;
     onselect: (key: string | undefined) => void;
   } = $props();
 
@@ -45,13 +54,16 @@
   };
   const neutral = 'var(--wb-muted)';
   let tab = $state<Group>('models');
-  const scope = $derived(bucketSelection(timeBuckets(data, 'harnesses'), selected));
+  const buckets = $derived(viewBuckets(data));
+  const scope = $derived(bucketSelection(buckets, selected));
   const total = $derived(scope.bucket ?? data.totals);
-  const suffixes = $derived(deviceSuffixes(data.devices, label));
+  const suffixes = $derived(
+    deviceSuffixes(devices.length ? devices.map((d) => ({ name: d.id })) : data.breakdown.devices.rows, label),
+  );
   const measure = (v: number) => (total[metric] > 0 ? Math.min(100, (100 * v) / total[metric]) : 0);
   const percent = (v: number) =>
     total[metric] === 0 ? '—' : v > 0 && measure(v) < 1 ? '<1%' : `${Math.round(measure(v))}%`;
-  const spark = (values: number[], peak: number) =>
+  const spark = (values: readonly number[], peak: number) =>
     values
       .map(
         (v, i) =>
@@ -62,37 +74,65 @@
   // Rank within the scope; the history plotted beside each name always uses the full range.
   const panels = $derived(
     order.map((g) => {
-      const history = timeBuckets(data, g);
-      const bucket = history[scope.index];
-      const ranked: ChartSeries[] = bucket
-        ? [...bucket.rows].map(([name, values]) => ({ name, ...values }))
-        : [...data[g]];
-      ranked.sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name));
+      const rangeDim = data.breakdown[g];
       const list = g !== 'providers' && g !== 'harnesses';
-      const rows = (list ? ranked.slice(0, 10) : ranked).map((r) => ({
-        ...r,
+      const exactBucket =
+        scope.bucket && selectedBucket?.key === scope.bucket.key ? selectedBucket.breakdown[g] : undefined;
+      const sourceRows = exactBucket
+        ? exactBucket.rows
+        : scope.bucket
+          ? rangeDim.rows
+              .map((r) => ({
+                ...r,
+                tokens: r.t?.[scope.index] ?? 0,
+                costUSD: r.c?.[scope.index] ?? 0,
+                unpricedTokens: r.u?.[scope.index] ?? 0,
+              }))
+              .filter((r) => r.tokens > 0 || r.costUSD > 0)
+          : rangeDim.rows;
+      const totalCount = exactBucket
+        ? exactBucket.totalCount
+        : scope.bucket
+          ? rangeDim.totalCount > rangeDim.rows.length
+            ? Math.max(sourceRows.length, rangeDim.totalCount)
+            : sourceRows.length
+          : rangeDim.totalCount;
+      const ranked = [...sourceRows].sort((a, b) => b[metric] - a[metric] || a.name.localeCompare(b.name));
+      const picked = list ? ranked.slice(0, viewRankedLimit) : ranked;
+      const rows = picked.map((r) => ({
+        name: r.name,
+        tokens: r.tokens,
+        costUSD: r.costUSD,
+        unpricedTokens: r.unpricedTokens ?? 0,
         text: label(g, r.name),
         suffix: g === 'devices' ? suffixes.get(r.name) : undefined,
         color: colors.get(g)?.get(r.name) ?? neutral,
-        values: list ? history.map((b) => b.rows.get(r.name)?.[metric] ?? 0) : [],
+        values: list ? ((metric === 'tokens' ? r.t : r.c) ?? []) : [],
       }));
-      const tail = list ? ranked.slice(10) : [];
-      const tailTotals = tail.reduce(
-        (sum, r) => ({
-          tokens: sum.tokens + r.tokens,
-          costUSD: sum.costUSD + r.costUSD,
-          unpricedTokens: sum.unpricedTokens + (r.unpricedTokens ?? 0),
-        }),
-        { tokens: 0, costUSD: 0, unpricedTokens: 0 },
-      );
-      const other = tail.length
-        ? {
-            ...tailTotals,
-            text: 'Other',
-            suffix: undefined,
-            color: neutral,
-            values: history.map((b) => tail.reduce((sum, r) => sum + (b.rows.get(r.name)?.[metric] ?? 0), 0)),
-          }
+      const sumTokens = rows.reduce((sum, r) => sum + r.tokens, 0);
+      const hasOther =
+        list &&
+        (totalCount > rows.length ||
+          (Boolean(scope.bucket) &&
+            !exactBucket &&
+            rangeDim.totalCount > rangeDim.rows.length &&
+            total.tokens > sumTokens));
+      const other = hasOther
+        ? (() => {
+            const sumCost = rows.reduce((sum, r) => sum + r.costUSD, 0);
+            const sumUnpriced = rows.reduce((sum, r) => sum + r.unpricedTokens, 0);
+            return {
+              tokens: Math.max(0, total.tokens - sumTokens),
+              costUSD: Math.max(0, total.costUSD - sumCost),
+              unpricedTokens: Math.max(0, total.unpricedTokens - sumUnpriced),
+              text: 'Other',
+              suffix: undefined,
+              color: neutral,
+              values: buckets.map((b, i) =>
+                Math.max(0, b[metric] - rows.reduce((sum, r) => sum + (r.values[i] ?? 0), 0)),
+              ),
+            };
+          })()
         : undefined;
       const peak = Math.max(0, ...rows.map((r) => Math.max(0, ...r.values)), ...(other?.values ?? []));
       return {
@@ -101,9 +141,9 @@
         rows,
         other,
         peak,
-        available: data.filters[g].length,
-        hasHistory: !bucket || bucket.hasHistory,
-        sparkAvailable: history.every((b) => b.hasHistory),
+        available: data.filterCounts[g],
+        hasHistory: true,
+        sparkAvailable: buckets.length > 0,
       };
     }),
   );
@@ -149,7 +189,7 @@
   <span class="value">{valueOf(r, metric)}</span><span class="pct">{percent(r[metric])}</span>
 {/snippet}
 
-<section class="breakdown" aria-label="Usage breakdown">
+<section class="breakdown" aria-label="Usage breakdown" aria-busy={bucketLoading}>
   <header>
     <div class="scope" aria-live="polite" aria-atomic="true">
       <h2>{scope.bucket?.label ?? periodOf(data)}</h2>
@@ -220,8 +260,13 @@
           <div class="tail">
             {#if p.other}<div class="row" style:--ink={neutral}>{@render rankedRow(p.other, p)}</div>{/if}
           </div>
-          <button class="all" type="button" aria-label={`All ${p.available} ${p.g}`} onclick={() => openAll(p.g)}
-            >All {p.available} <Icon name="arrow" size={12} /></button
+          <button
+            class="all"
+            type="button"
+            aria-label={`All ${p.available} ${p.g}`}
+            onpointerenter={onwarmfilters}
+            onfocus={onwarmfilters}
+            onclick={() => openAll(p.g)}>All {p.available} <Icon name="arrow" size={12} /></button
           >
         {:else}
           <div class="split-track" role="group" aria-label={`${titles[p.g]} share`}>

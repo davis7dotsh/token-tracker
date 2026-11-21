@@ -296,6 +296,7 @@ const serve = Command.make(
             Bun.spawn([binary, entry], {
               env: {
                 ...process.env,
+                BODY_SIZE_LIMIT: process.env.BODY_SIZE_LIMIT ?? '16M',
                 HOST: options.host,
                 PORT: String(options.port),
               },

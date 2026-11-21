@@ -1,4 +1,4 @@
-import type { ChartSeries, DashboardResponse } from '../shared/domain';
+import type { ChartSeries, DashboardResponse, DashboardView } from '../shared/domain';
 import { dashboardRanges, type DashboardRange } from './dashboard-url';
 
 export const groups = ['devices', 'models', 'projects', 'providers', 'harnesses'] as const;
@@ -23,7 +23,7 @@ export const valueOf = (x: Pick<ChartSeries, 'tokens' | 'costUSD' | 'unpricedTok
     : formatValue(x[metric], metric);
 const calendar = new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 export const dayLabel = (day: string) => calendar.format(new Date(day.slice(0, 10) + 'T12:00:00Z'));
-export const periodOf = (d: DashboardResponse) =>
+export const periodOf = (d: Pick<DashboardResponse, 'period'>) =>
   d.period.start === d.period.end
     ? dayLabel(d.period.start)
     : `${dayLabel(d.period.start)} – ${dayLabel(d.period.end)}`;
@@ -106,6 +106,40 @@ export function timeBuckets(data: DashboardResponse, group: Group) {
   if (!byGroup) byResponse.set(data, (byGroup = new Map()));
   let buckets = byGroup.get(group);
   if (!buckets) byGroup.set(group, (buckets = buildBuckets(data, group)));
+  return buckets;
+}
+const byView = new WeakMap<DashboardView, ReturnType<typeof buildViewBuckets>>();
+function buildViewBuckets(data: DashboardView) {
+  const byHour = data.range === 'today';
+  const hour = byHour
+    ? new Intl.DateTimeFormat('en-GB', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: data.timezone,
+        ...(data.buckets.length > 24 ? { timeZoneName: 'shortOffset' } : {}),
+      })
+    : undefined;
+  const now = Date.parse(data.generatedAt);
+  return data.buckets.map((bucket) => {
+    const short = hour ? hour.format(new Date(bucket.key)) : dayLabel(bucket.key);
+    const label = !byHour && bucket.end ? `${short} – ${dayLabel(bucket.end)}` : short;
+    const partial = byHour
+      ? Date.parse(bucket.key) <= now && now < Date.parse(bucket.end ?? bucket.key)
+      : (bucket.end ?? bucket.key) === data.period.end;
+    return {
+      key: bucket.key,
+      short,
+      label,
+      partial,
+      tokens: bucket.tokens,
+      costUSD: bucket.costUSD,
+      unpricedTokens: bucket.unpricedTokens ?? 0,
+    };
+  });
+}
+export function viewBuckets(data: DashboardView) {
+  let buckets = byView.get(data);
+  if (!buckets) byView.set(data, (buckets = buildViewBuckets(data)));
   return buckets;
 }
 export function nicePeak(value: number) {

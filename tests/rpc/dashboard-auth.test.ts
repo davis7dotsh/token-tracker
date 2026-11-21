@@ -67,6 +67,10 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
       'GetSessionExport',
       'GetUsagePage',
       'GetUsagePageUpdate',
+      'GetUsageView',
+      'GetUsageViewUpdate',
+      'GetUsageBucket',
+      'GetUsageFilters',
       'GetUsageInfo',
       'GetHubInfo',
       'GetDevices',
@@ -88,6 +92,9 @@ test('Cloudflare forwarding separates signed-in dashboard reads from authenticat
     expect(await rpc('GetDevices', {}, cookie)).toContain('Private laptop');
     expect(await rpc('GetSessionExport', {}, cookie)).toContain('sessions');
     expect(await rpc('GetUsage', {}, cookie)).toContain('totals');
+    expect(await rpc('GetUsageView', { query: {}, page: 1 }, cookie)).toContain('filterCounts');
+    expect(await rpc('GetUsageFilters', {}, cookie)).toContain('filterRevision');
+    expect(await rpc('GetUsageBucket', { query: {}, bucket: '2026-10-01' }, cookie)).toContain('Success');
     expect(await rpc('GetPricing', {}, cookie)).toContain('unresolved');
     expect(await rpc('GetPricingCatalog', null, cookie)).toContain('secretRequired');
     const url = new URL('https://dashboard.test/settings/pricing');
