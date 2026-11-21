@@ -634,12 +634,20 @@ export const parseAntigravityDatabase = (
           existing.event.outputTokens +
           existing.event.cacheReadTokens +
           existing.event.cacheWriteTokens;
-        const preferIncoming =
-          incomingTotal > existingTotal ||
-          (incomingTotal === existingTotal &&
-            ((existing.event.model === 'unknown' && entry.event.model !== 'unknown') ||
-              (!existing.tier && Boolean(entry.tier))));
-        if (preferIncoming) eventsById.set(entry.event.id, entry);
+        const winner = incomingTotal > existingTotal ? entry : existing;
+        const donor = winner === entry ? existing : entry;
+        const mergedModel =
+          winner.event.model !== 'unknown'
+            ? winner.event.model
+            : donor.event.model !== 'unknown'
+              ? donor.event.model
+              : winner.event.model;
+        const mergedTier = winner.tier || donor.tier;
+        eventsById.set(entry.event.id, {
+          ...winner,
+          tier: mergedTier,
+          event: mergedModel === winner.event.model ? winner.event : { ...winner.event, model: mergedModel },
+        });
       };
 
       const coveredUsagesByAlias = new Map<string, AntigravityModelUsage[]>();

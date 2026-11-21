@@ -1043,7 +1043,7 @@ describe('Antigravity accounting', () => {
       1,
       encodeStepMetadata({
         completedAt: '2026-11-20T04:00:00.000Z',
-        modelUsage: { inputTokens: 90, outputTokens: 10, messageId: 'msg-split' },
+        modelUsage: { inputTokens: 90, outputTokens: 10, messageId: 'msg-split', serviceTier: 'priority' },
       }),
       null,
     );
@@ -1075,6 +1075,7 @@ describe('Antigravity accounting', () => {
     const splitDirect = parseAntigravityDatabase(splitFile, 'split-steps');
     expect(splitDirect.parsed.events.map((e) => e.event.id)).toEqual(['antigravity:split-steps:response:resp-split']);
     expect(splitDirect.parsed.events[0]?.event.model).toBe('gemini-4-neon');
+    expect(splitDirect.parsed.events[0]?.tier).toBe('priority');
     expect(tokenTotal(splitDirect.parsed.events[0]!.event)).toBe(100);
     expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:response:msg-split');
     expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:step:1');
