@@ -1,17 +1,25 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import type { DashboardResponse, UsageQuery } from '../../shared/domain';
+  import type { UsageFilters, UsageQuery } from '../../shared/domain';
   import { groupNames, groups, type Group } from '../../client/usage-workbench';
   import Icon from '../Icon.svelte';
   let {
-    data,
+    filters,
+    fallbackFilters,
+    loading = false,
+    error = '',
+    retry,
     query,
     initialGroup,
     label,
     apply,
     close,
   }: {
-    data: DashboardResponse;
+    filters?: UsageFilters;
+    fallbackFilters: Record<Group, readonly string[]>;
+    loading?: boolean;
+    error?: string;
+    retry?: () => void;
     query: UsageQuery;
     initialGroup?: Group;
     label: (g: Group, id: string) => string;
@@ -30,7 +38,7 @@
   const needle = $derived(q.trim().toLowerCase());
   const options = $derived.by(() =>
     groups.map((group) => {
-      const names = new Set(data.filters[group]);
+      const names = new Set(filters ? filters[group] : fallbackFilters[group]);
       const option = (value: string) => {
         const text = label(group, value);
         return { value, text, search: `${value} ${text}`.toLowerCase() };
@@ -124,9 +132,10 @@
     {/each}<span class="no-results">No matching values.</span>
   </div>
   <div class="wb-dialog-foot">
-    <button class="wb-link" onclick={() => (draft = {})}>Clear all</button><span>{count} selected</span><button
-      class="wb-primary"
-      onclick={() => apply(draft)}>Apply filters</button
-    >
+    <button class="wb-link" onclick={() => (draft = {})}>Clear all</button><span
+      >{#if error && !filters}{error}
+        {#if retry}<button class="wb-link" onclick={retry}>Retry</button>{/if}{:else if loading && !filters}Loading
+        options…{:else}{count} selected{/if}</span
+    ><button class="wb-primary" onclick={() => apply(draft)}>Apply filters</button>
   </div>
 </dialog>

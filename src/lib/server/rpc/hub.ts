@@ -7,14 +7,24 @@ import { InvalidRequest, UsageFailure, UsageRpc, type PricingSettings } from '..
 import type { PricingPolicy } from '../../shared/pricing';
 import {
   UsageQuery,
+  type DashboardBucketBreakdown,
   type DashboardResponse,
   type CollectionError,
   type UsageEvent,
+  type UsageFilters,
   type UsageResult,
   type Session,
   type SessionSort,
 } from '../../shared/domain';
 import { sessionPageSize } from '../../shared/dashboard-page';
+import {
+  projectBucketBreakdown,
+  projectProjectLabels,
+  projectViewBase,
+  projectViewSession,
+  type ProjectedViewBase,
+} from '../../shared/dashboard-view';
+import { projectLabels } from '../../shared/project-label';
 import { isDefaultSessionSort, sortSessions } from '../../shared/session-sort';
 import { tokenTotal } from '../usage/parsers';
 import {
@@ -209,6 +219,10 @@ const CollectorRpc = UsageRpc.omit(
   'GetSessionExport',
   'GetUsagePage',
   'GetUsagePageUpdate',
+  'GetUsageView',
+  'GetUsageViewUpdate',
+  'GetUsageBucket',
+  'GetUsageFilters',
   'GetUsageInfo',
   'GetHubInfo',
   'GetDevices',
@@ -270,36 +284,14 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           }),
         ),
       );
-      const readRawSnapshot = Effect.fn('rpc.readRawSnapshot')(function* (key: string) {
-        const { query, start, end } = decodeReadKey(key);
-        const { current } = yield* SnapshotInput;
-        const previousMillis = start ? Date.parse(start) : -Infinity;
-        const endMillis = end ? Date.parse(end) : Infinity;
-        const localCandidates: string[] = [];
-        if (start)
-          for (const event of current.events) {
-            if (query.devices && !query.devices.includes(event.deviceId ?? 'local')) continue;
-            const millis = eventMillis(event);
-            if (millis >= previousMillis && millis < endMillis) localCandidates.push(event.id);
-          }
-        const [remote, dimensions] = yield* Effect.all(
-          [
-            store.getUsage(localDeviceId, {
-              ...(start ? { start } : {}),
-              ...(end ? { end } : {}),
-              devices: query.devices,
-              candidateIds: localCandidates,
-            }),
-            store.getDimensions(localDeviceId),
-          ],
-          {
-            concurrency: 2,
-          },
-        );
-        // Local histories repeat the same dimensions for every request. Keep
-        // only actual choices, and share them across pricing-only recalculation.
+      type DimensionRow = { deviceId: string; harness: UsageEvent['harness']; model: string; project: string };
+      let cachedDimensions: { epoch: string; rows: readonly DimensionRow[] } | undefined;
+      const collectDimensions = (
+        remoteDimensions: readonly DimensionRow[],
+        localEvents: readonly UsageEvent[],
+      ): readonly DimensionRow[] => {
         const seen = new Map<string, Map<string, Map<string, Set<string>>>>();
-        const choices: (typeof dimensions)[number][] = [];
+        const choices: DimensionRow[] = [];
         const addDimension = (deviceId: string, harness: UsageEvent['harness'], model: string, project: string) => {
           let harnesses = seen.get(deviceId);
           if (!harnesses) {
@@ -320,19 +312,54 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           projects.add(project);
           choices.push({ deviceId, harness, model, project });
         };
-        for (const dimension of dimensions)
+        for (const dimension of remoteDimensions)
           addDimension(dimension.deviceId, dimension.harness, dimension.model, dimension.project);
-        for (const event of current.events)
+        for (const event of localEvents)
           addDimension(
             event.deviceId ?? 'local',
             event.harness,
             event.rawModel ?? event.model,
             event.repository ?? event.project,
           );
+        return choices;
+      };
+      const readRawSnapshot = Effect.fn('rpc.readRawSnapshot')(function* (key: string) {
+        const { query, start, end, revision, localGeneration } = decodeReadKey(key);
+        const { current } = yield* SnapshotInput;
+        const epoch = `${revision}:${localGeneration}`;
+        const previousMillis = start ? Date.parse(start) : -Infinity;
+        const endMillis = end ? Date.parse(end) : Infinity;
+        const localCandidates: string[] = [];
+        if (start)
+          for (const event of current.events) {
+            if (query.devices && !query.devices.includes(event.deviceId ?? 'local')) continue;
+            const millis = eventMillis(event);
+            if (millis >= previousMillis && millis < endMillis) localCandidates.push(event.id);
+          }
+        const [remote, dimensions] = yield* Effect.all(
+          [
+            store.getUsage(localDeviceId, {
+              ...(start ? { start } : {}),
+              ...(end ? { end } : {}),
+              devices: query.devices,
+              candidateIds: localCandidates,
+            }),
+            cachedDimensions?.epoch === epoch
+              ? Effect.succeed(cachedDimensions.rows)
+              : Effect.map(store.getDimensions(localDeviceId), (rows) => {
+                  const collected = collectDimensions(rows, current.events);
+                  cachedDimensions = { epoch, rows: collected };
+                  return collected;
+                }),
+          ],
+          {
+            concurrency: 2,
+          },
+        );
         return {
           remote,
           current,
-          dimensions: choices,
+          dimensions,
           unique: uniqueEvents(remote.events, current.events, localDeviceId, query),
         };
       });
@@ -452,25 +479,63 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         string,
         { unresolved: PricingSettings['unresolved']; validity: DashboardValidity }
       >();
+      const filterCatalogs = new Map<string, { filters: UsageFilters; projectLabels: ReadonlyMap<string, string> }>();
       let snapshotEpoch = '';
       let snapshotPricing = '';
-      const readQuery = Effect.fn('rpc.readQuery')(function* (query: UsageQuery) {
+      const syncEpoch = Effect.fnUntraced(function* () {
         const { current, generation } = yield* localSnapshot;
         const state = yield* pricing.load;
         const revision = store.getRevision();
         const epoch = `${revision}:${generation}`;
         if (epoch !== snapshotEpoch) {
           snapshotEpoch = epoch;
+          cachedDimensions = undefined;
+          filterCatalogs.clear();
           yield* Cache.invalidateAll(rawSnapshots);
           yield* Cache.invalidateAll(snapshots);
           dashboards.clear();
           pricingResults.clear();
         } else if (snapshotPricing !== state.policy.revision) {
+          filterCatalogs.clear();
           yield* Cache.invalidateAll(snapshots);
           dashboards.clear();
           pricingResults.clear();
         }
         snapshotPricing = state.policy.revision;
+        return { current, generation, state, revision, epoch };
+      });
+      const readFilterCatalog = Effect.fn('rpc.readFilterCatalog')(function* (devices?: readonly string[]) {
+        const { current, state, epoch } = yield* syncEpoch();
+        const normalizedDevices = devices === undefined ? undefined : [...new Set(devices)].sort();
+        const key = normalizedDevices ? JSON.stringify(normalizedDevices) : '';
+        const hit = filterCatalogs.get(key);
+        if (hit) return hit;
+        let rows = cachedDimensions?.epoch === epoch ? cachedDimensions.rows : undefined;
+        if (!rows) {
+          const remoteDimensions = yield* store.getDimensions(localDeviceId);
+          rows = collectDimensions(remoteDimensions, current.events);
+          cachedDimensions = { epoch, rows };
+        }
+        const selectedDevices = normalizedDevices && new Set(normalizedDevices);
+        const available = selectedDevices ? rows.filter((row) => selectedDevices.has(row.deviceId)) : rows;
+        const harnesses = [...new Set(available.map((row) => row.harness))].sort();
+        const models = [...new Set(available.map((row) => resolveDisplayModel(row.model, state.policy)))].sort();
+        const providers = [...new Set(models.map(provider))].sort();
+        const projects = [...new Set(available.map((row) => row.project))].sort();
+        const allDevices = [...new Set(rows.map((row) => row.deviceId))].sort();
+        const filterRevision = createHash('sha256')
+          .update(JSON.stringify([harnesses, models, providers, projects, allDevices]))
+          .digest('hex')
+          .slice(0, 16);
+        const catalog = {
+          filters: { filterRevision, harnesses, models, providers, projects, devices: allDevices },
+          projectLabels: projectLabels(projects),
+        };
+        retainResult(filterCatalogs, key, catalog);
+        return catalog;
+      });
+      const readQuery = Effect.fn('rpc.readQuery')(function* (query: UsageQuery) {
+        const { current, generation, state, revision } = yield* syncEpoch();
         const now = new Date(yield* Clock.currentTimeMillis);
         const timeframe = usageTimeframe(query, now);
         const effective = effectiveQuery(query, state.policy);
@@ -508,7 +573,12 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           revision: string;
         }
       >();
-      const getUsage = Effect.fn('rpc.GetUsage')(
+      // Dashboard views omit sources, so remote device heartbeats do not bust
+      // view delta revisions when accounting has not changed.
+      const viewVersions = new WeakMap<DashboardResponse, { selection: string | undefined; revision: string }>();
+      const projectedViews = new WeakMap<DashboardResponse, ProjectedViewBase>();
+      const projectedBuckets = new WeakMap<DashboardResponse, Map<string, DashboardBucketBreakdown | null>>();
+      const getAggregate = Effect.fn('rpc.getAggregate')(
         function* (query: UsageQuery) {
           const input = yield* readQuery(query);
           let cached = dashboards.get(input.resultKey);
@@ -535,6 +605,15 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               });
           }
           retainResult(dashboards, input.resultKey, cached);
+          return { input, cached };
+        },
+        Effect.mapError((error) =>
+          error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+        ),
+      );
+      const getUsage = Effect.fn('rpc.GetUsage')(
+        function* (query: UsageQuery) {
+          const { input, cached } = yield* getAggregate(query);
           const sources = yield* store.getSources(localDeviceId);
           const selection = JSON.stringify(input.query.models);
           let version = pageVersions.get(cached.response);
@@ -626,7 +705,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
         ),
       );
-      const warmer = yield* makeViewWarmer(options.viewHints, getUsage, store.getRevision);
+      const warmer = yield* makeViewWarmer(options.viewHints, getAggregate, store.getRevision);
       // The dashboard's device list: registered devices plus this hub's own
       // machine, which collects directly and may never have registered.
       const listDevices = Effect.fn('rpc.listDevices')(function* () {
@@ -690,11 +769,100 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           sessionOffset,
         };
       });
+      const getViewRevision = (response: DashboardResponse, selection: string | undefined) => {
+        let version = viewVersions.get(response);
+        if (!version || version.selection !== selection) {
+          version = { selection, revision: randomBytes(16).toString('hex') };
+          viewVersions.set(response, version);
+        }
+        return version.revision;
+      };
+      const getViewBase = (response: DashboardResponse) => {
+        let base = projectedViews.get(response);
+        if (!base) {
+          base = projectViewBase(response);
+          projectedViews.set(response, base);
+        }
+        return base;
+      };
+      const getBucketForResponse = (
+        response: DashboardResponse,
+        base: ProjectedViewBase,
+        bucketKey: string,
+        viewRevision: string,
+        resolvedLabels: ReadonlyMap<string, string>,
+      ) => {
+        let byBucket = projectedBuckets.get(response);
+        if (!byBucket) projectedBuckets.set(response, (byBucket = new Map()));
+        const cacheKey = `${viewRevision}:${bucketKey}`;
+        const existing = byBucket.get(cacheKey);
+        if (existing) return existing;
+        const result = projectBucketBreakdown(base.groupedBuckets, bucketKey, viewRevision, resolvedLabels);
+        if (result) byBucket.set(cacheKey, result);
+        return result;
+      };
+      const getView = Effect.fn('rpc.GetUsageView')(
+        function* ({
+          query,
+          page,
+          sort,
+          bucket,
+        }: {
+          query: UsageQuery;
+          page: number;
+          sort?: SessionSort;
+          bucket?: string;
+        }) {
+          const { input, cached } = yield* getAggregate(query);
+          yield* warmer.visited(query);
+          const catalog = yield* readFilterCatalog(input.normalized.devices);
+          const response = cached.response;
+          const base = getViewBase(response);
+          const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+          const sessions = yield* sortedSessions(response.sessions, response.machine, sort);
+          const sessionCount = sessions.length;
+          const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
+          const sessionOffset = (Math.min(page, lastPage) - 1) * sessionPageSize;
+          const pageSessions = sessions
+            .slice(sessionOffset, sessionOffset + sessionPageSize)
+            .map((session) => projectViewSession(session, base.knownModels));
+          const selectedBucket = bucket
+            ? (getBucketForResponse(response, base, bucket, viewRevision, catalog.projectLabels) ?? undefined)
+            : undefined;
+          const labelKeys = [
+            ...base.visibleProjects,
+            ...pageSessions.map((session) => session.project),
+            ...(input.normalized.projects ?? []),
+          ];
+          return {
+            machine: base.machine,
+            generatedAt: input.now.toISOString(),
+            timezone: base.timezone,
+            range: base.range,
+            period: base.period,
+            totals: base.totals,
+            previous: base.previous,
+            buckets: [...base.buckets],
+            breakdown: base.breakdown,
+            filterCounts: base.filterCounts,
+            filterRevision: catalog.filters.filterRevision,
+            projectLabels: projectProjectLabels(labelKeys, catalog.projectLabels),
+            ...(selectedBucket ? { selectedBucket } : {}),
+            sessions: pageSessions,
+            sessionCount,
+            sessionOffset,
+            viewRevision,
+          };
+        },
+        Effect.mapError((error) =>
+          error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+        ),
+      );
       return {
         GetUsage: getUsage,
         GetSessionExport: Effect.fn('rpc.GetSessionExport')(function* (query) {
-          const { period, sessions } = yield* getUsage(query);
-          return { period, sessions };
+          const { cached } = yield* getAggregate(query);
+          return { period: cached.response.period, sessions: cached.response.sessions };
         }),
         GetUsagePage: getPage,
         GetUsagePageUpdate: Effect.fn('rpc.GetUsagePageUpdate')(function* (request) {
@@ -709,6 +877,71 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
             ...(page.sessionOffset !== request.sessionOffset ? { sessions: page.sessions } : {}),
           };
         }),
+        GetUsageView: getView,
+        GetUsageViewUpdate: Effect.fn('rpc.GetUsageViewUpdate')(
+          function* (request) {
+            const { input, cached } = yield* getAggregate(request.query);
+            yield* warmer.visited(request.query);
+            const response = cached.response;
+            const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+            if (request.viewRevision !== viewRevision || request.sort?.by === 'device') {
+              return yield* getView(request);
+            }
+            const sessions = yield* sortedSessions(response.sessions, response.machine, request.sort);
+            const sessionCount = sessions.length;
+            const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
+            const sessionOffset = (Math.min(request.page, lastPage) - 1) * sessionPageSize;
+            if (sessionOffset === request.sessionOffset) {
+              return {
+                _tag: 'ViewDelta' as const,
+                viewRevision,
+                generatedAt: input.now.toISOString(),
+                sessionOffset,
+              };
+            }
+            const base = getViewBase(response);
+            const catalog = yield* readFilterCatalog(input.normalized.devices);
+            const pageSessions = sessions
+              .slice(sessionOffset, sessionOffset + sessionPageSize)
+              .map((session) => projectViewSession(session, base.knownModels));
+            const labels = projectProjectLabels(
+              pageSessions.map((session) => session.project),
+              catalog.projectLabels,
+            );
+            return {
+              _tag: 'ViewDelta' as const,
+              viewRevision,
+              generatedAt: input.now.toISOString(),
+              sessionOffset,
+              sessions: pageSessions,
+              ...(labels.length ? { projectLabels: labels } : {}),
+            };
+          },
+          Effect.mapError((error) =>
+            error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+          ),
+        ),
+        GetUsageBucket: Effect.fn('rpc.GetUsageBucket')(
+          function* ({ query, bucket }) {
+            const { input, cached } = yield* getAggregate(query);
+            const catalog = yield* readFilterCatalog(input.normalized.devices);
+            const response = cached.response;
+            const base = getViewBase(response);
+            const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+            return getBucketForResponse(response, base, bucket, viewRevision, catalog.projectLabels);
+          },
+          Effect.mapError((error) =>
+            error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+          ),
+        ),
+        GetUsageFilters: Effect.fn('rpc.GetUsageFilters')(
+          function* ({ devices }) {
+            return (yield* readFilterCatalog(devices)).filters;
+          },
+          Effect.mapError((error) =>
+            error instanceof UsageFailure ? error : new UsageFailure({ message: error.message }),
+          ),
+        ),
         GetUsageInfo: Effect.fn('rpc.GetUsageInfo')(
           function* (query) {
             const input = yield* readQuery(query);

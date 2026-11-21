@@ -1,13 +1,24 @@
 import type { Rpc, RpcGroup } from 'effect/rpc';
 import type { UsageRpc } from '../shared/rpc';
-import type { DashboardPage, SessionSort, UsageQuery } from '../shared/domain';
+import type { DashboardPage, DashboardView, SessionSort, UsageQuery } from '../shared/domain';
 import { sessionPageSize } from '../shared/dashboard-page';
+import {
+  groupDashboardBuckets,
+  legacyViewRevision,
+  projectBucketBreakdown,
+  projectDashboardViewFromPage,
+} from '../shared/dashboard-view';
+import { projectLabels } from '../shared/project-label';
 import type { PricingRule } from '../shared/pricing';
 import {
+  isDashboardBucketBreakdown,
   isDashboardPage,
   isDashboardResponse,
+  isDashboardView,
   isSessionExport,
   isPageDelta,
+  isUsageFilters,
+  isViewDelta,
   isHubInfo,
   isUsageInfo,
 } from './dashboard-response';
@@ -59,8 +70,9 @@ const readResult = (body: string, id: string, tag: Procedures['_tag']) => {
 
 // Keep cache accounting off the render path: reuse the already decoded wire length.
 const pageSizes = new WeakMap<object, number>();
-const commonSizes = new WeakMap<DashboardPage['daily'], number>();
+const commonSizes = new WeakMap<object, number>();
 export const usagePageSize = (value: DashboardPage) => pageSizes.get(value) ?? Infinity;
+export const usageViewSize = (value: DashboardView) => pageSizes.get(value) ?? Infinity;
 
 export const makeDashboardClient = (
   url = '/rpc',
@@ -117,6 +129,17 @@ export const makeDashboardClient = (
             commonSizes.set(result.daily, body.length * 2);
           }
         }
+        if (tag === 'GetUsageView' || tag === 'GetUsageViewUpdate') {
+          if (tag === 'GetUsageViewUpdate' && isViewDelta(result)) pageSizes.set(result, body.length * 2);
+          else {
+            if (!isDashboardView(result)) throw new Error(unavailable);
+            pageSizes.set(result, body.length * 2);
+            commonSizes.set(result.buckets, body.length * 2);
+          }
+        }
+        if (tag === 'GetUsageBucket' && result !== null && !isDashboardBucketBreakdown(result))
+          throw new Error(unavailable);
+        if (tag === 'GetUsageFilters' && !isUsageFilters(result)) throw new Error(unavailable);
         if (tag === 'GetHubInfo' && !isHubInfo(result)) throw new Error(unavailable);
         if (tag === 'GetUsageInfo' && !isUsageInfo(result)) throw new Error(unavailable);
         // UsageRpc encodes all results; the dashboard guard also rejects
@@ -135,6 +158,25 @@ export const makeDashboardClient = (
     active.set(controller, pending);
     return pending;
   };
+
+  const legacyPages = new Map<string, DashboardPage>();
+  const legacyQueryKey = (query: UsageQuery) => JSON.stringify(query);
+  const rememberLegacyPage = (query: UsageQuery, legacy: DashboardPage) => {
+    const key = legacyQueryKey(query);
+    legacyPages.delete(key);
+    legacyPages.set(key, legacy);
+    if (legacyPages.size > 4) {
+      const oldest = legacyPages.keys().next();
+      if (!oldest.done) legacyPages.delete(oldest.value);
+    }
+  };
+  const projectLegacyBucket = (legacy: DashboardPage, bucket: string) =>
+    projectBucketBreakdown(
+      groupDashboardBuckets(legacy),
+      bucket,
+      legacyViewRevision(legacy),
+      projectLabels(legacy.filters.projects),
+    );
 
   return {
     getUsage: (query: UsageQuery = {}, signal?: AbortSignal) => call('GetUsage', query, signal, usageTimeout),
@@ -192,6 +234,108 @@ export const makeDashboardClient = (
       );
       return next;
     },
+    getUsageView: async (
+      query: UsageQuery,
+      page: number,
+      signal?: AbortSignal,
+      base?: DashboardView,
+      sort?: SessionSort,
+      bucket?: string,
+    ): Promise<DashboardView> => {
+      const sorted = sort ? { sort } : {};
+      const scopedBucket = bucket ? { bucket } : {};
+      const fallback = async () => {
+        const legacy = await call('GetUsagePage', { query, page, ...sorted }, signal, usageTimeout);
+        rememberLegacyPage(query, legacy);
+        const projected = projectDashboardViewFromPage(legacy, query, bucket);
+        pageSizes.set(projected, usagePageSize(legacy));
+        commonSizes.set(projected.buckets, usagePageSize(legacy));
+        return projected;
+      };
+      if (!base?.viewRevision) {
+        return call('GetUsageView', { query, page, ...sorted, ...scopedBucket }, signal, usageTimeout).catch(
+          (error: unknown) => {
+            if (error instanceof ProcedureUnavailable) return fallback();
+            throw error;
+          },
+        );
+      }
+      const result = await call(
+        'GetUsageViewUpdate',
+        {
+          query,
+          page,
+          ...sorted,
+          ...scopedBucket,
+          viewRevision: base.viewRevision,
+          sessionOffset: base.sessionOffset,
+        },
+        signal,
+        usageTimeout,
+      ).catch((error: unknown) => {
+        if (error instanceof ProcedureUnavailable) return fallback();
+        throw error;
+      });
+      if (!('_tag' in result)) return result;
+      const offset =
+        Math.min(page - 1, Math.max(0, Math.ceil(base.sessionCount / sessionPageSize) - 1)) * sessionPageSize;
+      if (
+        result.viewRevision !== base.viewRevision ||
+        result.sessionOffset !== offset ||
+        (result.sessions
+          ? result.sessions.length !== Math.min(sessionPageSize, base.sessionCount - offset)
+          : offset !== base.sessionOffset)
+      )
+        throw new Error(unavailable);
+      const mergedLabels = result.projectLabels?.length
+        ? [...new Map([...base.projectLabels, ...result.projectLabels].map((entry) => [entry.key, entry])).values()]
+        : base.projectLabels;
+      const next: DashboardView = {
+        ...base,
+        generatedAt: result.generatedAt,
+        sessionOffset: offset,
+        sessions: result.sessions ?? base.sessions,
+        projectLabels: mergedLabels,
+      };
+      pageSizes.set(
+        next,
+        result.sessions
+          ? (commonSizes.get(base.buckets) ?? Infinity) + (pageSizes.get(result) ?? Infinity)
+          : usageViewSize(base),
+      );
+      return next;
+    },
+    getUsageBucket: (query: UsageQuery, bucket: string, signal?: AbortSignal) =>
+      call('GetUsageBucket', { query, bucket }, signal, usageTimeout).catch(async (error: unknown) => {
+        if (error instanceof ProcedureUnavailable) {
+          const cached = legacyPages.get(legacyQueryKey(query));
+          if (cached) return projectLegacyBucket(cached, bucket);
+          const legacy = await call('GetUsagePage', { query, page: 1 }, signal, usageTimeout);
+          rememberLegacyPage(query, legacy);
+          return projectLegacyBucket(legacy, bucket);
+        }
+        throw error;
+      }),
+    getUsageFilters: (devices?: readonly string[], signal?: AbortSignal) =>
+      call('GetUsageFilters', devices ? { devices } : {}, signal, usageTimeout).catch(async (error: unknown) => {
+        if (error instanceof ProcedureUnavailable) {
+          const legacy = await call(
+            'GetUsage',
+            devices ? { devices, range: 'today' } : { range: 'today' },
+            signal,
+            usageTimeout,
+          );
+          return {
+            filterRevision: legacy.generatedAt,
+            harnesses: [...legacy.filters.harnesses],
+            models: [...legacy.filters.models],
+            providers: [...legacy.filters.providers],
+            projects: [...legacy.filters.projects],
+            devices: [...legacy.filters.devices],
+          };
+        }
+        throw error;
+      }),
     getUsageInfo: (query: UsageQuery, signal?: AbortSignal) => call('GetUsageInfo', query, signal, usageTimeout),
     getHubInfo: (signal?: AbortSignal) => call('GetHubInfo', undefined, signal),
     getDevices: (signal?: AbortSignal) => call('GetDevices', undefined, signal),

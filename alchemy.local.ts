@@ -28,6 +28,7 @@ export default Alchemy.Stack(
       memo: { include: ['src/**', 'static/**', 'package.json', 'bun.lock', 'patches/**', 'vite.config.ts'] },
     });
     const passthrough = [
+      'BODY_SIZE_LIMIT',
       'XDG_CACHE_HOME',
       'TOKEN_TRACKER_DOWNLOAD_DIR',
       'TOKEN_TRACKER_PAIRING_SECRET',

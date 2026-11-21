@@ -236,6 +236,138 @@ export const DashboardPageDelta = Schema.Struct({
   sessions: Schema.optionalKey(Schema.Array(Session)),
 });
 export type DashboardPageDelta = typeof DashboardPageDelta.Type;
+
+export const ViewTotals = Schema.Struct({
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  unpricedTokens: Schema.Number,
+  sessions: Schema.Number,
+});
+export type ViewTotals = typeof ViewTotals.Type;
+
+export const ViewPreviousTotals = Schema.Struct({
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  sessions: Schema.Number,
+});
+export type ViewPreviousTotals = typeof ViewPreviousTotals.Type;
+
+export const ViewBucket = Schema.Struct({
+  key: Schema.String,
+  end: Schema.optionalKey(Schema.String),
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  unpricedTokens: Schema.optionalKey(Schema.Number),
+});
+export type ViewBucket = typeof ViewBucket.Type;
+
+export const ViewSeriesRow = Schema.Struct({
+  name: Schema.String,
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  unpricedTokens: Schema.optionalKey(Schema.Number),
+  t: Schema.optionalKey(Schema.Array(Schema.Number)),
+  c: Schema.optionalKey(Schema.Array(Schema.Number)),
+  u: Schema.optionalKey(Schema.Array(Schema.Number)),
+});
+export type ViewSeriesRow = typeof ViewSeriesRow.Type;
+
+export const ViewDimension = Schema.Struct({
+  totalCount: TokenCount,
+  rows: Schema.Array(ViewSeriesRow),
+  otherT: Schema.optionalKey(Schema.Array(Schema.Number)),
+  otherC: Schema.optionalKey(Schema.Array(Schema.Number)),
+});
+export type ViewDimension = typeof ViewDimension.Type;
+
+export const ViewDimensions = Schema.Struct({
+  devices: ViewDimension,
+  models: ViewDimension,
+  projects: ViewDimension,
+  providers: ViewDimension,
+  harnesses: ViewDimension,
+});
+export type ViewDimensions = typeof ViewDimensions.Type;
+
+export const ViewSession = Schema.Struct({
+  ...SessionMetadata.fields,
+  id: Schema.String,
+  harness: Harness,
+  model: Schema.String,
+  multiModel: Schema.optionalKey(Schema.Boolean),
+  project: Schema.String,
+  deviceId: Schema.String,
+  startedAt: Schema.String,
+  lastActiveAt: Schema.String,
+  tokens: Schema.Number,
+  costUSD: Schema.Number,
+  unpricedTokens: Schema.optionalKey(Schema.Number),
+});
+export type ViewSession = typeof ViewSession.Type;
+
+export const UsageFilters = Schema.Struct({
+  filterRevision: Schema.String,
+  harnesses: Schema.Array(Schema.String),
+  models: Schema.Array(Schema.String),
+  providers: Schema.Array(Schema.String),
+  projects: Schema.Array(Schema.String),
+  devices: Schema.Array(Schema.String),
+});
+export type UsageFilters = typeof UsageFilters.Type;
+
+export const ViewFilterCounts = Schema.Struct({
+  harnesses: TokenCount,
+  models: TokenCount,
+  providers: TokenCount,
+  projects: TokenCount,
+  devices: TokenCount,
+});
+export type ViewFilterCounts = typeof ViewFilterCounts.Type;
+
+export const ViewProjectLabel = Schema.Struct({
+  key: Schema.String,
+  label: Schema.String,
+});
+export type ViewProjectLabel = typeof ViewProjectLabel.Type;
+
+export const DashboardBucketBreakdown = Schema.Struct({
+  key: Schema.String,
+  viewRevision: Schema.String,
+  breakdown: ViewDimensions,
+  projectLabels: Schema.Array(ViewProjectLabel),
+});
+export type DashboardBucketBreakdown = typeof DashboardBucketBreakdown.Type;
+
+export const DashboardView = Schema.Struct({
+  machine: Schema.String,
+  generatedAt: Schema.String,
+  timezone: Schema.String,
+  range: UsageRange,
+  period: Schema.Struct({ start: Schema.String, end: Schema.String }),
+  totals: ViewTotals,
+  previous: Schema.NullOr(ViewPreviousTotals),
+  buckets: Schema.Array(ViewBucket),
+  breakdown: ViewDimensions,
+  filterCounts: ViewFilterCounts,
+  filterRevision: Schema.String,
+  projectLabels: Schema.Array(ViewProjectLabel),
+  selectedBucket: Schema.optionalKey(DashboardBucketBreakdown),
+  sessions: Schema.Array(ViewSession),
+  sessionCount: TokenCount,
+  sessionOffset: TokenCount,
+  viewRevision: Schema.String,
+});
+export type DashboardView = typeof DashboardView.Type;
+
+export const DashboardViewDelta = Schema.Struct({
+  _tag: Schema.Literal('ViewDelta'),
+  viewRevision: Schema.String,
+  generatedAt: Schema.String,
+  sessionOffset: TokenCount,
+  sessions: Schema.optionalKey(Schema.Array(ViewSession)),
+  projectLabels: Schema.optionalKey(Schema.Array(ViewProjectLabel)),
+});
+export type DashboardViewDelta = typeof DashboardViewDelta.Type;
 export const UsageInfo = DashboardResponse.mapFields(({ machine, pricing, sources, warnings }) => ({
   machine,
   pricing,

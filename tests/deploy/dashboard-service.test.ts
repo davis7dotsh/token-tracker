@@ -30,13 +30,18 @@ test('the local dashboard runs its installed build with a pinned Bun on Linux an
   expect(unit).toContain(
     'ExecStart="/home/user/.local/share/vite-plus/bun/bin/bun.native" "/home/user/.local/share/token-tracker-dashboard 100%%/build/index.js"',
   );
+  expect(unit).toContain('Environment="BODY_SIZE_LIMIT=16M"');
   expect(unit).toContain('Environment="ORIGIN=https://tracker.example.ts.net:10007"');
   expect(unit).toContain('Environment="PORT=8787"');
   expect(unit).toContain('UMask=0077');
 
   const plist = dashboardLaunchdPlist(props);
   expect(plist).toContain('<key>Label</key><string>sh.davis.token-tracker-dashboard</string>');
+  expect(plist).toContain('<key>BODY_SIZE_LIMIT</key><string>16M</string>');
   expect(plist).toContain('<key>HOST</key><string>127.0.0.1</string>');
+  expect(dashboardSystemdUnit({ ...props, environment: { ...props.environment, BODY_SIZE_LIMIT: '32M' } })).toContain(
+    'Environment="BODY_SIZE_LIMIT=32M"',
+  );
   expect(plist).toContain('<key>KeepAlive</key><true/>');
   expect(plist).toContain(
     '<key>LimitLoadToSessionType</key><array><string>Aqua</string><string>Background</string></array>',

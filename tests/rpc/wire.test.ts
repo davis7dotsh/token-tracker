@@ -956,6 +956,137 @@ test('collector versions round-trip on pairing and sync, and older payloads keep
   }
 });
 
+test('minimal dashboard views, view deltas, bucket breakdowns, and lazy filters stay exact and compact', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-minimal-view-'));
+  directories.push(directory);
+  const now = Date.now();
+  // Create 25 projects (including two colliding short names /a/work/app and /b/work/app) across 3 days
+  const events: UsageEvent[] = Array.from({ length: 25 }, (_, i) => ({
+    ...localEvent,
+    id: `view-row-${i}`,
+    sessionId: `view-session-${i}`,
+    timestamp: new Date(now - (i % 3) * 86_400_000).toISOString(),
+    model: i === 0 ? 'claude-opus-4-6' : `model-${i}`,
+    project: i === 0 ? '/a/work/app' : i === 1 ? '/b/work/app' : `/work/project-${i}`,
+    repository: i < 2 ? null : `github.com/davis7/repo-${i}`,
+    inputTokens: (25 - i) * 1000,
+    outputTokens: (25 - i) * 100,
+    cacheReadTokens: 0,
+    costUsd: (25 - i) * 0.05,
+  }));
+  // Add a second model to session 0 so it becomes multi-model
+  events.push({
+    ...events[0],
+    id: 'view-row-0-second-model',
+    model: 'claude-sonnet-4-6',
+    inputTokens: 500,
+    outputTokens: 50,
+    costUsd: 0.01,
+  });
+  const handler = makeRpcWebHandler(
+    { dataDirectory: directory, pairingSecret },
+    Layer.succeed(LocalUsage, {
+      device: localDevice,
+      collect: Effect.succeed({
+        ...localData,
+        events,
+        sources: [
+          {
+            harness: 'claude' as const,
+            path: '/local/claude',
+            files: 5,
+            events: events.length,
+            status: 'ready' as const,
+          },
+        ],
+      }),
+    }),
+  );
+  const server = Bun.serve({ port: 0, fetch: (request) => handler.handler(request) });
+  const endpoint = `http://127.0.0.1:${server.port}/rpc`;
+  const runtime = ManagedRuntime.make(rpcClientLayer(endpoint));
+  const browser = makeDashboardClient(endpoint);
+  const remoteDevice = { id: 'heartbeat-host', name: 'Heartbeat Host', platform: 'linux' };
+  try {
+    const query = { range: '7d' as const, timezone: 'UTC' };
+    const [full, view] = await Promise.all([browser.getUsage(query), browser.getUsageView(query, 1)]);
+    expect(view.totals.tokens).toBe(full.totals.tokens);
+    expect(view.totals.sessions).toBe(full.totals.sessions);
+    expect(view.sessionCount).toBe(25);
+    expect(view.sessions).toHaveLength(12);
+    expect(view.breakdown.projects.totalCount).toBe(25);
+    // Top-10 union is bounded (exact top 10 when token & cost rankings align)
+    expect(view.breakdown.projects.rows).toHaveLength(10);
+    expect(view.filterCounts.projects).toBe(25);
+    // Colliding project labels /a/work/app and /b/work/app are disambiguated
+    expect(new Map(view.projectLabels.map((entry) => [entry.key, entry.label])).get('/a/work/app')).toBe('a/work/app');
+    expect(new Map(view.projectLabels.map((entry) => [entry.key, entry.label])).get('/b/work/app')).toBe('b/work/app');
+    // Multi-model session is marked without shipping full filters.models
+    expect(view.sessions.find((s) => s.id === 'view-session-0')?.multiModel).toBe(true);
+    expect(view.sessions.find((s) => s.id === 'view-session-1')?.multiModel).toBeUndefined();
+    // Wire payload excludes heavy fields
+    expect(view).not.toHaveProperty('sources');
+    expect(view).not.toHaveProperty('filters');
+    expect(view).not.toHaveProperty('warnings');
+
+    // Remote device heartbeat updating sources must NOT invalidate viewRevision!
+    const reg = await runtime.runPromise(
+      Effect.flatMap(UsageClient, (client) => client.RegisterDevice({ pairingSecret, device: remoteDevice })),
+    );
+    await runtime.runPromise(
+      Effect.flatMap(UsageClient, (client) =>
+        client.SyncUsage({
+          deviceId: remoteDevice.id,
+          token: reg.token,
+          batch: {
+            device: remoteDevice,
+            events: [],
+            sources: [{ harness: 'codex', path: '/remote/codex', files: 1, events: 0, status: 'empty' }],
+          },
+        }),
+      ),
+    );
+    const poll = await browser.getUsageView(query, 1, undefined, view);
+    expect(poll.viewRevision).toBe(view.viewRevision);
+    expect(poll.buckets).toBe(view.buckets);
+    expect(poll.sessions).toBe(view.sessions);
+
+    // Paging uses ViewDelta without re-sending buckets/breakdown
+    const page2 = await browser.getUsageView(query, 2, undefined, view);
+    expect(page2.sessionOffset).toBe(12);
+    expect(page2.sessions).toHaveLength(12);
+    expect(page2.buckets).toBe(view.buckets);
+
+    // Bucket breakdown returns exact day-scoped rows + full-range sparklines (including exact Other tail history)
+    const activeDay = view.buckets.find((b) => b.tokens > 0)!.key;
+    const bucket = await browser.getUsageBucket(query, activeDay);
+    expect(bucket).not.toBeNull();
+    expect(bucket!.key).toBe(activeDay);
+    expect(bucket!.breakdown.projects.rows[0]?.t).toHaveLength(view.buckets.length);
+    if (bucket!.breakdown.projects.totalCount > 10) {
+      expect(bucket!.breakdown.projects.otherT).toHaveLength(view.buckets.length);
+      expect(bucket!.breakdown.projects.otherC).toHaveLength(view.buckets.length);
+    }
+    expect(bucket!.breakdown.providers.rows[0]?.t).toBeUndefined();
+    expect(await browser.getUsageBucket(query, '1999-01-01')).toBeNull();
+
+    // Deep-linked bucket comes in one round-trip
+    const deepLinked = await browser.getUsageView(query, 1, undefined, undefined, undefined, activeDay);
+    expect(deepLinked.selectedBucket?.key).toBe(activeDay);
+
+    // Lazy filter palette returns full options matching filterRevision
+    const filters = await browser.getUsageFilters();
+    expect(filters.filterRevision).toBe(view.filterRevision);
+    expect(filters.projects).toHaveLength(25);
+    expect(filters.devices).toContain(localDevice.id);
+  } finally {
+    await browser.dispose();
+    await runtime.dispose();
+    await server.stop(true);
+    await handler.dispose();
+  }
+});
+
 test('collector version wire fields stay optional in both directions', () => {
   const registration = { id: 'laptop', name: 'Laptop', platform: 'linux' };
   expect(Schema.decodeUnknownSync(SyncBatch)({ device: registration, events: [] }).device).toEqual(registration);

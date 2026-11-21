@@ -4,7 +4,7 @@
   import { page } from '$app/state';
   import { useSearchParams } from 'runed/kit';
   import { makeWorkbenchCache, usageScopeKey } from '#lib/client/workbench-cache';
-  import { makeDashboardClient, usagePageSize } from '#lib/client/dashboard-rpc';
+  import { makeDashboardClient, usageViewSize } from '#lib/client/dashboard-rpc';
   import {
     dashboardRanges,
     defaultDashboardRange,
@@ -34,12 +34,19 @@
     valueOf,
     periodOf,
     deltaOf,
-    timeBuckets,
+    viewBuckets,
     type Group,
     type Metric,
   } from '#lib/client/usage-workbench';
   import { sessionPageSize as perPage } from '#lib/shared/dashboard-page';
-  import type { DashboardPage, UsageQuery, Device, SessionSort } from '#lib/shared/domain';
+  import type {
+    DashboardBucketBreakdown,
+    DashboardView,
+    Device,
+    SessionSort,
+    UsageFilters,
+    UsageQuery,
+  } from '#lib/shared/domain';
   import { initialOrder, isDefaultSessionSort } from '#lib/shared/session-sort';
   import Icon from '#lib/components/Icon.svelte';
   import Trend from '#lib/components/workbench/Trend.svelte';
@@ -80,11 +87,18 @@
   const requestedPage = $derived(params.page);
   const pageKey = (scope: string, n: number, order: string) => `${n}:${order}:${scope}`;
   const key = $derived(pageKey(scope, requestedPage, sortKey));
-  const cache = makeWorkbenchCache(usagePageSize);
-  let data = $state.raw<DashboardPage>(),
+  const cache = makeWorkbenchCache(usageViewSize);
+  const bucketCache = new Map<string, DashboardBucketBreakdown>();
+  const filterCache = new Map<string, UsageFilters>();
+  let data = $state.raw<DashboardView>(),
     devices = $state.raw<readonly Device[]>([]),
     client = $state.raw<ReturnType<typeof makeDashboardClient>>();
-  let chartData = $state.raw<DashboardPage>();
+  let chartData = $state.raw<DashboardView>();
+  let selectedBucket = $state.raw<DashboardBucketBreakdown>(),
+    bucketLoading = $state(false);
+  let loadedFilters = $state.raw<UsageFilters>(),
+    filtersLoading = $state(false),
+    filtersError = $state('');
   let loading = $state(true),
     error = $state(''),
     exportError = $state(''),
@@ -93,13 +107,37 @@
     loadedSort = '',
     exporting = $state(false);
   let exportRequest: AbortController | undefined;
+  let bucketRequest: AbortController | undefined;
+  let filterRequest: AbortController | undefined;
   let generation = 0;
-  let prefetch: { key: string; stop: AbortController; result: Promise<DashboardPage> } | undefined;
+  let prefetch: { key: string; stop: AbortController; result: Promise<DashboardView> } | undefined;
   let request: AbortController | undefined;
   let overlay = $state.raw<{ group?: Group }>();
   let returnTo: HTMLElement | undefined;
   const active = $derived(groups.flatMap((g) => (filters[g] ?? []).map((v) => ({ g, v }))));
-  const projects = $derived(projectLabels(data?.filters.projects ?? []));
+  const devicesKey = $derived(JSON.stringify(query.devices?.toSorted() ?? null));
+  const filterCacheKey = $derived(data ? `${devicesKey}:${data.filterRevision}` : '');
+  const activeFilters = $derived(
+    loadedFilters && filterCacheKey && filterCache.get(filterCacheKey) === loadedFilters ? loadedFilters : undefined,
+  );
+  const fallbackFilters = $derived.by(() => {
+    const pick = (g: Group) => data?.breakdown[g].rows.map((r) => r.name) ?? [];
+    return {
+      devices: pick('devices'),
+      models: pick('models'),
+      projects: pick('projects'),
+      providers: pick('providers'),
+      harnesses: pick('harnesses'),
+    } satisfies Record<Group, readonly string[]>;
+  });
+  const projects = $derived.by(() => {
+    const resolved = activeFilters ? projectLabels(activeFilters.projects) : new Map<string, string>();
+    for (const entry of data?.projectLabels ?? []) resolved.set(entry.key, entry.label);
+    if (selectedBucket) {
+      for (const entry of selectedBucket.projectLabels) resolved.set(entry.key, entry.label);
+    }
+    return resolved;
+  });
   const names = $derived(new Map(devices.map((d) => [d.id, d.name])));
   const label = (g: Group, id: string) =>
     g === 'devices'
@@ -133,20 +171,73 @@
   let chartColors = $state.raw(new Map<Group, ReadonlyMap<string, string>>());
   // A stale or foreign bucket key (another range, an old link) selects nothing.
   const day = $derived(
-    chartData && params.day && timeBuckets(chartData, group).some((b) => b.key === params.day) ? params.day : undefined,
+    chartData && params.day && viewBuckets(chartData).some((b) => b.key === params.day) ? params.day : undefined,
   );
   const selectDay = (key: string | undefined) => set({ day: key ?? '' });
+  const needsBucketFetch = (view: DashboardView) =>
+    groups.some((g) => view.breakdown[g].totalCount > view.breakdown[g].rows.length);
+  function rememberBucket(bucket: DashboardBucketBreakdown) {
+    const cacheKey = `${bucket.viewRevision}:${bucket.key}`;
+    bucketCache.delete(cacheKey);
+    bucketCache.set(cacheKey, bucket);
+    if (bucketCache.size > 64) {
+      const oldest = bucketCache.keys().next();
+      if (!oldest.done) bucketCache.delete(oldest.value);
+    }
+  }
+  function extendColors(breakdown: DashboardView['breakdown']) {
+    chartColors = new Map(groups.map((g) => [g, assignChartColors(breakdown[g].rows, chartColors.get(g))]));
+  }
+  async function ensureFilters() {
+    if (!client || !data) return;
+    const targetKey = filterCacheKey;
+    const hit = filterCache.get(targetKey);
+    if (hit) {
+      loadedFilters = hit;
+      filtersError = '';
+      return;
+    }
+    if (filtersLoading && filterRequest) return;
+    filterRequest?.abort();
+    const c = new AbortController();
+    filterRequest = c;
+    filtersLoading = true;
+    filtersError = '';
+    try {
+      const result = await client.getUsageFilters(query.devices, c.signal);
+      if (!c.signal.aborted) {
+        const resolvedKey = `${devicesKey}:${result.filterRevision}`;
+        filterCache.delete(targetKey);
+        filterCache.set(targetKey, result);
+        filterCache.set(resolvedKey, result);
+        if (filterCache.size > 16) {
+          const oldest = filterCache.keys().next();
+          if (!oldest.done) filterCache.delete(oldest.value);
+        }
+        if (targetKey === filterCacheKey) loadedFilters = result;
+      }
+    } catch (e) {
+      if (!c.signal.aborted) filtersError = e instanceof Error ? e.message : 'Could not load filters.';
+    } finally {
+      if (filterRequest === c) {
+        filterRequest = undefined;
+        filtersLoading = false;
+      }
+    }
+  }
   async function fetchPage(q: UsageQuery, n: number, k: string, order: SessionSort, signal: AbortSignal) {
     if (!client) throw new Error('Dashboard is not ready.');
     const since = generation,
       started = new Date(),
-      same = loadedScope === usageScopeKey(q) && loadedSort === `${order.by}:${order.order}`;
-    const value = await client.getUsagePage(
+      same = loadedScope === usageScopeKey(q) && loadedSort === `${order.by}:${order.order}`,
+      requestedBucket = !same && params.day ? params.day : undefined;
+    const value = await client.getUsageView(
       q,
       n,
       signal,
       same ? data : undefined,
       isDefaultSessionSort(order) ? undefined : order,
+      requestedBucket,
     );
     if (!signal.aborted && since === generation) cache.put(k, value, started);
     return value;
@@ -189,20 +280,30 @@
     if (force) {
       generation++;
       cache.clear();
+      // Drop unversioned fallback bucket entries on forced refresh; revisioned entries stay safe.
+      for (const k of bucketCache.keys()) if (k.startsWith(':') || k.startsWith('legacy:')) bucketCache.delete(k);
     }
     loading = true;
     error = '';
     try {
       const result = await readPage(q, requestedPage, c.signal, order);
       if (!c.signal.aborted && k === key) {
-        if (chartData?.daily !== result.daily) {
-          chartColors = new Map(groups.map((g) => [g, assignChartColors(result[g], chartColors.get(g))]));
+        if (result.selectedBucket) rememberBucket(result.selectedBucket);
+        if (chartData?.buckets !== result.buckets) {
+          extendColors(result.breakdown);
+          if (result.selectedBucket) extendColors(result.selectedBucket.breakdown);
           chartData = result;
         }
         data = result;
         loadedKey = k;
         loadedScope = scopeKey;
         loadedSort = orderKey;
+        if (params.day) {
+          const hit = bucketCache.get(`${result.viewRevision}:${params.day}`);
+          selectedBucket = hit;
+        } else {
+          selectedBucket = undefined;
+        }
       }
     } catch (e) {
       if (!c.signal.aborted) error = e instanceof Error ? e.message : 'Could not load usage.';
@@ -218,7 +319,7 @@
     exporting = true;
     exportError = '';
     try {
-      const full = data.sessions.length === count ? data : await client.getSessionExport(query, c.signal);
+      const full = await client.getSessionExport(query, c.signal);
       if (!c.signal.aborted && k === scope) exportSessions(full, (id) => label('devices', id));
     } catch (e) {
       if (!c.signal.aborted) exportError = e instanceof Error ? e.message : 'Could not export sessions.';
@@ -250,6 +351,8 @@
       clearInterval(timer);
       abort.abort();
       exportRequest?.abort();
+      bucketRequest?.abort();
+      filterRequest?.abort();
       cancelPrefetch();
       request?.abort();
       void rpc.dispose();
@@ -262,14 +365,67 @@
       untrack(() => {
         overlay = undefined;
         exportRequest?.abort();
+        bucketRequest?.abort();
         exportError = '';
         void refresh();
       });
+  });
+  $effect(() => {
+    const targetDay = day;
+    const view = chartData;
+    const rpc = client;
+    const q = query;
+    if (!targetDay || !view || !rpc) {
+      bucketRequest?.abort();
+      selectedBucket = undefined;
+      bucketLoading = false;
+      return;
+    }
+    const cacheKey = `${view.viewRevision}:${targetDay}`;
+    const hit = bucketCache.get(cacheKey);
+    if (hit) {
+      bucketRequest?.abort();
+      selectedBucket = hit;
+      bucketLoading = false;
+      return;
+    }
+    if (!needsBucketFetch(view)) {
+      bucketRequest?.abort();
+      selectedBucket = undefined;
+      bucketLoading = false;
+      return;
+    }
+    untrack(() => {
+      bucketRequest?.abort();
+      const c = new AbortController();
+      bucketRequest = c;
+      bucketLoading = true;
+      void rpc
+        .getUsageBucket(q, targetDay, c.signal)
+        .then((result) => {
+          if (!c.signal.aborted && result) {
+            rememberBucket(result);
+            extendColors(result.breakdown);
+            if (day === targetDay) {
+              if (chartData?.viewRevision === result.viewRevision) selectedBucket = result;
+              else if (chartData?.viewRevision === view.viewRevision) void refresh(true);
+            }
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (bucketRequest === c) {
+            bucketRequest = undefined;
+            bucketLoading = false;
+          }
+        });
+    });
   });
   function palette(g?: Group) {
     if (!data || !ready) return;
     returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     overlay = { group: g };
+    void ensureFilters();
   }
   function close() {
     overlay = undefined;
@@ -348,8 +504,12 @@
                   >{rangeNames[r.value]}</button
                 >{/each}
             </div>
-            <button class="scope-trigger wb-link" disabled={!ready} onclick={() => palette()}
-              ><Icon name="sliders" size={16} />Filter <kbd>{shortcut}</kbd></button
+            <button
+              class="scope-trigger wb-link"
+              disabled={!ready}
+              onpointerenter={() => void ensureFilters()}
+              onfocus={() => void ensureFilters()}
+              onclick={() => palette()}><Icon name="sliders" size={16} />Filter <kbd>{shortcut}</kbd></button
             >
             <div class="wb-scope-end">
               <div class="wb-segmented" role="group" aria-label="Metric">
@@ -408,6 +568,7 @@
             </section>
             <Trend
               data={shown}
+              {devices}
               {group}
               {metric}
               colors={chartColors.get(group) ?? new Map()}
@@ -424,6 +585,9 @@
       {#if data}<div class="wb-answer reading" aria-busy={loading} inert={loadedScope !== scope}>
           <Breakdown
             data={chartData ?? data}
+            {devices}
+            {selectedBucket}
+            {bucketLoading}
             {metric}
             selected={day}
             colors={chartColors}
@@ -431,6 +595,7 @@
             {filters}
             {toggle}
             openAll={(g) => palette(g)}
+            onwarmfilters={() => void ensureFilters()}
             onselect={selectDay}
           />
         </div>{/if}
@@ -479,21 +644,19 @@
                 >{/each}</tr
             ></thead
           ><tbody
-            >{#each d.sessions as s (JSON.stringify([s.deviceId, s.harness, s.id]))}{@const project =
-                s.repository ?? s.project}{@const dest =
+            >{#each d.sessions as s (JSON.stringify([s.deviceId, s.harness, s.id]))}{@const dest =
                 nativeThreadUrl(s) ?? safeWebUrl(s.t3ThreadUrl) ?? cursorAgentUrl(s)}<tr
                 ><td
                   ><div>
-                    <button title={project} onclick={() => only('projects', project)}
-                      >{label('projects', project)}</button
+                    <button title={s.project} onclick={() => only('projects', s.project)}
+                      >{label('projects', s.project)}</button
                     >{#if dest}<a aria-label={`Open ${sessionDisplayName(s)}`} href={dest} title={sessionDisplayName(s)}
                         ><Icon name="external" size={12} /></a
                       >{/if}
                   </div></td
                 ><td
-                  >{#if d.filters.models.includes(s.model)}<button
-                      title={s.model}
-                      onclick={() => only('models', s.model)}>{modelLabel(s.model)}</button
+                  >{#if !s.multiModel}<button title={s.model} onclick={() => only('models', s.model)}
+                      >{modelLabel(s.model)}</button
                     >{:else}<span title={s.model}>{s.model}</span>{/if}</td
                 ><td><button onclick={() => only('devices', s.deviceId)}>{label('devices', s.deviceId)}</button></td><td
                   title={`Started ${sessionDate.format(new Date(s.startedAt))}`}
@@ -510,7 +673,11 @@
     {/if}
   </main>
   {#if overlay && data && client}<ScopeDialog
-      {data}
+      filters={activeFilters}
+      {fallbackFilters}
+      loading={filtersLoading}
+      error={filtersError}
+      retry={() => void ensureFilters()}
       {query}
       {label}
       {apply}

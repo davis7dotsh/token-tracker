@@ -76,7 +76,10 @@ export const loadDashboardLaunchAgent = Effect.fn('DashboardService.loadLaunchAg
   yield* execute(['bootstrap', domain, plist]);
 });
 
+export const defaultBodySizeLimit = '16M';
+
 const serviceEnvironment = (props: DashboardServiceProps) => ({
+  BODY_SIZE_LIMIT: defaultBodySizeLimit,
   ...props.environment,
   HOST: props.host,
   PORT: String(props.port),

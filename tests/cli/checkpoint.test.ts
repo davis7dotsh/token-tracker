@@ -1,7 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import { Effect, Exit } from 'effect';
 import type { UsageEvent } from '../../src/lib/shared/domain';
-import { acknowledgeEvents, changedEvents, changedRecords, eventDigest } from '../../src/cli/checkpoint';
+import {
+  acknowledgeEvents,
+  byteBudgetedBatches,
+  changedEvents,
+  changedRecords,
+  defaultSyncBatchMaxBytes,
+  eventDigest,
+} from '../../src/cli/checkpoint';
 import { commitBatch, commitChangedBatches } from '../../src/cli/sync';
 import type { Checkpoint } from '../../src/cli/state';
 
@@ -188,5 +195,41 @@ describe('incremental sync checkpoints', () => {
     expect(compacted).toBe(false);
     expect(result.checkpoint.eventDigests).toBe(checkpoint.eventDigests);
     expect(result.checkpoint.syncedAt).toBe('2026-10-03T02:00:00Z');
+  });
+
+  test('byte-budgeted batching splits metadata-heavy events under 256 KiB and never stalls on an oversized record', async () => {
+    const heavy = Array.from({ length: 500 }, (_, index) => ({
+      ...event(`heavy-${index}`),
+      project: `/Users/davis/workspace/very-long-organization-name/project-directory-${index}`,
+      repository: `github.com/davis7/project-service-${index}`,
+      sessionTitle: `Long T3 session title ${index} ${'x'.repeat(800)}`,
+      projectName: `Project Service ${index}`,
+      t3ThreadId: `thread-${index}`,
+      t3ThreadUrl: `https://t3.example.ts.net/env-conflux/thread-${index}`,
+    }));
+    const batches: number[] = [];
+    const batchBytes: number[] = [];
+    const result = await Effect.runPromise(
+      commitChangedBatches(
+        empty,
+        changedRecords(heavy, empty),
+        (batch) =>
+          Effect.sync(() => {
+            batches.push(batch.length);
+            batchBytes.push(Buffer.byteLength(JSON.stringify(batch)));
+            return { accepted: batch.length, updated: 0, deleted: 0, receivedAt: '2026-10-03T02:00:00Z' };
+          }),
+        () => Effect.void,
+        () => Effect.void,
+      ),
+    );
+    expect(result.accepted).toBe(500);
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.reduce((sum, n) => sum + n, 0)).toBe(500);
+    for (const bytes of batchBytes) expect(bytes).toBeLessThanOrEqual(defaultSyncBatchMaxBytes);
+
+    // An individual item exceeding the budget still yields on its own without stalling.
+    const oversized = [...byteBudgetedBatches(['a'.repeat(500), 'b'], (v) => v.length, { maxBytes: 100 })];
+    expect(oversized).toEqual([['a'.repeat(500)], ['b']]);
   });
 });

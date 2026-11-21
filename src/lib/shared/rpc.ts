@@ -1,10 +1,14 @@
 import { Schema } from 'effect';
 import { Rpc, RpcGroup } from 'effect/rpc';
 import {
+  DashboardBucketBreakdown,
   DashboardPage,
   DashboardPageDelta,
   DashboardResponse,
+  DashboardView,
+  DashboardViewDelta,
   SessionExport,
+  UsageFilters,
   UsageInfo,
   Device,
   DeviceRegistration,
@@ -87,6 +91,43 @@ export const UsageRpc = RpcGroup.make(
       sessionOffset: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
     },
     success: Schema.Union([DashboardPageDelta, DashboardPage]),
+    error: UsageFailure,
+  }),
+  Rpc.make('GetUsageView', {
+    payload: {
+      query: UsageQuery,
+      page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+      sort: Schema.optionalKey(SessionSort),
+      bucket: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
+    },
+    success: DashboardView,
+    error: UsageFailure,
+  }),
+  Rpc.make('GetUsageViewUpdate', {
+    payload: {
+      query: UsageQuery,
+      page: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+      sort: Schema.optionalKey(SessionSort),
+      bucket: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(64))),
+      viewRevision: Schema.String.check(Schema.isMaxLength(64)),
+      sessionOffset: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+    },
+    success: Schema.Union([DashboardViewDelta, DashboardView]),
+    error: UsageFailure,
+  }),
+  Rpc.make('GetUsageBucket', {
+    payload: {
+      query: UsageQuery,
+      bucket: Schema.String.check(Schema.isMaxLength(64)),
+    },
+    success: Schema.NullOr(DashboardBucketBreakdown),
+    error: UsageFailure,
+  }),
+  Rpc.make('GetUsageFilters', {
+    payload: {
+      devices: Schema.optionalKey(Schema.Array(Schema.String)),
+    },
+    success: UsageFilters,
     error: UsageFailure,
   }),
   Rpc.make('GetUsageInfo', { payload: UsageQuery, success: UsageInfo, error: UsageFailure }),
