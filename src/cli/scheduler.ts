@@ -63,7 +63,9 @@ export const scheduledEnvironment = (
     'TOKEN_TRACKER_T3_DATA_DIR',
     ...sourceOverrides,
   ].flatMap((name) => {
-    const value = env[name];
+    const raw = env[name];
+    if (!raw) return [];
+    const value = name === 'TOKEN_TRACKER_T3_DATA_DIR' ? raw.trim() : raw;
     if (!value) return [];
     const resolved = sourceOverrides.includes(name)
       ? value
@@ -73,7 +75,7 @@ export const scheduledEnvironment = (
           .map((path) => absoluteSourcePath(path, platform))
           .join(',')
       : absoluteSourcePath(value, platform);
-    return [{ name, value: resolved }];
+    return resolved ? [{ name, value: resolved }] : [];
   }),
 ];
 

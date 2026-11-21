@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { chmod, mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BunServices } from '@effect/platform-bun';
 import { Effect } from 'effect';
 import { buildDashboard, collectUsage, tokenTotal } from '../../src/lib/server/usage';
@@ -391,6 +392,8 @@ describe('Antigravity accounting', () => {
   test('auto-discovers roots, filters descendant attachments & relative paths, inherits from zero-event parent, and keeps child own project separate', async () => {
     const home = await tempDir('token-tracker-ag-');
     const customT3 = join(home, 'custom-t3');
+    const parentWorkspace = join(home, 'work', 'parent-repo');
+    const childWorkspace = join(home, 'work', 'other-local-folder');
     const cliRoot = join(home, '.gemini', 'antigravity-cli');
     const acpRoot = join(customT3, 'providers', 'antigravity', 'profile-hash', 'antigravity-acp');
     await mkdir(join(cliRoot, 'conversations'), { recursive: true });
@@ -402,11 +405,11 @@ describe('Antigravity accounting', () => {
       'main',
       encodeTrajectoryMetadata({
         workspaces: [
-          { folderUri: `file://${join(customT3, 'attachments', 'thread-1')}` },
+          { folderUri: pathToFileURL(join(customT3, 'attachments', 'thread-1')).href },
           { folderUri: 'relative/path/ignored' },
           {
-            folderUri: 'file:///work/parent-repo',
-            gitRootUri: 'file:///work/parent-repo',
+            folderUri: pathToFileURL(parentWorkspace).href,
+            gitRootUri: pathToFileURL(parentWorkspace).href,
             remoteUrl: 'https://github.com/davis7dotsh/token-tracker.git',
             branchName: 'main',
           },
@@ -451,7 +454,7 @@ describe('Antigravity accounting', () => {
     childOwn.query('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run(
       'main',
       encodeTrajectoryMetadata({
-        workspaces: [{ folderUri: 'file:///work/other-local-folder' }],
+        workspaces: [{ folderUri: pathToFileURL(childWorkspace).href }],
         createdAt: '2026-11-19T12:02:00.000Z',
         parentConversationId: 'zero-parent',
         subagentRole: 'Independent Worker',
@@ -483,14 +486,24 @@ describe('Antigravity accounting', () => {
       museDirs: [],
       deviceId: 'enceladus',
     };
-    const usage = await Effect.runPromise(collectUsage(collectOptions).pipe(Effect.provide(BunServices.layer)));
-    const warmUsage = await Effect.runPromise(collectUsage(collectOptions).pipe(Effect.provide(BunServices.layer)));
+    const previousHome = process.env.ANTIGRAVITY_HOME;
+    delete process.env.ANTIGRAVITY_HOME;
+    let usage: Awaited<ReturnType<typeof collect>>;
+    let warmUsage: Awaited<ReturnType<typeof collect>>;
+    const collect = () => Effect.runPromise(collectUsage(collectOptions).pipe(Effect.provide(BunServices.layer)));
+    try {
+      usage = await collect();
+      warmUsage = await collect();
+    } finally {
+      if (previousHome === undefined) delete process.env.ANTIGRAVITY_HOME;
+      else process.env.ANTIGRAVITY_HOME = previousHome;
+    }
 
     for (const snapshot of [usage, warmUsage]) {
       expect(snapshot.events).toHaveLength(2);
       const inherited = snapshot.events.find((e) => e.sessionId === 'child-inherit');
       expect(inherited).toMatchObject({
-        project: '/work/parent-repo',
+        project: parentWorkspace,
         repository: 'github.com/davis7dotsh/token-tracker',
         sessionTitle: 'Inherited Researcher',
         costKnown: true,
@@ -499,7 +512,7 @@ describe('Antigravity accounting', () => {
 
       const own = snapshot.events.find((e) => e.sessionId === 'child-own');
       expect(own).toMatchObject({
-        project: '/work/other-local-folder',
+        project: childWorkspace,
         repository: null,
         sessionTitle: 'Independent Worker',
       });
@@ -839,13 +852,17 @@ describe('Antigravity accounting', () => {
     'searchable-but-unlistable (0111) T3 provider directory surfaces an error source and warning',
     async () => {
       const home = await tempDir('token-tracker-ag-0111-');
-      const providersDir = join(home, '.t3', 'userdata', 'providers', 'antigravity');
+      const t3DataDirectory = join(home, '.t3', 'userdata');
+      const providersDir = join(t3DataDirectory, 'providers', 'antigravity');
       await mkdir(providersDir, { recursive: true });
       await chmod(providersDir, 0o111);
+      const previousHome = process.env.ANTIGRAVITY_HOME;
+      delete process.env.ANTIGRAVITY_HOME;
       try {
         const usage = await Effect.runPromise(
           collectUsage({
             home,
+            t3DataDirectory,
             claudeDirs: [],
             codexDirs: [],
             piDirs: [],
@@ -857,6 +874,8 @@ describe('Antigravity accounting', () => {
         expect(agSource?.status).toBe('error');
         expect(usage.warnings.some((w) => w.startsWith('antigravity:'))).toBe(true);
       } finally {
+        if (previousHome === undefined) delete process.env.ANTIGRAVITY_HOME;
+        else process.env.ANTIGRAVITY_HOME = previousHome;
         await chmod(providersDir, 0o700);
       }
     },

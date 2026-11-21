@@ -141,9 +141,15 @@ const canonicalResponseIdentity = (
   primary: AntigravityModelUsage,
   compatibleStep?: AntigravityModelUsage | null,
   ambiguousAliases?: ReadonlySet<string>,
+  uniqueResponseIdByAlias?: ReadonlyMap<string, string>,
 ) => {
   const stepId = compatibleStep ? responseIdentity(compatibleStep) : '';
   if (stepId && !(primary.responseId && ambiguousAliases?.has(stepId))) return stepId;
+  if (primary.responseId) return primary.responseId;
+  for (const alias of responseAliases(primary)) {
+    const promoted = uniqueResponseIdByAlias?.get(alias);
+    if (promoted) return promoted;
+  }
   return responseIdentity(primary);
 };
 
@@ -581,8 +587,10 @@ export const parseAntigravityDatabase = (
         }
       }
       const ambiguousAliases = new Set<string>();
+      const uniqueResponseIdByAlias = new Map<string, string>();
       for (const [alias, ids] of responseIdsByAlias) {
         if (ids.size > 1) ambiguousAliases.add(alias);
+        else if (ids.size === 1) uniqueResponseIdByAlias.set(alias, [...ids][0]);
       }
 
       const coveredUsagesByAlias = new Map<string, AntigravityModelUsage[]>();
@@ -614,17 +622,38 @@ export const parseAntigravityDatabase = (
         const aliases = responseAliases(usage);
         let matchedStepIdx: number | undefined;
         let matchedStep: AntigravityStepMetadata | undefined;
-        for (const alias of aliases) {
-          if (usage.responseId && ambiguousAliases.has(alias)) continue;
-          const candidates = stepsByAlias.get(alias);
-          if (!candidates) continue;
-          const hit = candidates.find(
-            (candidate) => candidate.step.modelUsage && compatibleUsage(usage, candidate.step.modelUsage),
-          );
-          if (hit) {
-            matchedStepIdx = hit.idx;
-            matchedStep = hit.step;
-            break;
+        const referencedSteps = new Set(gen.stepIndices);
+        // Prefer an exact responseId match first; for shared aliases, prefer
+        // a step explicitly referenced by gen.stepIndices, falling back to a
+        // unique alias match when no step indices disambiguate it.
+        if (usage.responseId) {
+          const exactHits = stepsByAlias.get(usage.responseId);
+          const exact =
+            exactHits?.find(
+              (candidate) =>
+                candidate.step.modelUsage?.responseId === usage.responseId && referencedSteps.has(candidate.idx),
+            ) ?? exactHits?.find((candidate) => candidate.step.modelUsage?.responseId === usage.responseId);
+          if (exact) {
+            matchedStepIdx = exact.idx;
+            matchedStep = exact.step;
+          }
+        }
+        if (matchedStep === undefined) {
+          for (const alias of aliases) {
+            if (usage.responseId && ambiguousAliases.has(alias)) continue;
+            const candidates = stepsByAlias.get(alias);
+            if (!candidates) continue;
+            const compatible = candidates.filter(
+              (candidate) => candidate.step.modelUsage && compatibleUsage(usage, candidate.step.modelUsage),
+            );
+            const hit =
+              compatible.find((candidate) => referencedSteps.has(candidate.idx)) ??
+              (compatible.length === 1 ? compatible[0] : undefined);
+            if (hit) {
+              matchedStepIdx = hit.idx;
+              matchedStep = hit.step;
+              break;
+            }
           }
         }
         let fallbackStepIdx: number | undefined;
@@ -647,7 +676,12 @@ export const parseAntigravityDatabase = (
         }
         const compatibleStepUsage =
           matchedStep?.modelUsage && compatibleUsage(usage, matchedStep.modelUsage) ? matchedStep.modelUsage : null;
-        const effectiveResponseKey = canonicalResponseIdentity(usage, compatibleStepUsage, ambiguousAliases);
+        const effectiveResponseKey = canonicalResponseIdentity(
+          usage,
+          compatibleStepUsage,
+          ambiguousAliases,
+          uniqueResponseIdByAlias,
+        );
         let stamp = stepTimestamp(matchedStep, '');
         if (!stamp) {
           for (const candidateIdx of gen.stepIndices) {
@@ -988,11 +1022,15 @@ export const collectAntigravityFiles = Effect.fn('usage.collectAntigravityFiles'
     source.status = paths.length ? 'ready' : 'empty';
 
     let summaries = new Map<string, SummaryRow>();
+    let summaryFailed = false;
     const summaryPath = path.join(path.dirname(root.success), 'conversation_summaries.db');
     if (yield* regularFile(summaryPath)) {
       const read = readSummaries(summaryPath, attachmentsDir);
       if (read) summaries = read;
-      else incomplete = true;
+      else {
+        incomplete = true;
+        summaryFailed = true;
+      }
     }
 
     let malformed = 0;
@@ -1057,9 +1095,9 @@ export const collectAntigravityFiles = Effect.fn('usage.collectAntigravityFiles'
       files.push(parsed);
     }
 
-    if (malformed || unreadable || truncated) {
+    if (malformed || unreadable || truncated || summaryFailed) {
       source.status = 'partial';
-      source.error = `Skipped ${malformed} malformed records; ${unreadable} files could not be read.${truncated ? ` ${truncated} files were partially scanned.` : ''}`;
+      source.error = `Skipped ${malformed} malformed records; ${unreadable} files could not be read.${truncated ? ` ${truncated} files were partially scanned.` : ''}${summaryFailed ? ' Conversation summaries could not be read.' : ''}`;
       warnings.push(`antigravity: ${source.error}`);
     }
   }

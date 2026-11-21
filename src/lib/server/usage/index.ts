@@ -233,7 +233,7 @@ export const collectUsage = Effect.fn('usage.collect')(function* (options: Colle
       repository:
         repository && !repository.startsWith('local:')
           ? repository
-          : (sessionRepositories.get(key) ?? entry.event.repository ?? repository ?? null),
+          : (entry.event.repository ?? sessionRepositories.get(key) ?? repository ?? null),
       ...(options.deviceId ? { deviceId: options.deviceId } : {}),
     };
   });
