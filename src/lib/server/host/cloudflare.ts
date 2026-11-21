@@ -22,6 +22,9 @@ export const handleHubRequest = async ({
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 };
 
+// The Hub Worker starts its Durable Object on demand.
+export const startHub = async () => {};
+
 // On Workers the catalog belongs to the bound hub, not the dashboard. Preserve
 // its authenticated/collector-only routing and the normal RPC timeout.
 export const readPricingCatalog = async (event: Parameters<typeof handleHubRequest>[0] & Pick<RequestEvent, 'url'>) => {

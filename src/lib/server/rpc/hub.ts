@@ -1,4 +1,4 @@
-import { Cache, Clock, Context, Effect, Exit, Layer, Schedule, Schema } from 'effect';
+import { Cache, Clock, Context, Effect, Exit, Layer, Option, Schedule, Schema, type Scope } from 'effect';
 import { createHash, randomBytes } from 'node:crypto';
 import type { Headers as EffectHeaders } from 'effect/http/Headers';
 import { HttpRouter, HttpServerResponse } from 'effect/http';
@@ -125,6 +125,15 @@ export const makeLocalUsageSnapshot = (
     );
     return Cache.get(checks, undefined);
   });
+
+// A self-hosted hub can also pull usage on a timer (the trace source). It
+// writes through the store like uploads do; `refreshed` re-warms the last view.
+export class UsageFeed extends Context.Service<
+  UsageFeed,
+  {
+    readonly run: (refreshed: Effect.Effect<void>) => Effect.Effect<void, never, UsageStore | HubPricing | Scope.Scope>;
+  }
+>()('token-tracker/UsageFeed') {}
 
 class SnapshotInput extends Context.Service<SnapshotInput, { current: UsageResult; state: PricingState }>()(
   'token-tracker/SnapshotInput',
@@ -324,9 +333,9 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         return choices;
       };
       const readRawSnapshot = Effect.fn('rpc.readRawSnapshot')(function* (key: string) {
-        const { query, start, end, revision, localGeneration } = decodeReadKey(key);
+        const { query, start, end, localGeneration } = decodeReadKey(key);
         const { current } = yield* SnapshotInput;
-        const epoch = `${revision}:${localGeneration}`;
+        const dimEpoch = `${store.getRevision()}:${localGeneration}`;
         const previousMillis = start ? Date.parse(start) : -Infinity;
         const endMillis = end ? Date.parse(end) : Infinity;
         const localCandidates: string[] = [];
@@ -344,11 +353,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               devices: query.devices,
               candidateIds: localCandidates,
             }),
-            cachedDimensions?.epoch === epoch
+            cachedDimensions?.epoch === dimEpoch
               ? Effect.succeed(cachedDimensions.rows)
               : Effect.map(store.getDimensions(localDeviceId), (rows) => {
                   const collected = collectDimensions(rows, current.events);
-                  cachedDimensions = { epoch, rows: collected };
+                  cachedDimensions = { epoch: dimEpoch, rows: collected };
                   return collected;
                 }),
           ],
@@ -481,16 +490,22 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
       >();
       const filterCatalogs = new Map<string, { filters: UsageFilters; projectLabels: ReadonlyMap<string, string> }>();
       let snapshotEpoch = '';
+      let dimensionsEpoch = '';
       let snapshotPricing = '';
       const syncEpoch = Effect.fnUntraced(function* () {
         const { current, generation } = yield* localSnapshot;
         const state = yield* pricing.load;
-        const revision = store.getRevision();
-        const epoch = `${revision}:${generation}`;
-        if (epoch !== snapshotEpoch) {
-          snapshotEpoch = epoch;
+        // Trace writes only stale windows containing their days, so the keys
+        // below carry this window's revision; other writes retire everything.
+        const epoch = `${store.getSharedRevision()}:${generation}`;
+        const allEpoch = `${store.getRevision()}:${generation}`;
+        if (allEpoch !== dimensionsEpoch) {
+          dimensionsEpoch = allEpoch;
           cachedDimensions = undefined;
           filterCatalogs.clear();
+        }
+        if (epoch !== snapshotEpoch) {
+          snapshotEpoch = epoch;
           yield* Cache.invalidateAll(rawSnapshots);
           yield* Cache.invalidateAll(snapshots);
           dashboards.clear();
@@ -502,7 +517,7 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           pricingResults.clear();
         }
         snapshotPricing = state.policy.revision;
-        return { current, generation, state, revision, epoch };
+        return { current, generation, state, epoch: allEpoch };
       });
       const readFilterCatalog = Effect.fn('rpc.readFilterCatalog')(function* (devices?: readonly string[]) {
         const { current, state, epoch } = yield* syncEpoch();
@@ -535,21 +550,23 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         return catalog;
       });
       const readQuery = Effect.fn('rpc.readQuery')(function* (query: UsageQuery) {
-        const { current, generation, state, revision } = yield* syncEpoch();
+        const { current, generation, state } = yield* syncEpoch();
         const now = new Date(yield* Clock.currentTimeMillis);
         const timeframe = usageTimeframe(query, now);
         const effective = effectiveQuery(query, state.policy);
         const normalized = normalizedQuery(effective);
-        const readKey = {
-          query: normalized.devices ? { devices: normalized.devices } : {},
-          revision,
-          localGeneration: generation,
-          ...(timeframe.range !== 'all'
+        const window =
+          timeframe.range !== 'all'
             ? {
                 start: timeframe.previousStart.startOfDay().toInstant().toString({ fractionalSecondDigits: 3 }),
                 end: timeframe.end.toInstant().toString({ fractionalSecondDigits: 3 }),
               }
-            : {}),
+            : {};
+        const readKey = {
+          query: normalized.devices ? { devices: normalized.devices } : {},
+          revision: store.getRevision(window.start, window.end),
+          localGeneration: generation,
+          ...window,
           pricingRevision: state.policy.revision,
         };
         return {
@@ -574,8 +591,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         }
       >();
       // Dashboard views omit sources, so remote device heartbeats do not bust
-      // view delta revisions when accounting has not changed.
-      const viewVersions = new WeakMap<DashboardResponse, { selection: string | undefined; revision: string }>();
+      // view delta revisions when accounting and filter catalogs have not changed.
+      const viewVersions = new WeakMap<
+        DashboardResponse,
+        { selection: string | undefined; filterRevision: string; revision: string }
+      >();
       const projectedViews = new WeakMap<DashboardResponse, ProjectedViewBase>();
       const projectedBuckets = new WeakMap<DashboardResponse, Map<string, DashboardBucketBreakdown | null>>();
       const getAggregate = Effect.fn('rpc.getAggregate')(
@@ -706,6 +726,8 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
         ),
       );
       const warmer = yield* makeViewWarmer(options.viewHints, getAggregate, store.getRevision);
+      const feed = yield* Effect.serviceOption(UsageFeed);
+      if (Option.isSome(feed)) yield* feed.value.run(warmer.refreshed()).pipe(Effect.forkScoped);
       // The dashboard's device list: registered devices plus this hub's own
       // machine, which collects directly and may never have registered.
       const listDevices = Effect.fn('rpc.listDevices')(function* () {
@@ -769,10 +791,10 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           sessionOffset,
         };
       });
-      const getViewRevision = (response: DashboardResponse, selection: string | undefined) => {
+      const getViewRevision = (response: DashboardResponse, selection: string | undefined, filterRevision: string) => {
         let version = viewVersions.get(response);
-        if (!version || version.selection !== selection) {
-          version = { selection, revision: randomBytes(16).toString('hex') };
+        if (!version || version.selection !== selection || version.filterRevision !== filterRevision) {
+          version = { selection, filterRevision, revision: randomBytes(16).toString('hex') };
           viewVersions.set(response, version);
         }
         return version.revision;
@@ -818,7 +840,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           const catalog = yield* readFilterCatalog(input.normalized.devices);
           const response = cached.response;
           const base = getViewBase(response);
-          const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+          const viewRevision = getViewRevision(
+            response,
+            JSON.stringify(input.query.models),
+            catalog.filters.filterRevision,
+          );
           const sessions = yield* sortedSessions(response.sessions, response.machine, sort);
           const sessionCount = sessions.length;
           const lastPage = Math.max(1, Math.ceil(sessionCount / sessionPageSize));
@@ -882,8 +908,13 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
           function* (request) {
             const { input, cached } = yield* getAggregate(request.query);
             yield* warmer.visited(request.query);
+            const catalog = yield* readFilterCatalog(input.normalized.devices);
             const response = cached.response;
-            const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+            const viewRevision = getViewRevision(
+              response,
+              JSON.stringify(input.query.models),
+              catalog.filters.filterRevision,
+            );
             if (request.viewRevision !== viewRevision || request.sort?.by === 'device') {
               return yield* getView(request);
             }
@@ -900,7 +931,6 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
               };
             }
             const base = getViewBase(response);
-            const catalog = yield* readFilterCatalog(input.normalized.devices);
             const pageSessions = sessions
               .slice(sessionOffset, sessionOffset + sessionPageSize)
               .map((session) => projectViewSession(session, base.knownModels));
@@ -927,7 +957,11 @@ export const rpcHandlersLayer = (browserProof: string, options: HubOptions) =>
             const catalog = yield* readFilterCatalog(input.normalized.devices);
             const response = cached.response;
             const base = getViewBase(response);
-            const viewRevision = getViewRevision(response, JSON.stringify(input.query.models));
+            const viewRevision = getViewRevision(
+              response,
+              JSON.stringify(input.query.models),
+              catalog.filters.filterRevision,
+            );
             return getBucketForResponse(response, base, bucket, viewRevision, catalog.projectLabels);
           },
           Effect.mapError((error) =>

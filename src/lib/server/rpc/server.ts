@@ -17,7 +17,8 @@ import { StorageFailure } from '../../shared/rpc';
 import { collectUsage } from '../usage';
 import { filePricing } from '../usage/pricing-runtime';
 import { usageRevision } from '../usage/revision';
-import { HubPricing, LocalUsage, makeHubWebHandler } from './hub';
+import { HubPricing, LocalUsage, makeHubWebHandler, noLocalUsage } from './hub';
+import { traceSourceConfig, traceSourceLayer } from '../traces/source';
 import { getLocalDevice } from './identity';
 import { ServerConfiguration, UsageStore } from './store';
 import type { ViewHints } from './view-warmer';
@@ -130,7 +131,7 @@ const relaxedSync = <A, E, R>(sql: SqlClient.SqlClient, next: Effect.Effect<A, E
     Effect.mapError(() => new StorageFailure({ message: 'Could not access the dashboard’s usage database.' })),
     Effect.andThen(next),
   );
-export const usageStoreLayer = (options: ServerOptions = {}) =>
+export const usageStoreLayer = (options: ServerOptions = {}, collectorCutoff?: string) =>
   Layer.unwrap(
     Effect.map(hubFiles(options), ({ databasePath, pairingSecret }) =>
       Layer.effect(
@@ -149,6 +150,7 @@ export const usageStoreLayer = (options: ServerOptions = {}) =>
           Layer.succeed(ServerConfiguration, {
             pairingSecret,
             indexedPricing: true,
+            ...(collectorCutoff ? { collectorCutoff } : {}),
             // Optional cache writes must never wait for a collector's write lock.
             // Keep the normal connection's busy timeout unchanged.
             openDayPacks: SqliteClient.make({ filename: databasePath, disableWAL: true, busyTimeout: 0 }).pipe(
@@ -223,8 +225,29 @@ const downloads = HttpRouter.add(
   }),
 ).pipe(HttpRouter.provideRequest(Layer.mergeAll(BunServices.layer, BunHttpPlatform.layer)));
 
+// With TOKEN_TRACKER_TRACES_URL the hub reads usage from the trace store
+// instead of this machine's logs; its stored collector history stays visible.
+const traceServices = (options: ServerOptions) => {
+  const config = traceSourceConfig(dataDirectory(options));
+  // A misconfigured trace source fails closed instead of reading local logs.
+  if (Result.isFailure(config))
+    return Layer.mergeAll(
+      Layer.effect(UsageStore, Effect.fail(new StorageFailure({ message: config.failure.message }))),
+      filePricingLayer(options),
+      noLocalUsage,
+    );
+  if (!config.success) return undefined;
+  return Layer.mergeAll(
+    usageStoreLayer(options, config.success.since),
+    filePricingLayer(options),
+    noLocalUsage,
+    traceSourceLayer(config.success),
+  );
+};
+
 export const makeRpcWebHandler = (options: ServerOptions = {}, localLayer = localUsageLayer) => {
-  const services = Layer.mergeAll(usageStoreLayer(options), filePricingLayer(options), localLayer);
+  const traces = localLayer === localUsageLayer ? traceServices(options) : undefined;
+  const services = traces ?? Layer.mergeAll(usageStoreLayer(options), filePricingLayer(options), localLayer);
   // adapter-node may reconstruct HTTP requests with an HTTPS scheme. Use the
   // deployment's explicit public origin when one is configured.
   const publicOrigin = options.dashboardOrigin ?? process.env.ORIGIN?.trim();
@@ -256,6 +279,13 @@ export const handleRpcRequest = (request: Request, collectorOnly = false) => {
     return response;
   });
 };
+
+// A trace source pulls on a timer, so its hub starts with the server rather
+// than on the first request. Health is the cheapest request that builds it.
+export const startRpcServer = () =>
+  process.env.TOKEN_TRACKER_TRACES_URL?.trim()
+    ? handleRpcRequest(new Request('http://127.0.0.1/api/health')).then(() => undefined)
+    : Promise.resolve();
 
 export const disposeRpcServer = async () => {
   const current = server;

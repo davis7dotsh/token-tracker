@@ -52,6 +52,9 @@ export class ServerConfiguration extends Context.Service<
     readonly pairingSecret: string;
     readonly indexedPricing?: boolean;
     readonly openDayPacks?: Effect.Effect<DayPacks | undefined, never, Scope.Scope>;
+    // With a trace source, collector records at or after this instant belong
+    // to the traces: uploads still succeed, but those records are not stored.
+    readonly collectorCutoff?: string;
   }
 >()('token-tracker/ServerConfiguration') {}
 
@@ -106,6 +109,24 @@ const preserveRepository = (incoming: UsageEvent, previous?: UsageEvent) =>
   (!incoming.repository || incoming.repository.startsWith('local:'))
     ? previous.repository
     : incoming.repository;
+const storedPayload = (
+  event: UsageEvent,
+  previous: UsageEvent | undefined,
+  deviceId: string,
+  pricingSnapshot: string,
+) => {
+  const normalized = {
+    ...preserveSessionMetadata(event, previous),
+    ...event,
+    // A missing optional T3 binding is not evidence that an attached
+    // remote was removed. Explicit bindings and cwd remotes still win.
+    repository: preserveRepository(event, previous),
+    deviceId,
+    costUsd: event.costKnown ? event.costUsd : 0,
+  };
+  const payload = JSON.stringify(normalized);
+  return { normalized, payload, payloadHash: digest(JSON.stringify([pricingSnapshot, payload])) };
+};
 const UsageDimension = Schema.Struct({
   deviceId: Schema.String,
   harness: Harness,
@@ -287,17 +308,56 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     // migrations within their CPU budget and retain the portable scan there.
     if (configuration.indexedPricing) yield* sql.unsafe(pricingShapeIndex).pipe(Effect.mapError(storageFailure));
     const pricingCandidates = makePricingCandidates(sql, decodeEvent);
+    const hiddenByCutoff = (id: string, timestamp: string) =>
+      configuration.collectorCutoff !== undefined &&
+      !id.startsWith('trace:') &&
+      new Date(timestamp).toISOString() >= configuration.collectorCutoff;
     const getPricingCandidates = (...args: Parameters<typeof pricingCandidates>) =>
       configuration.indexedPricing
         ? pricingCandidates(...args).pipe(
+            Effect.map((result) =>
+              result && configuration.collectorCutoff
+                ? {
+                    ...result,
+                    remote: result.remote.filter((event) => !hiddenByCutoff(event.id, event.timestamp)),
+                  }
+                : result,
+            ),
             Effect.catchDefect(() => Effect.fail(storageFailure())),
             Effect.mapError(storageFailure),
           )
         : Effect.succeed(undefined);
     let revision = 0;
+    // Trace records have globally unique IDs, so no copy elsewhere in history
+    // can change which record a read keeps: their writes only stale the UTC
+    // days they touch. Every other write still stales every window (`floor`).
+    let floor = 0;
+    const dayRevisions = new Map<string, number>();
+    const publish = (days: ReadonlySet<string>, traces: boolean) => {
+      revision++;
+      if (!traces) floor = revision;
+      for (const day of days) dayRevisions.set(day, revision);
+      pages.invalidate(days);
+    };
+    // The newest revision that can change a read of [start, end).
+    const windowRevision = (start?: string, end?: string) => {
+      if (!start && !end) return revision;
+      let latest = floor;
+      const first = start?.slice(0, 10) ?? '';
+      const last = end?.slice(0, 10) ?? '\uffff';
+      for (const [day, changed] of dayRevisions) if (changed > latest && day >= first && day <= last) latest = changed;
+      return latest;
+    };
     let metadataRevision = 0;
     const packs = configuration.openDayPacks ? yield* configuration.openDayPacks : undefined;
-    const pages = makeWindowPages(sql, decodeEvent, () => revision, storageFailure, packs);
+    const pages = makeWindowPages(
+      sql,
+      decodeEvent,
+      () => revision,
+      storageFailure,
+      packs,
+      configuration.collectorCutoff,
+    );
     let copiedRevision = -1;
     let copiedIds = new Set<string>();
     // Upload work remains cancellable, but a durable commit must publish its
@@ -364,10 +424,13 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       return { device: registered, token };
     });
 
+    // The trace source writes in-process: it may create devices like a
+    // migration, corrects records like a collector, and moves or withdraws its
+    // own globally unique `trace:` records across devices.
     const writeUsageBatch = Effect.fn('UsageStore.writeUsageBatch')(function* (
       deviceId: string,
       batch: SyncBatch,
-      authorization: { token: string } | { pairingSecret: string },
+      authorization: { token: string } | { pairingSecret: string } | { traces: true },
     ) {
       yield* validateDevice(batch.device);
       if (batch.device.id !== deviceId)
@@ -377,6 +440,10 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       }
       if ('pairingSecret' in authorization && batch.deletedIds?.length)
         return yield* Effect.fail(new InvalidRequest({ message: 'Migration imports cannot delete usage records.' }));
+      const recordIds = [...batch.events.map((event) => event.id), ...(batch.deletedIds ?? [])];
+      if ('traces' in authorization && !recordIds.every((id) => id.startsWith('trace:')))
+        return yield* Effect.fail(new InvalidRequest({ message: 'The trace source only writes trace records.' }));
+      const cutoff = !('traces' in authorization) ? configuration.collectorCutoff : undefined;
       for (const event of batch.events) {
         const amounts = [
           event.inputTokens,
@@ -406,8 +473,11 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const result = yield* commitWrite(
         Effect.gen(function* () {
           let createdDevice = false;
-          if ('pairingSecret' in authorization) {
-            if (!equalSecret(authorization.pairingSecret, configuration.pairingSecret))
+          if (!('token' in authorization)) {
+            if (
+              'pairingSecret' in authorization &&
+              !equalSecret(authorization.pairingSecret, configuration.pairingSecret)
+            )
               return yield* Effect.fail(new Unauthorized({ message: 'The pairing secret is incorrect.' }));
             // Migration may create devices, but never rotates a connected
             // collector's credential. New devices still pair normally later.
@@ -463,22 +533,30 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
             payload_hash: string;
             pricing_snapshot: string;
           }[] = [];
+          if ('traces' in authorization) {
+            // A record whose session metadata now names another machine moves;
+            // one that no longer qualifies (deletedIds) leaves every device.
+            for (let offset = 0; offset < recordIds.length; offset += 256) {
+              const rows = yield* sql.unsafe<{ timestamp: string }>(
+                'DELETE FROM usage_events WHERE device_id <> ? AND id IN (SELECT value FROM json_each(?)) RETURNING timestamp',
+                [deviceId, JSON.stringify(recordIds.slice(offset, offset + 256))],
+              );
+              deleted += rows.length;
+              for (const { timestamp } of rows) changedDays.add(utcDay(timestamp));
+            }
+          }
           for (const event of batch.events) {
+            if (cutoff !== undefined && new Date(event.timestamp).toISOString() >= cutoff) continue;
             const previous = existing.get(event.id);
             // A source backup can be older than corrections already synced
             // by collectors. Imports only fill missing record IDs.
             if (previous && 'pairingSecret' in authorization) continue;
-            const normalized = {
-              ...preserveSessionMetadata(event, previous?.event),
-              ...event,
-              // A missing optional T3 binding is not evidence that an attached
-              // remote was removed. Explicit bindings and cwd remotes still win.
-              repository: preserveRepository(event, previous?.event),
+            const { normalized, payload, payloadHash } = storedPayload(
+              event,
+              previous?.event,
               deviceId,
-              costUsd: event.costKnown ? event.costUsd : 0,
-            };
-            const payload = JSON.stringify(normalized);
-            const payloadHash = digest(JSON.stringify([pricingSnapshot, payload]));
+              pricingSnapshot,
+            );
             if (previous?.hash === payloadHash) continue;
             const timestamp = new Date(event.timestamp).toISOString();
             changedDays.add(utcDay(timestamp));
@@ -540,10 +618,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
           return { accepted, updated, deleted, receivedAt, metadataChanged, changedDays };
         }),
         (result) => {
-          if (result.changedDays.size) {
-            revision++;
-            pages.invalidate(result.changedDays);
-          }
+          if (result.changedDays.size) publish(result.changedDays, 'traces' in authorization);
           if (result.metadataChanged) metadataRevision++;
         },
       ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
@@ -583,7 +658,9 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
     const decodeOutside = (rows: readonly StoredRow[]) =>
       Effect.try({
         try: () =>
-          rows.map((row) => ({ event: decodeEvent(row.payload), timestamp: row.timestamp, stamp: priceStamp(row) })),
+          rows
+            .filter((row) => !hiddenByCutoff(row.id, row.timestamp))
+            .map((row) => ({ event: decodeEvent(row.payload), timestamp: row.timestamp, stamp: priceStamp(row) })),
         catch: storageFailure,
       });
     const readWindow = Effect.fn('UsageStore.readWindow')(
@@ -630,7 +707,7 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       },
       { capacity: 2, timeToLive: (exit) => (Exit.isSuccess(exit) ? 'Infinity' : 0) },
     );
-    let windowRevision = revision;
+    let windowFloor = floor;
     const metadataCache = yield* Cache.makeWith(
       (key: string) =>
         Effect.gen(function* () {
@@ -695,18 +772,18 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       const { candidateIds: _candidateIds, ...windowOptions } = options;
       // Retire large decoded arrays after a committed event change. Metadata
       // updates reuse them, and the revision in each key isolates in-flight reads.
-      if (windowRevision !== revision) {
+      if (windowFloor !== floor) {
         yield* Cache.invalidateAll(windows);
-        windowRevision = revision;
+        windowFloor = floor;
       }
-      const generation = revision;
+      const generation = windowRevision(options.start, options.end);
       const excluded = excludeDeviceId ?? '';
       const cached = yield* Cache.get(
         windows,
         JSON.stringify({ excluded, revision: generation, options: windowOptions }),
       );
       let data = yield* includeLocalOwners(cached, excluded, options);
-      if (generation !== revision) {
+      if (generation !== windowRevision(options.start, options.end)) {
         // A move, correction or deletion may land between date pages or owner
         // lookups. Retry once under one database transaction; do not await a
         // shared cache entry here (its producer could need the same connection).
@@ -724,6 +801,66 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
         warnings: [],
         ...(yield* readMetadata(excludeDeviceId)),
       };
+    });
+
+    // A trace pull re-reads hours of rows it already stored. Compare their
+    // stored hashes with one read, outside any write transaction, so dashboard
+    // reads are never queued behind rewrites that would not change anything.
+    const ingestTraces = Effect.fn('UsageStore.ingestTraces')(function* (batch: SyncBatch) {
+      const pricingSnapshot = batch.pricingUpdatedAt?.trim() ?? '';
+      const stored = batch.events.length
+        ? yield* sql
+            .unsafe<{ device_id: string; id: string; payload_hash: string }>(
+              'SELECT device_id, id, payload_hash FROM usage_events WHERE id IN (SELECT value FROM json_each(?))',
+              [JSON.stringify(batch.events.map((event) => event.id))],
+            )
+            .pipe(Effect.mapError(storageFailure))
+        : [];
+      const hashes = new Map(stored.map((row) => [row.id, row]));
+      const events = batch.events.filter((event) => {
+        const row = hashes.get(event.id);
+        return (
+          row?.device_id !== batch.device.id ||
+          row.payload_hash !== storedPayload(event, undefined, batch.device.id, pricingSnapshot).payloadHash
+        );
+      });
+      if (!events.length && !batch.deletedIds?.length)
+        return { accepted: 0, updated: 0, deleted: 0, receivedAt: new Date().toISOString() };
+      return yield* writeUsageBatch(batch.device.id, { ...batch, events }, { traces: true });
+    });
+
+    // Trace records that no longer qualify (another harness, failed) leave
+    // whichever device holds them. Unknown IDs are a no-op and keep caches.
+    const withdrawTraces = Effect.fn('UsageStore.withdrawTraces')(function* (ids: readonly string[]) {
+      const traceIds = ids.filter((id) => id.startsWith('trace:'));
+      const changedDays = yield* commitWrite(
+        Effect.gen(function* () {
+          const days = new Set<string>();
+          for (let offset = 0; offset < traceIds.length; offset += 256) {
+            const rows = yield* sql.unsafe<{ timestamp: string }>(
+              'DELETE FROM usage_events WHERE id IN (SELECT value FROM json_each(?)) RETURNING timestamp',
+              [JSON.stringify(traceIds.slice(offset, offset + 256))],
+            );
+            for (const { timestamp } of rows) days.add(utcDay(timestamp));
+          }
+          return days;
+        }),
+        (days) => {
+          if (days.size) publish(days, true);
+        },
+      ).pipe(Effect.catchTag('SqlError', () => Effect.fail(storageFailure())));
+      return changedDays.size;
+    });
+
+    // Folder-to-repository pairs collectors resolved with Git, per machine.
+    // The trace source learns project identity from them (traces/projects.ts).
+    const getProjectPaths = Effect.fn('UsageStore.getProjectPaths')(function* () {
+      const rows = yield* sql<{ machine: string; path: string | null; repository: string | null }>`
+        SELECT d.name AS machine, p.path, p.repository FROM (
+          SELECT DISTINCT device_id, json_extract(payload, '$.project') AS path, json_extract(payload, '$.repository') AS repository
+          FROM usage_events WHERE id NOT LIKE 'trace:%') p
+        JOIN devices d ON d.id = p.device_id`.pipe(Effect.mapError(storageFailure));
+      return rows.flatMap(({ machine, path, repository }) => (path ? [{ machine, path, repository }] : []));
     });
 
     const getDimensions = Effect.fn('UsageStore.getDimensions')(function* (excludeDeviceId?: string) {
@@ -807,11 +944,16 @@ export class UsageStore extends Context.Service<UsageStore>()('token-tracker/Usa
       syncUsage: (deviceId: string, token: string, batch: SyncBatch) => writeUsageBatch(deviceId, batch, { token }),
       importUsage: (pairingSecret: string, batch: SyncBatch) =>
         writeUsageBatch(batch.device.id, batch, { pairingSecret }),
+      ingestTraces,
+      withdrawTraces,
+      getProjectPaths,
       getUsage,
       getSources,
       getDimensions,
       getPricingCandidates,
-      getRevision: () => revision,
+      getRevision: (start?: string, end?: string) => windowRevision(start, end),
+      // Advances on every write that can change any window (all but traces).
+      getSharedRevision: () => floor,
       getMetadataRevision: () => metadataRevision,
       authorizeAdmin,
       authorizeDevice,

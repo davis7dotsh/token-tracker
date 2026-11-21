@@ -229,3 +229,92 @@ test('hubs created before collector versions gain the column and keep their devi
     await runtime.dispose();
   }
 });
+
+test('trace records replay without changes, move between machines, withdraw, and own usage from the cutover', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'token-tracker-rpc-traces-'));
+  directories.push(directory);
+  const cutoff = '2026-10-03T00:00:00.000Z';
+  // Pre-seed a collector row at/after the cutover before enabling trace mode:
+  // it stays on disk for rollback, but trace-mode reads must not double-count it.
+  const preRuntime = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }));
+  try {
+    const { token: preToken } = await preRuntime.runPromise(
+      UsageStore.use((store) => store.registerDevice(pairingSecret, device)),
+    );
+    await preRuntime.runPromise(
+      UsageStore.use((store) =>
+        store.syncUsage(device.id, preToken, { device, events: [{ ...event, id: 'pre-existing-after-cutoff' }] }),
+      ),
+    );
+  } finally {
+    await preRuntime.dispose();
+  }
+  const runtime = ManagedRuntime.make(usageStoreLayer({ dataDirectory: directory, pairingSecret }, cutoff));
+  const run = <A, E>(program: (store: UsageStore['Service']) => Effect.Effect<A, E>) =>
+    runtime.runPromise(UsageStore.use(program));
+  const trace = { ...event, id: 'trace:usage-1', sessionTitle: 'Fix the build' };
+  const siva = { id: 'trace:siva', name: 'siva', platform: 'linux' };
+  try {
+    expect(await run((store) => store.ingestTraces({ device: siva, events: [trace] }))).toMatchObject({ accepted: 1 });
+    const revision = await run((store) => Effect.sync(store.getRevision));
+    // A re-pull of unchanged rows writes nothing and keeps every cache.
+    expect(await run((store) => store.ingestTraces({ device: siva, events: [trace] }))).toMatchObject({
+      accepted: 0,
+      updated: 0,
+      deleted: 0,
+    });
+    expect(await run((store) => Effect.sync(store.getRevision))).toBe(revision);
+    // A trace write stales only windows containing its days; collector writes stale all.
+    const week = ['2026-10-03T00:00:00.000Z', '2026-10-10T00:00:00.000Z'] as const;
+    const windowRevision = () => run((store) => Effect.sync(() => store.getRevision(...week)));
+    const before = await windowRevision();
+    await run((store) =>
+      store.ingestTraces({
+        device: siva,
+        events: [{ ...trace, id: 'trace:old', timestamp: '2026-09-01T00:00:00.000Z' }],
+      }),
+    );
+    expect(await windowRevision()).toBe(before);
+    expect(await run((store) => Effect.sync(() => store.getRevision()))).toBeGreaterThan(revision);
+    expect(await run((store) => store.withdrawTraces(['trace:old']))).toBe(1);
+    // Late metadata without a title keeps the stored one.
+    const { sessionTitle: _title, ...untitled } = trace;
+    expect(
+      await run((store) => store.ingestTraces({ device: siva, events: [{ ...untitled, project: '/w' }] })),
+    ).toMatchObject({
+      updated: 1,
+    });
+    // A corrected machine moves the record instead of counting it twice.
+    const europa = { id: 'trace:europa', name: 'europa', platform: 'linux' };
+    expect(await run((store) => store.ingestTraces({ device: europa, events: [trace] }))).toMatchObject({
+      accepted: 1,
+      deleted: 1,
+    });
+    const stored = (await run((store) => store.getUsage())).events;
+    expect(stored.map((item) => [item.deviceId, item.sessionTitle])).toEqual([['trace:europa', 'Fix the build']]);
+    expect(await run((store) => store.withdrawTraces(['trace:usage-1', 'request-1']))).toBe(1);
+    expect((await run((store) => store.getUsage())).events).toEqual([]);
+    // The trace source only writes trace records.
+    const exit = await runtime.runPromiseExit(
+      UsageStore.use((store) => store.ingestTraces({ device: siva, events: [event] })),
+    );
+    expect(exit._tag).toBe('Failure');
+    // Collector uploads still succeed, but usage from the cutover on is the traces'.
+    const { token } = await run((store) => store.registerDevice(pairingSecret, device));
+    await run((store) =>
+      store.syncUsage(device.id, token, {
+        device,
+        events: [
+          { ...event, timestamp: '2026-10-02T23:59:59.999Z' },
+          { ...event, id: 'late' },
+        ],
+      }),
+    );
+    expect((await run((store) => store.getUsage())).events.map((item) => item.id)).toEqual(['request-1']);
+    expect(await run((store) => Effect.sync(() => store.getRevision(...week)))).toBe(
+      await run((store) => Effect.sync(() => store.getSharedRevision())),
+    );
+  } finally {
+    await runtime.dispose();
+  }
+});

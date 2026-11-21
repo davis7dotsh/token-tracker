@@ -1,8 +1,11 @@
 import { json, redirect } from '@sveltejs/kit';
-import type { Handle } from '@sveltejs/kit/hooks';
+import type { Handle, ServerInit } from '@sveltejs/kit/hooks';
 import { compressPricingPage } from '#lib/server/rpc/compression';
-import { dashboardPasscode } from '#hub';
+import { dashboardPasscode, startHub } from '#hub';
 import { sessionCookie, validSession } from '#lib/server/auth';
+
+export const init: ServerInit = () =>
+  startHub().catch((error: unknown) => console.error('Could not start the token tracker hub:', error));
 
 export const handle: Handle = async ({ event, resolve }) => {
   const passcode = dashboardPasscode(event);

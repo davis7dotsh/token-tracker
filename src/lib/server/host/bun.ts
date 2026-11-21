@@ -10,6 +10,14 @@ export const handleHubRequest = async ({ request, locals }: RequestEvent) => {
   return handleRpcRequest(request, locals.passcodeEnabled && !locals.dashboardAuthenticated);
 };
 
+// Only a configured trace source starts the hub with the server; it pulls on a
+// timer. Otherwise the hub still starts on its first request, as above.
+export const startHub = async () => {
+  if (!process.env.TOKEN_TRACKER_TRACES_URL?.trim()) return;
+  const { startRpcServer } = await import('../rpc/server');
+  await startRpcServer();
+};
+
 // The Bun hub's GetPricingCatalog reads this same validated, revision-aware
 // file. Rendering the editor does not need a device identity or a usage DB.
 export const readPricingCatalog = async ({ request, locals }: RequestEvent) => {
