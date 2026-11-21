@@ -280,7 +280,8 @@
     if (force) {
       generation++;
       cache.clear();
-      // Bucket entries are bounded and keyed by view revision; unchanged deltas still need them.
+      // Drop unversioned fallback bucket entries on forced refresh; revisioned entries stay safe.
+      for (const k of bucketCache.keys()) if (k.startsWith(':') || k.startsWith('legacy:')) bucketCache.delete(k);
     }
     loading = true;
     error = '';

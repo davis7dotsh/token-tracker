@@ -101,7 +101,7 @@ const selectRankedItems = <T extends Pick<ChartSeries, 'name' | 'tokens' | 'cost
   const byTokens = [...items].sort((left, right) => right.tokens - left.tokens || left.name.localeCompare(right.name));
   if (group === 'providers' || group === 'harnesses' || byTokens.length <= viewRankedLimit) return byTokens;
   const byCost = [...items]
-    .sort((left, right) => right.costUSD - left.costUSD || left.name.localeCompare(right.name))
+    .sort((left, right) => roundCost(right.costUSD) - roundCost(left.costUSD) || left.name.localeCompare(right.name))
     .slice(0, viewRankedLimit);
   const kept = new Set(byTokens.slice(0, viewRankedLimit).map((item) => item.name));
   for (const item of byCost) kept.add(item.name);
@@ -273,7 +273,9 @@ export const projectBucketBreakdown = (
         .sort((left, right) => right.tokens - left.tokens || left.name.localeCompare(right.name))
         .slice(viewRankedLimit);
       const costTail = [...items]
-        .sort((left, right) => right.costUSD - left.costUSD || left.name.localeCompare(right.name))
+        .sort(
+          (left, right) => roundCost(right.costUSD) - roundCost(left.costUSD) || left.name.localeCompare(right.name),
+        )
         .slice(viewRankedLimit);
       otherT = groupedBuckets.map((bucket) =>
         tokenTail.reduce((sum, item) => sum + (bucket.rows[group].get(item.name)?.tokens ?? 0), 0),
@@ -307,6 +309,9 @@ export const projectBucketBreakdown = (
   };
 };
 
+export const legacyViewRevision = (page: Pick<DashboardPage, 'viewRevision' | 'generatedAt'>) =>
+  page.viewRevision || `legacy:${page.generatedAt}`;
+
 // Fallback adapter when a newer browser talks to an older hub that only exposes GetUsagePage.
 export const projectDashboardViewFromPage = (
   page: DashboardPage,
@@ -315,7 +320,7 @@ export const projectDashboardViewFromPage = (
 ): DashboardView => {
   const resolvedLabels = projectLabels(page.filters.projects);
   const base = projectViewBase(page);
-  const viewRevision = page.viewRevision ?? '';
+  const viewRevision = legacyViewRevision(page);
   const selectedBucket = bucket
     ? (projectBucketBreakdown(base.groupedBuckets, bucket, viewRevision, resolvedLabels) ?? undefined)
     : undefined;

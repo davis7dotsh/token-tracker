@@ -2,7 +2,12 @@ import type { Rpc, RpcGroup } from 'effect/rpc';
 import type { UsageRpc } from '../shared/rpc';
 import type { DashboardPage, DashboardView, SessionSort, UsageQuery } from '../shared/domain';
 import { sessionPageSize } from '../shared/dashboard-page';
-import { groupDashboardBuckets, projectBucketBreakdown, projectDashboardViewFromPage } from '../shared/dashboard-view';
+import {
+  groupDashboardBuckets,
+  legacyViewRevision,
+  projectBucketBreakdown,
+  projectDashboardViewFromPage,
+} from '../shared/dashboard-view';
 import { projectLabels } from '../shared/project-label';
 import type { PricingRule } from '../shared/pricing';
 import {
@@ -169,7 +174,7 @@ export const makeDashboardClient = (
     projectBucketBreakdown(
       groupDashboardBuckets(legacy),
       bucket,
-      legacy.viewRevision ?? '',
+      legacyViewRevision(legacy),
       projectLabels(legacy.filters.projects),
     );
 
