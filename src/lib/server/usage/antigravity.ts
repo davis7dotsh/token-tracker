@@ -1,5 +1,15 @@
 import { Database } from 'bun:sqlite';
-import { closeSync, copyFileSync, existsSync, mkdtempSync, openSync, readSync, rmSync, statSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -217,31 +227,38 @@ const optionalStatTag = (file: string) => {
   }
 };
 
-// Opening a cleanly closed WAL-mode DB read-only causes SQLite to create
-// -wal/-shm sidecars that a read-only handle cannot clean up on close.
-// When WAL mode is set and no -shm exists, copy via kernel copyFileSync into a
-// private temp dir so source directories are never mutated and no raw DB bytes
-// enter JS memory. Active writers (where -shm already exists) are read directly.
+// Opening a cleanly closed WAL-mode DB read-only either creates -wal/-shm
+// sidecars that a read-only handle cannot clean up on close (Linux) or fails
+// outright with SQLITE_CANTOPEN when -shm is absent (macOS). Copy into a
+// private temp dir and open the disposable snapshot readwrite with query_only
+// enabled so SQLite can initialize -shm and read any copied -wal safely without
+// touching the source directory. Active writers (-shm present) are read directly
+// with a snapshot fallback if -shm disappears before open.
 const withReadonlyDatabase = <T>(file: string, fn: (database: Database) => T): T => {
-  const needsSnapshot = isWalDatabase(file) && !existsSync(`${file}-shm`);
-  let tempDir: string | undefined;
-  let database: Database | undefined;
-  try {
-    let target = file;
-    if (needsSnapshot) {
-      tempDir = mkdtempSync(join(tmpdir(), 'token-tracker-ag-snap-'));
-      target = join(tempDir, 'snapshot.db');
+  const wal = isWalDatabase(file);
+  const openDirect = () => {
+    const database = new Database(file, { readonly: true, create: false });
+    database.exec('PRAGMA busy_timeout = 100');
+    return database;
+  };
+  const openSnapshot = () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'token-tracker-ag-snap-'));
+    try {
+      const target = join(tempDir, 'snapshot.db');
       const walFile = `${file}-wal`;
       let copied = false;
       for (let attempt = 0; attempt < 2; attempt++) {
         const beforeDb = optionalStatTag(file);
         const beforeWal = optionalStatTag(walFile);
         copyFileSync(file, target);
+        chmodSync(target, 0o600);
         if (beforeWal !== 'missing') {
           try {
             const walInfo = statSync(walFile);
-            if (walInfo.size > 0) copyFileSync(walFile, `${target}-wal`);
-            else rmSync(`${target}-wal`, { force: true });
+            if (walInfo.size > 0) {
+              copyFileSync(walFile, `${target}-wal`);
+              chmodSync(`${target}-wal`, 0o600);
+            } else rmSync(`${target}-wal`, { force: true });
           } catch (error) {
             if (!missingErrno(error)) throw error;
             rmSync(`${target}-wal`, { force: true });
@@ -257,9 +274,34 @@ const withReadonlyDatabase = <T>(file: string, fn: (database: Database) => T): T
         }
       }
       if (!copied) throw new Error('Antigravity database changed while creating a read snapshot.');
+      const database = new Database(target, { readwrite: true, create: false });
+      try {
+        database.exec('PRAGMA busy_timeout = 100');
+        database.exec('PRAGMA query_only = ON');
+        return { database, tempDir };
+      } catch (error) {
+        database.close();
+        throw error;
+      }
+    } catch (error) {
+      rmSync(tempDir, { recursive: true, force: true });
+      throw error;
     }
-    database = new Database(target, { readonly: true, create: false });
-    database.exec('PRAGMA busy_timeout = 100');
+  };
+
+  let tempDir: string | undefined;
+  let database: Database | undefined;
+  try {
+    if (wal && !existsSync(`${file}-shm`)) {
+      ({ database, tempDir } = openSnapshot());
+    } else {
+      try {
+        database = openDirect();
+      } catch (error) {
+        if (!wal) throw error;
+        ({ database, tempDir } = openSnapshot());
+      }
+    }
     return fn(database);
   } finally {
     database?.close();
