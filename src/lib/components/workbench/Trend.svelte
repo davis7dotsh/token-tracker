@@ -53,7 +53,7 @@
   const suffixes = $derived(group === 'devices' ? deviceSuffixes(data.devices, label) : undefined);
   const neutral = 'var(--wb-muted)';
   const top = $derived(
-    ranked.slice(0, 6).map(({ name }) => ({
+    ranked.slice(0, 10).map(({ name }) => ({
       name,
       text: label(group, name) + (suffixes?.has(name) ? ` · ${suffixes.get(name)}` : ''),
       color: colors.get(name) ?? neutral,
