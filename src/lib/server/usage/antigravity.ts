@@ -133,23 +133,42 @@ const responseAliases = (usage: AntigravityModelUsage) => {
 
 const responseIdentity = (usage: AntigravityModelUsage) => responseAliases(usage)[0] ?? '';
 
-// Prefer the matched step's durable native identity when unambiguous: Antigravity
-// only prunes gen_metadata, so step metadata stays identical across both
-// metadata arrival and generator pruning. When multiple distinct responseIds share
-// a messageId, keep each generator's distinct responseId separate.
+// Resolve a call's canonical durable native identity across steps and generators:
+// 1. Prefer a durable step's responseId when present so generators matching a
+//    messageId-only step and a responseId-only step reconcile to the same ID.
+// 2. Otherwise prefer an unambiguous durable step alias (e.g. step messageId) so
+//    identity stays stable across both generator arrival and generator pruning.
+// 3. Fall back to an explicit/promoted responseId, keeping distinct responseIds
+//    separate when multiple calls share a messageId.
 const canonicalResponseIdentity = (
   primary: AntigravityModelUsage,
   compatibleStep?: AntigravityModelUsage | null,
   ambiguousAliases?: ReadonlySet<string>,
   uniqueResponseIdByAlias?: ReadonlyMap<string, string>,
+  stepResponseIds?: ReadonlySet<string>,
+  stepsByAlias?: ReadonlyMap<string, unknown>,
 ) => {
+  const aliases = responseAliases(primary);
+  if (compatibleStep) {
+    for (const alias of responseAliases(compatibleStep)) {
+      if (!aliases.includes(alias)) aliases.push(alias);
+    }
+  }
+  const explicitResponseId = primary.responseId || compatibleStep?.responseId || '';
+  const promotedResponseId =
+    explicitResponseId ||
+    aliases.map((alias) => uniqueResponseIdByAlias?.get(alias)).find((id): id is string => Boolean(id)) ||
+    '';
+  if (promotedResponseId && stepResponseIds?.has(promotedResponseId)) return promotedResponseId;
+
   const stepId = compatibleStep ? responseIdentity(compatibleStep) : '';
   if (stepId && !(primary.responseId && ambiguousAliases?.has(stepId))) return stepId;
-  if (primary.responseId) return primary.responseId;
-  for (const alias of responseAliases(primary)) {
-    const promoted = uniqueResponseIdByAlias?.get(alias);
-    if (promoted) return promoted;
+  for (const alias of aliases) {
+    if (alias === primary.responseId) continue;
+    if (stepsByAlias?.has(alias) && !(primary.responseId && ambiguousAliases?.has(alias))) return alias;
   }
+
+  if (promotedResponseId) return promotedResponseId;
   return responseIdentity(primary);
 };
 
@@ -573,9 +592,9 @@ export const parseAntigravityDatabase = (
 
       // 4. Reconcile gen_metadata and steps.metadata by canonical native call identity.
       const responseIdsByAlias = new Map<string, Set<string>>();
-      for (const { gen } of generators) {
-        const usage = gen.usage;
-        if (!usage?.responseId) continue;
+      const stepResponseIds = new Set<string>();
+      const registerResponseAliases = (usage: AntigravityModelUsage | null | undefined) => {
+        if (!usage?.responseId) return;
         for (const alias of responseAliases(usage)) {
           if (alias === usage.responseId) continue;
           let set = responseIdsByAlias.get(alias);
@@ -585,13 +604,43 @@ export const parseAntigravityDatabase = (
           }
           set.add(usage.responseId);
         }
+      };
+      for (const step of steps.values()) {
+        if (step.modelUsage?.responseId) stepResponseIds.add(step.modelUsage.responseId);
+        registerResponseAliases(step.modelUsage);
       }
+      for (const { gen } of generators) registerResponseAliases(gen.usage);
       const ambiguousAliases = new Set<string>();
       const uniqueResponseIdByAlias = new Map<string, string>();
       for (const [alias, ids] of responseIdsByAlias) {
         if (ids.size > 1) ambiguousAliases.add(alias);
         else if (ids.size === 1) uniqueResponseIdByAlias.set(alias, [...ids][0]);
       }
+
+      const eventsById = new Map<string, ParsedFile['events'][number]>();
+      const recordEvent = (entry: ParsedFile['events'][number]) => {
+        const existing = eventsById.get(entry.event.id);
+        if (!existing) {
+          eventsById.set(entry.event.id, entry);
+          return;
+        }
+        const incomingTotal =
+          entry.event.inputTokens +
+          entry.event.outputTokens +
+          entry.event.cacheReadTokens +
+          entry.event.cacheWriteTokens;
+        const existingTotal =
+          existing.event.inputTokens +
+          existing.event.outputTokens +
+          existing.event.cacheReadTokens +
+          existing.event.cacheWriteTokens;
+        const preferIncoming =
+          incomingTotal > existingTotal ||
+          (incomingTotal === existingTotal &&
+            ((existing.event.model === 'unknown' && entry.event.model !== 'unknown') ||
+              (!existing.tier && Boolean(entry.tier))));
+        if (preferIncoming) eventsById.set(entry.event.id, entry);
+      };
 
       const coveredUsagesByAlias = new Map<string, AntigravityModelUsage[]>();
       const coveredSteps = new Set<number>();
@@ -686,6 +735,8 @@ export const parseAntigravityDatabase = (
           compatibleStepUsage,
           ambiguousAliases,
           uniqueResponseIdByAlias,
+          stepResponseIds,
+          stepsByAlias,
         );
         let stamp = stepTimestamp(matchedStep, '');
         if (!stamp) {
@@ -738,7 +789,7 @@ export const parseAntigravityDatabase = (
         }
         if (created.kind === 'empty') continue;
 
-        parsed.events.push(created.entry);
+        recordEvent(created.entry);
         // Withdraw superseded fallback IDs (alternate aliases and step/gen fallbacks)
         // when reconciling a call under its canonical identity so prior syncs do not
         // double-bill after metadata arrives or changes.
@@ -794,7 +845,14 @@ export const parseAntigravityDatabase = (
           modelByEnum.get(modelEnum) ||
           (step.executionId ? executorByExecutionId.get(step.executionId) : undefined) ||
           '';
-        const responseKey = responseIdentity(usage);
+        const responseKey = canonicalResponseIdentity(
+          usage,
+          null,
+          ambiguousAliases,
+          uniqueResponseIdByAlias,
+          stepResponseIds,
+          stepsByAlias,
+        );
         const eventId = responseKey
           ? `antigravity:${encodeURIComponent(conversationId)}:response:${encodeURIComponent(responseKey)}`
           : `antigravity:${encodeURIComponent(conversationId)}:step:${stepIndex}`;
@@ -815,7 +873,7 @@ export const parseAntigravityDatabase = (
           continue;
         }
         if (created.kind === 'empty') continue;
-        parsed.events.push(created.entry);
+        recordEvent(created.entry);
         if (responseKey) {
           for (const alias of aliases) {
             if (alias !== responseKey)
@@ -829,6 +887,8 @@ export const parseAntigravityDatabase = (
         coveredSteps.add(stepIndex);
       }
 
+      parsed.events = [...eventsById.values()];
+      for (const id of eventsById.keys()) retractedIds.delete(id);
       parsed.retractedIds = [...retractedIds];
       database.exec('COMMIT');
       return { parsed, incomplete, repository };

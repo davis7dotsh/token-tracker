@@ -1033,5 +1033,51 @@ describe('Antigravity accounting', () => {
     expect(
       multiDirect.parsed.events.find((e) => e.event.id === 'antigravity:multi-resp:response:resp-second')?.tier,
     ).toBe('');
+
+    // Reconcile generator rows across split steps: one generator with messageId=M matching
+    // a messageId-only step and another with messageId=M + responseId=R matching a responseId-only
+    // step must merge into a single response:R event and retract M.
+    const splitFile = join(root, 'conversations', 'split-steps.db');
+    const splitDb = initConversationDb(splitFile, 'split-steps');
+    splitDb.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      1,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T04:00:00.000Z',
+        modelUsage: { inputTokens: 90, outputTokens: 10, messageId: 'msg-split' },
+      }),
+      null,
+    );
+    splitDb.query('INSERT INTO steps VALUES (?, 15, 3, ?, ?)').run(
+      2,
+      encodeStepMetadata({
+        completedAt: '2026-11-20T04:00:01.000Z',
+        modelUsage: { inputTokens: 90, outputTokens: 10, responseId: 'resp-split' },
+      }),
+      null,
+    );
+    splitDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      0,
+      encodeGenMetadata({
+        stepIndices: [1],
+        usage: { inputTokens: 90, outputTokens: 10, messageId: 'msg-split' },
+      }),
+    );
+    splitDb.query('INSERT INTO gen_metadata VALUES (?, ?, 0)').run(
+      1,
+      encodeGenMetadata({
+        responseModel: 'gemini-4-neon',
+        stepIndices: [2],
+        usage: { inputTokens: 90, outputTokens: 10, messageId: 'msg-split', responseId: 'resp-split' },
+      }),
+    );
+    splitDb.close();
+
+    const splitDirect = parseAntigravityDatabase(splitFile, 'split-steps');
+    expect(splitDirect.parsed.events.map((e) => e.event.id)).toEqual(['antigravity:split-steps:response:resp-split']);
+    expect(splitDirect.parsed.events[0]?.event.model).toBe('gemini-4-neon');
+    expect(tokenTotal(splitDirect.parsed.events[0]!.event)).toBe(100);
+    expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:response:msg-split');
+    expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:step:1');
+    expect(splitDirect.parsed.retractedIds).toContain('antigravity:split-steps:step:2');
   });
 });
