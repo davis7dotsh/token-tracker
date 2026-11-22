@@ -40,14 +40,14 @@ const namespaces: Record<string, string> = {
   fireworks_ai: 'fireworks',
 };
 const families = [
-  ['openai', ['gpt-', 'chatgpt-', 'o1-', 'o3-', 'o4-', 'codex-mini-']],
+  ['openai', ['gpt-', 'chatgpt-', 'o1-', 'o3-', 'o4-', 'codex-']],
   ['anthropic', ['claude-']],
   ['google', ['gemini-', 'gemma-']],
   ['xai', ['grok-']],
   ['deepseek', ['deepseek-']],
   ['alibaba', ['qwen']],
   ['mistral', ['mistral-', 'mixtral-', 'codestral-', 'magistral-', 'ministral-', 'devstral-']],
-  ['meta', ['llama-', 'llama2-', 'llama3-', 'llama4-', 'muse-']],
+  ['meta', ['llama-', 'llama2-', 'llama3-', 'llama4-', 'muse-', 'muse ']],
   ['moonshot', ['kimi-', 'moonshot-']],
   ['zai', ['glm-']],
   ['cohere', ['command-r', 'command-a']],

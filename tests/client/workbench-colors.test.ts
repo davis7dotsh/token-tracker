@@ -46,15 +46,18 @@ test('models inherit their provider color family and stay distinct within a prov
     { name: 'gpt-5.4' },
     { name: 'claude-fable-5' },
     { name: 'grok-4' },
-    { name: 'muse-1' },
+    { name: 'muse wonder full 1.0' },
     { name: 'gemini-3-pro' },
+    { name: 'codex-auto-review' },
   ]);
 
   expect(initial.get('claude-opus-4-6')).toBe(categoryColor('anthropic'));
   expect(initial.get('gpt-5.4')).toBe(categoryColor('openai'));
   expect(initial.get('grok-4')).toBe(categoryColor('xai'));
-  expect(initial.get('muse-1')).toBe(categoryColor('meta'));
+  expect(initial.get('muse wonder full 1.0')).toBe(categoryColor('meta'));
   expect(initial.get('gemini-3-pro')).toBe(categoryColor('google'));
+  expect(initial.get('codex-auto-review')).not.toBe(initial.get('claude-opus-4-6'));
+  expect(initial.get('codex-auto-review')).not.toBe(initial.get('gpt-5.4'));
   expect(initial.get('claude-fable-5')).not.toBe(initial.get('claude-opus-4-6'));
 
   // Extending with another Claude model preserves existing colors and picks a new shade.

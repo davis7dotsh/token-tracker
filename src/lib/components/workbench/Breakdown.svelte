@@ -274,28 +274,17 @@
             onclick={() => openAll(p.g)}>All {p.available} <Icon name="arrow" size={12} /></button
           >
         {:else}
-          <div class="split-track" role="group" aria-label={`${titles[p.g]} share`}>
-            {#each p.rows as r (r.name)}{#if r[metric] > 0}<button
-                  type="button"
-                  class="slice"
-                  style:--ink={r.color}
-                  style:width={`${measure(r[metric])}%`}
-                  title={`${r.text} · ${percent(r[metric])}`}
-                  aria-label={`${r.text}, ${valueOf(r, metric)}, ${percent(r[metric])}`}
-                  aria-pressed={filters[p.g]?.includes(r.name) ?? false}
-                  onclick={() => toggle(p.g, r.name)}
-                ></button>{/if}{/each}
-          </div>
-          <div class="split-key">
+          <div class="split-bars" role="group" aria-label={`${titles[p.g]} share`}>
             {#each p.rows as r (r.name)}<button
                 type="button"
+                class="bar-row"
                 style:--ink={r.color}
-                title={r.text}
+                title={`${r.text} · ${valueOf(r, metric)} (${percent(r[metric])})`}
                 aria-pressed={filters[p.g]?.includes(r.name) ?? false}
                 onclick={() => toggle(p.g, r.name)}
-                ><i class="swatch"></i>{@render nameOf(r)}<span class="value">{valueOf(r, metric)}</span><span
-                  class="pct">{percent(r[metric])}</span
-                ></button
+                ><i class="swatch" aria-hidden="true"></i>{@render nameOf(r)}<span class="bar-track" aria-hidden="true"
+                  >{#if r[metric] > 0}<i class="bar-fill" style:width={`${measure(r[metric])}%`}></i>{/if}</span
+                ><span class="value">{valueOf(r, metric)}</span><span class="pct">{percent(r[metric])}</span></button
               >{:else}<span class="empty">{p.hasHistory ? 'No usage' : 'History unavailable'}</span>{/each}
           </div>
         {/if}
@@ -316,8 +305,7 @@
   .nav,
   .tabs,
   .name,
-  .all,
-  .split-key button {
+  .all {
     display: flex;
     align-items: center;
   }
@@ -467,16 +455,16 @@
     height: 100%;
   }
   .row[aria-pressed='true'],
-  .split-key [aria-pressed='true'] {
+  .bar-row[aria-pressed='true'] {
     background: var(--wb-soft);
     color: var(--wb-accent);
   }
   .row[aria-pressed='true'] .name,
-  .split-key [aria-pressed='true'] .name {
+  .bar-row[aria-pressed='true'] .name {
     font-weight: 650;
   }
   button.row:hover,
-  .split-key button:hover {
+  .bar-row:hover {
     background: var(--wb-soft);
   }
   .all {
@@ -491,63 +479,43 @@
     font-size: 12px;
     color: var(--wb-muted);
   }
-  .split-track {
-    display: flex;
-    height: 23px;
-    align-items: center;
-    position: relative;
-  }
-  .split-track::before {
-    content: '';
-    position: absolute;
-    inset: 5px 0;
-    background: var(--wb-soft);
-    border-radius: 2px;
-  }
-  .slice {
-    transition: width 0.45s cubic-bezier(0.33, 1, 0.68, 1);
-    height: 100%;
-    position: relative;
-  }
-  .slice::before {
-    content: '';
-    position: absolute;
-    inset: 5px 0;
-    background: var(--ink);
-    box-shadow: inset -1px 0 var(--wb-bg);
-  }
-  .slice:first-child::before {
-    border-radius: 2px 0 0 2px;
-  }
-  .slice:last-child::before {
-    border-radius: 0 2px 2px 0;
-  }
-  .slice:hover::before,
-  .slice[aria-pressed='true']::before {
-    outline: 1px solid var(--wb-ink);
-    outline-offset: -1px;
-  }
-  .split-key {
-    display: flex;
-    flex-wrap: wrap;
-    align-content: flex-start;
-    gap: 0 15px;
-    height: 84px;
-    overflow: auto;
+  .split-bars {
+    height: calc(6 * var(--slot));
+    overflow-y: auto;
     scrollbar-width: thin;
   }
-  .split-key button {
-    gap: 5px;
-    max-width: 100%;
-    min-width: 0;
-    height: 28px;
-    white-space: nowrap;
+  .bar-row {
+    display: grid;
+    grid-template-columns: 7px minmax(0, 12.5ch) minmax(48px, 1fr) 8.4ch 3.7ch;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    height: var(--slot);
+    text-align: left;
     font-size: 12px;
+    white-space: nowrap;
+  }
+  .bar-track {
+    height: 8px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--wb-ink) 7%, transparent);
+    overflow: hidden;
+  }
+  .bar-fill {
+    display: block;
+    height: 100%;
+    min-width: 3px;
+    border-radius: 2px;
+    background: var(--ink);
+    transition: width 0.45s cubic-bezier(0.33, 1, 0.68, 1);
   }
   @container breakdown (560px <= width < 900px) {
     .layout {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       grid-template-areas: 'models projects' 'devices providers' 'devices harnesses';
+    }
+    .split-bars {
+      height: calc(5 * var(--slot));
     }
   }
   @container breakdown (max-width: 899px) {
@@ -609,23 +577,12 @@
     h3 {
       display: none;
     }
-    .split-track {
-      margin-block: 5px;
-    }
-    .split-key {
-      display: block;
+    .split-bars {
       height: calc(11 * var(--slot));
     }
-    .split-key button {
-      width: 100%;
-      height: var(--slot);
-      gap: 8px;
-    }
-    .split-key .name {
-      flex: 1;
-    }
-    .split-key .pct {
-      width: 4ch;
+    .bar-row {
+      grid-template-columns: 7px minmax(0, 10.5ch) minmax(40px, 1fr) 8ch 3.7ch;
+      gap: 6px;
     }
   }
 </style>
