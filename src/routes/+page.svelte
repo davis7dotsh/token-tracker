@@ -186,7 +186,7 @@
     }
   }
   function extendColors(breakdown: DashboardView['breakdown']) {
-    chartColors = new Map(groups.map((g) => [g, assignChartColors(breakdown[g].rows, chartColors.get(g))]));
+    chartColors = new Map(groups.map((g) => [g, assignChartColors(g, breakdown[g].rows, chartColors.get(g))]));
   }
   async function ensureFilters() {
     if (!client || !data) return;

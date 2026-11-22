@@ -1,4 +1,5 @@
 import { provider } from '../shared/provider';
+import { categoryColor } from './workbench-colors';
 
 export type VisualGrouping = 'harnesses' | 'providers' | 'models' | 'devices' | 'projects';
 
@@ -46,37 +47,6 @@ export function modelLabel(id: string) {
   return id.replace(/^cursor-grok-(?=\d)/, 'Grok ');
 }
 
-const categoryColors: Record<string, string> = {
-  claude: 'var(--series-claude)',
-  anthropic: 'var(--series-claude)',
-  codex: 'var(--series-codex)',
-  openai: 'var(--series-codex)',
-  pi: 'var(--series-pi)',
-  grok: 'var(--series-grok)',
-  muse: 'var(--series-muse)',
-  cursor: 'var(--ink)',
-  antigravity: 'var(--series-antigravity)',
-  xai: 'var(--series-grok)',
-  google: 'var(--series-gold)',
-  deepseek: 'var(--series-indigo)',
-  alibaba: 'var(--series-violet)',
-  mistral: 'var(--series-coral)',
-  meta: 'var(--series-indigo)',
-  moonshot: 'var(--series-violet)',
-  zai: 'var(--series-teal)',
-  cohere: 'var(--series-teal)',
-  amazon: 'var(--series-gold)',
-  azure: 'var(--series-codex)',
-  openrouter: 'var(--series-violet)',
-  together: 'var(--series-coral)',
-  groq: 'var(--series-coral)',
-  perplexity: 'var(--series-teal)',
-  nvidia: 'var(--series-grok)',
-  huggingface: 'var(--series-gold)',
-  fireworks: 'var(--series-pi)',
-  unknown: 'var(--series-neutral)',
-};
-
 const distinctColors = [
   'var(--series-codex)',
   'var(--series-teal)',
@@ -100,11 +70,10 @@ const stableHash = (name: string) => {
 export const seriesColor = (name: string, grouping: VisualGrouping) => {
   if (['other', '__other__'].includes(name.toLowerCase())) return 'var(--series-neutral)';
   if (grouping === 'models') {
-    const base = categoryColors[provider(name)] ?? 'var(--series-neutral)';
+    const base = categoryColor(provider(name)) ?? 'var(--series-neutral)';
     const shade = (stableHash(name) % 7) * 7;
     return shade ? `color-mix(in oklab, ${base} ${100 - shade}%, var(--series-shade))` : base;
   }
-  if (grouping === 'harnesses' || grouping === 'providers')
-    return categoryColors[name.toLowerCase()] ?? 'var(--series-neutral)';
+  if (grouping === 'harnesses' || grouping === 'providers') return categoryColor(name) ?? 'var(--series-neutral)';
   return distinctColors[stableHash(name) % distinctColors.length];
 };
